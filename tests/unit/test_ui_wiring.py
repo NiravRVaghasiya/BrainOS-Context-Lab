@@ -38,17 +38,21 @@ def build_demo() -> tuple[Any, Any]:
 def test_create_app_builds_blocks_and_wires_events() -> None:
     gr, demo = build_demo()
     assert isinstance(demo, gr.Blocks)
-    # load, send click, send submit, validate, list models, clear, end, mode
-    assert len(demo.fns) >= 8
+    # load, send click, send submit, validate, list models, clear,
+    # clear memory, export, end, mode change
+    assert len(demo.fns) >= 10
 
 
 def test_create_app_declares_planned_panels() -> None:
     _gr, demo = build_demo()
-    labels = {
-        getattr(block, "label", None)
-        for block in demo.blocks.values()
-        if getattr(block, "label", None)
-    }
+    # Components carry their visible text in `label` (inputs) or `value`
+    # (buttons); collect both.
+    labels = set()
+    for block in demo.blocks.values():
+        for attribute in ("label", "value"):
+            text = getattr(block, attribute, None)
+            if isinstance(text, str) and text:
+                labels.add(text)
     for expected in (
         # Sidebar (plan §8)
         "Provider",
@@ -69,6 +73,10 @@ def test_create_app_declares_planned_panels() -> None:
         "Cognitive trace",
         "Dropped memories",
         "Conflict resolutions",
+        # Phase 5 data controls
+        "Clear memory",
+        "Export session",
+        "Session export",
     ):
         assert expected in labels, f"missing panel: {expected}"
 

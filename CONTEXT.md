@@ -24,18 +24,65 @@ layer that helps select historical context.
 | Phase 1 — Provider abstraction | Complete | OpenAI and OpenAI-compatible adapters implement listing, credential validation, generation, normalization, a factory, and secret-safe errors. |
 | Phase 2 — BrainOS adapter | Complete | Explicit mapping of `observe(source/event_type)`, `recall(top_k)`, decision strings/`assess()`, `why()`, and structured `trace()`. Session-isolated factory, conservative memory policy, and `ConversationService` wiring. **Memory-policy classifier repaired during Phase 3** (see below). |
 | Phase 3 — Context construction engine | Complete | Full retrieval pipeline (dedupe → relevance → conflict → recency → budget), enforced token budgets with documented eviction order, 26-field accounting, runtime signal consumption, injection hardening, and a credential-leak repair. Validated live at 60 turns. |
-| **Phase 4 — Chat web UI** | **Complete in this turn** | `ChatController` + rewritten Gradio UI: BYOK sidebar, chat, Memory / Context / Cognitive Trace tabs, session lifecycle, turn-limit guard. Two browser-boundary repairs (error redaction, provider seam). Validated live over HTTP against the pinned runtime. |
-| Phase 5 — Conversation persistence | Pending | `ConversationStore` / `MemoryStore` / `EvaluationStore` protocols already exist in `src/storage/`; the SQLite MVP implementation is next (see "Next safe step"). |
-| Phases 6–20 | Pending | Baselines, benchmark, evaluation, security hardening, deployment, and research release follow the plan. |
+| Phase 4 — Chat web UI | Complete | `ChatController` + rewritten Gradio UI: BYOK sidebar, chat, Memory / Context / Cognitive Trace tabs, session lifecycle, turn-limit guard. Two browser-boundary repairs (error redaction, provider seam). Validated live over HTTP against the pinned runtime. |
+| **Phase 5 — Conversation persistence** | **Complete in this turn** | SQLite backend behind finalized store protocols (thread-safe per-op connections, lazy schema, upsert mirrors); the service persists turns best-effort with session-key redaction at the write site; the controller owns Clear memory / Delete session / Export session; the backend is chosen at deployment wiring, so headless runs never touch disk. Validated live: real server + real SQLite + pinned runtime. |
+| Phase 6 — Baseline modes | Pending | Modes A–E behind `ContextSettings.mode` (already recorded per selection); the Phase 3 finding requires per-mode `recent_turn_budget`, and `evaluation/runner.py` is still a shell. |
+| Phases 7–20 | Pending | Benchmark, metrics, experiments, statistics, ablations, error analysis, security hardening, deployment, cost controls, reproducibility, evaluation pipeline, tests, MVP, release. |
 
 Detailed logs are available in
 [`docs/phase-0-research-baseline.md`](docs/phase-0-research-baseline.md),
 [`docs/phase-1-provider-abstraction.md`](docs/phase-1-provider-abstraction.md),
 [`docs/phase-2-brainos-adapter.md`](docs/phase-2-brainos-adapter.md),
-[`docs/phase-3-context-construction.md`](docs/phase-3-context-construction.md), and
-[`docs/phase-4-chat-ui.md`](docs/phase-4-chat-ui.md).
+[`docs/phase-3-context-construction.md`](docs/phase-3-context-construction.md),
+[`docs/phase-4-chat-ui.md`](docs/phase-4-chat-ui.md), and
+[`docs/phase-5-conversation-persistence.md`](docs/phase-5-conversation-persistence.md).
 
-## What was done in Phase 4 (this turn)
+## What was done in Phase 5 (this turn)
+
+### New / changed modules
+
+| File | Purpose |
+| --- | --- |
+| [`src/storage/sqlite.py`](src/storage/sqlite.py) (new) | `SqliteConversationStore` / `SqliteMemoryStore` / `SqliteEvaluationStore`: per-operation connections (Gradio-thread safe), lazy schema (`messages` seq-ordered + indexed, `memories` keyed `(session_id, memory_id)` with JSON payload, `evaluation_runs` session-indexed), recursive `strip_secret_fields`, `BRAINOS_LAB_DB` env path (default `data/brainos_lab.sqlite3`, Git-ignored). |
+| [`src/storage/conversations.py`](src/storage/conversations.py) | Protocols finalized: `list_conversations` + `delete_session` (conversation store), `save_memories` upsert (memory store, mirror semantics documented). |
+| [`src/app/service.py`](src/app/service.py) | Optional `conversation_store` / `memory_store`; `_persist_message` (redacts the exact session key at the write site) and `_persist_memories` (whole-set guarded upsert each turn); `clear_conversation()` deletes the old conversation's rows + memory mirror; every store call best-effort — failures log only the exception *type* server-side and never break a turn. |
+| [`src/app/controller.py`](src/app/controller.py) | Stores are controller-owned **protocol references** attached to the service at creation; `clear_memory()` (runtime + mirror dropped, transcript kept); `end_session()` = Delete session (all persisted rows removed before credentials are cleared, never materializing a store); `export_session()` / `export_session_file()` (sanitized JSON: ids, provider `safe_dict`, context settings, transcript, memories, last-turn accounting). |
+| [`src/app/ui.py`](src/app/ui.py) | *Clear memory* + *Export session* buttons and a `gr.File` download slot (10 wired events); `create_app()`'s default factory builds one server-wide SQLite store set — deployment wiring owns the backend choice; security notice updated. |
+| [`tests/fakes.py`](tests/fakes.py) | `InMemoryConversationStore`, `InMemoryMemoryStore`, `InMemoryEvaluationStore`, `RaisingStore` (every operation fails — resilience tests). |
+| New tests | 16 SQLite-store, 12 persistence-wiring, 4 storage-security, 1 live SQLite integration, extended wiring labels: **184 → 216**. |
+
+### Key design decisions
+
+- **Backend at the edge, protocols at the core.** The first draft had the
+  controller lazily materialize SQLite defaults; that would have made every
+  headless test write into the repository working tree and coupled the
+  controller to an infrastructure choice. Final layering: controller and
+  service know only the protocols (`None` = purely in-memory, Phase 4
+  behaviour unchanged); `create_app` picks SQLite.
+- **Mirror, not source.** The memory table exists for inspection/export; no
+  code path hydrates BrainOS memory from it, and `state.messages` remains the
+  render source. Storage is written after a turn, never read back mid-turn.
+- **Data-control semantics** (all four now exist, as `docs/security.md`
+  promised): *Clear conversation* = transcript + runtime + that conversation's
+  rows + mirror; *Clear memory* = runtime + mirror, transcript kept; *Export*
+  = sanitized read-only JSON; *End session* = credentials + every persisted
+  row of the session.
+- **Documented caveat for Phase 13:** SQLite `DELETE` frees pages without
+  physically scrubbing bytes; the tested contract is that no query can reach a
+  deleted session's rows. `VACUUM` / per-session files are hardening
+  candidates.
+
+### Live HTTP validation (running server + pinned BrainOS + real SQLite)
+
+Two turns persisted 2 transcript rows and 1 memory row classified
+`PROJECT_STATE` by the live runtime; a second session added a `TEMPORAL_EVENT`
+row. `/on_export` returned a downloadable JSON (transcript, memories, provider
+`safe_dict` without `api_key`, settings, last-turn accounting).
+`/on_clear_memory` kept the transcript and emptied the stored panel;
+`/on_end` deleted exactly the ended session's rows — a per-session `GROUP BY`
+proved another session's rows were untouched.
+
+## What was done in Phase 4
 
 ### New modules
 
@@ -307,6 +354,16 @@ threshold on it would be overfitting. Threshold calibration belongs to Phases
 - **New (Phase 4):** no traceback ever reaches the browser — missing BrainOS
   becomes an install hint, provider failures become redacted one-line statuses,
   and page load never constructs a runtime.
+- **New (Phase 5):** the active session key is redacted from message and
+  memory text **at the write site** before anything reaches a store; stores
+  additionally strip secret-named fields recursively from every metadata and
+  payload blob. Raw-database-byte tests prove a session that types its key
+  into chat cannot persist it.
+- **New (Phase 5):** all store reads and deletes filter by exact
+  `session_id` (+ `conversation_id`); *End session* deletes every persisted
+  row of the session (transcript, memory mirror, evaluation runs). A failing
+  storage backend never breaks a turn and is logged server-side by exception
+  type only — never content.
 - BrainOS explanations and traces drop secret-named fields and scrub
   credential-shaped strings. Trace mapping records counts, not retrieved memory
   text.
@@ -328,7 +385,7 @@ python3 -m venv .venv
 .venv/bin/pip install "brainos-cli @ git+https://github.com/NiravRVaghasiya/BrainOS.git@1d9eb7a0ca537e7278e29809cda4f4c5da6c1dcc"
 
 .venv/bin/pytest -q
-# 184 passed
+# 216 passed
 
 .venv/bin/ruff check .
 # All checks passed!   (whole repository, no exclusions)
@@ -337,55 +394,58 @@ python3 -m venv .venv
 # Gradio UI on 0.0.0.0:7860 — works without BrainOS (install hint on send)
 ```
 
-Test count went 154 → **184** in this phase (37 → 154 in Phase 3). The
-Gradio-dependent wiring tests skip without the `ui` extra; the live tests in
-`tests/integration/` run against the pinned BrainOS revision and skip when
-`brainos_runtime` is not installed. No provider API key was used anywhere;
+Test count went 184 → **216** in this phase (37 → 154 → 184 → 216 across
+Phases 3–5). The Gradio-dependent wiring tests skip without the `ui` extra;
+the live tests in `tests/integration/` run against the pinned BrainOS revision
+and skip when `brainos_runtime` is not installed. Unit tests never touch disk:
+SQLite-store tests use `tmp_path`, wiring tests use in-memory doubles, and a
+bare controller has no stores. No provider API key was used anywhere;
 generation is exercised through `FakeProvider`.
 
-The running server was additionally validated **over real HTTP** with the
-Gradio client API (the same path a browser takes): a fact was stored as
-`PROJECT_STATE`, retrieved at rank 1 on the follow-up question, the accounting
-and 24 sanitized trace rows rendered, and `on_clear` / `on_end` /
-`on_mode_change` / `on_validate` returned their expected views with session
-state persisting across calls.
+The running server was additionally validated **over real HTTP** (Gradio
+client API + real SQLite on disk + live BrainOS runtime): turns persisted with
+live memory classification (`PROJECT_STATE`, `TEMPORAL_EVENT`), export
+downloaded as sanitized JSON, clear-memory kept the transcript, and
+end-session deleted exactly its own session's rows.
 
-`.venv` is ignored and is only a local test environment.
+`.venv` and `data/*.sqlite3` are ignored and are only local runtime artifacts.
 
 ## Next safe step
 
-Implement **Phase 5 — Conversation persistence** on the protocols already
-defined in `src/storage/` (`ConversationStore`, `MemoryStore`,
-`EvaluationStore`) with the plan's SQLite MVP backend. The UI and service are
-stable; persistence should attach without changing their contracts:
+Implement **Phase 6 — Baseline modes**: the five context-management strategies
+the scientific comparison depends on (plan §10), routed through the mode
+selector that Phase 4 already records and Phase 5 already persists:
+
+```text
+Mode A  Full Context      whole history, no memory
+Mode B  Sliding Window    last N turns only
+Mode C  Conventional RAG  embedding/lexical top-k over history, no BrainOS
+Mode D  BrainOS           observe/recall + retrieval policy (current pipeline)
+Mode E  BrainOS + RAG     D plus semantic retrieval over raw history
+```
 
 | Piece | Available now |
 | --- | --- |
-| Transcript source of truth | `SessionState.messages`; the UI re-renders from it every turn |
-| Identity for isolation | `session_id` / `actor_id` / `conversation_id` on `SessionState`; `conversation_id` rotates on `clear_conversation()` |
-| Memory records | `MemoryRecord` (sanitized, provider-neutral) via `BrainOSAdapter.list_memories()` / `service.inspect()["memories"]` |
-| Lifecycle hooks to persist around | `ConversationService.clear_conversation()`, `SessionManager.end()`, `ChatController.end_session()` |
-| Per-turn evaluation artifacts | `turn.context_stats` / `context_report` / `memory_ranking` — the Phase 16 reproducibility record starts here |
+| Mode selector | `ContextSettings.mode` — set by the UI dropdown, recorded per session, exported; the UI already announces pending modes honestly |
+| Context construction | `build_context(...)` is mode-agnostic: modes differ in *what they feed it* (history window, memory source), not in the builder |
+| The constraining finding | Phase 3 measured that reduction is driven by `recent_turn_budget`: with a wide window, Mode D degenerates into full context *plus* memory overhead (0.0% reduction, 95 tokens worse). **Each mode must configure its own budget/window**, or A and D are indistinguishable |
+| Runner shell | `evaluation/runner.py` raises `NotImplementedError("Strategy execution is not wired yet...")` and accepts strategy callables — the seam modes should plug into |
+| Persistence for results | `EvaluationStore.save_run` (SQLite, session-indexed) awaits the Phase 16 metadata block |
+| Mode C retrieval | `retrieval_policy.lexical_score` / IDF helpers are dependency-free building blocks; the plan forbids complex vector DBs in v1 |
 
-Carry these constraints into Phase 5:
+Carry these constraints into Phase 6:
 
-1. **Never persist API keys.** The store protocols already refuse credentials
-   by contract; keep `ProviderConfig.api_key` out of every row and metadata
-   blob, and add a security test that a stored session cannot resurrect a key.
-2. Session isolation is a hard requirement: `list_messages` / `list_memories`
-   must filter by exact `session_id` (+ `conversation_id`), with tests proving
-   Session A cannot read Session B — the Phase 4 controller tests show the
-   pattern.
-3. Persistence must not change the Phase 3/4 contracts: the controller and
-   service stay the only writers; storage observes turns append-only. The
-   BrainOS runtime remains authoritative for memory — a `MemoryStore` mirrors
-   records for inspection/export, it does not replace `recall()`.
-4. SQLite files are runtime data: keep them out of Git (`.gitignore` already
-   covers `*.sqlite3` / `*.db`); decide a default path under a writable
-   directory that also works on HF Spaces.
-5. Define what *Clear conversation / Clear memory / Delete session / Export
-   session* (plan §19) mean for the store before the Phase 14 deployment needs
-   them; `ChatController` is where those UI actions will land.
-6. Keep the UI Gradio-version tolerant (`_make_chatbot` pattern) and remember
-   the app currently assumes a single process — multi-worker deployments need
-   this phase's store or sticky routing.
+1. Only the context-management strategy may differ between modes — model,
+   temperature, generation parameters, task wording, and evaluation procedure
+   stay constant (plan §15).
+2. Keep modes behind one strategy interface consumed by both the chat service
+   (the UI dropdown) and the evaluation runner; no `brainos_runtime` import
+   outside `brain/adapter.py`.
+3. Mode A must send the *same* system prompt as the other modes so the
+   full-context reference stays comparable with `full_context_reference_tokens`.
+4. Modes C/E need a corpus: derive it from the same transcript/memory data the
+   service already holds; do not add a vector database (plan §31).
+5. Update the UI's mode notice only when a mode becomes real — the honest
+   "arrives with Phase 6" notice must disappear mode-by-mode as they land.
+6. Per-mode accounting must populate the same 26-field `ContextStats` so
+   Phase 8 metrics can compare modes without special cases.

@@ -52,7 +52,9 @@ EVALUATION_MARKDOWN = (
 SECURITY_MARKDOWN = (
     "**Your provider account pays for API usage.** Keys live in server memory "
     "for this session only — never logged, never stored, never sent back to "
-    "the browser. *End session* clears them."
+    "the browser. Transcripts and memories are mirrored to a server-side "
+    "SQLite store, row-isolated per session; *End session* deletes them along "
+    "with the key, and *Export session* downloads your own data as JSON."
 )
 
 
@@ -86,10 +88,26 @@ def create_app(controller_factory: Callable[[], ChatController] | None = None) -
         ) from exc
 
     if controller_factory is None:
+        # Deployment wiring owns the backend choice (Phase 5): one server-wide
+        # SQLite store set, row-isolated per session, on the configured path.
+        from storage.sqlite import (
+            SqliteConversationStore,
+            SqliteEvaluationStore,
+            SqliteMemoryStore,
+        )
+
         manager = SessionManager()
+        conversation_store = SqliteConversationStore()
+        memory_store = SqliteMemoryStore()
+        evaluation_store = SqliteEvaluationStore()
 
         def controller_factory() -> ChatController:
-            return ChatController(manager=manager)
+            return ChatController(
+                manager=manager,
+                conversation_store=conversation_store,
+                memory_store=memory_store,
+                evaluation_store=evaluation_store,
+            )
 
     with gr.Blocks(title=TITLE) as demo:
         session = gr.State(None)
@@ -97,8 +115,9 @@ def create_app(controller_factory: Callable[[], ChatController] | None = None) -
         gr.Markdown(
             "# BrainOS Context Lab\n"
             "> Bring your model. Give it memory. Measure context efficiency.\n\n"
-            "**Status:** Phase 4 — chat, memory inspection, context accounting, "
-            "and the cognitive trace are wired to the session-scoped "
+            "**Status:** Phase 5 — chat, inspection panels, and session "
+            "persistence (SQLite transcript/memory mirrors, export, and "
+            "data-control operations) are wired to the session-scoped "
             "`ConversationService`. Baseline modes (Phase 6) and benchmarks "
             "(Phase 17) are not active yet."
         )
@@ -159,7 +178,11 @@ def create_app(controller_factory: Callable[[], ChatController] | None = None) -
                 gr.Markdown("### Session")
                 with gr.Row():
                     clear_btn = gr.Button("Clear conversation")
+                    clear_memory_btn = gr.Button("Clear memory")
+                with gr.Row():
+                    export_btn = gr.Button("Export session")
                     end_btn = gr.Button("End session", variant="stop")
+                export_file = gr.File(label="Session export")
                 gr.Markdown(SECURITY_MARKDOWN)
 
             # ---------------------------------------------------------- #
@@ -366,6 +389,15 @@ def create_app(controller_factory: Callable[[], ChatController] | None = None) -
             controller = ensure(controller)
             return [controller, *panel_values(controller.clear_conversation())]
 
+        def on_clear_memory(controller: ChatController | None) -> list[Any]:
+            controller = ensure(controller)
+            return [controller, *panel_values(controller.clear_memory())]
+
+        def on_export(controller: ChatController | None) -> list[Any]:
+            controller = ensure(controller)
+            path, summary = controller.export_session_file()
+            return [controller, path, summary]
+
         def on_end(controller: ChatController | None) -> list[Any]:
             controller = ensure(controller)
             fresh, view = controller.end_session()
@@ -397,6 +429,10 @@ def create_app(controller_factory: Callable[[], ChatController] | None = None) -
             outputs=[session, model_dd, connection_md],
         )
         clear_btn.click(on_clear, inputs=[session], outputs=[session, *panel_outputs])
+        clear_memory_btn.click(
+            on_clear_memory, inputs=[session], outputs=[session, *panel_outputs]
+        )
+        export_btn.click(on_export, inputs=[session], outputs=[session, export_file, status_md])
         end_btn.click(on_end, inputs=[session], outputs=[session, *panel_outputs])
         memory_mode_dd.change(
             on_mode_change, inputs=[session, memory_mode_dd], outputs=[session, mode_notice_md]

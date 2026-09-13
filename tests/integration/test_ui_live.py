@@ -52,3 +52,39 @@ def test_live_sessions_are_isolated() -> None:
     finally:
         manager.end(first.state.session_id)
         manager.end(second.state.session_id)
+
+
+def test_live_controller_persists_to_sqlite(tmp_path, monkeypatch) -> None:
+    """Production-shaped persistence: live runtime + SQLite store on disk."""
+
+    monkeypatch.setenv("BRAINOS_LAB_DB", str(tmp_path / "live.sqlite3"))
+    from storage.sqlite import SqliteConversationStore, SqliteMemoryStore
+
+    conversation_store = SqliteConversationStore()
+    memory_store = SqliteMemoryStore()
+    manager = SessionManager()
+    controller = ChatController(
+        manager=manager,
+        conversation_store=conversation_store,
+        memory_store=memory_store,
+    )
+    try:
+        controller.send_message("For Project Atlas, the production database is PostgreSQL 16.")
+        controller.send_message("What database does Project Atlas use?")
+
+        session_id = controller.state.session_id
+        assert (tmp_path / "live.sqlite3").exists()
+        rows = conversation_store.list_messages(session_id, controller.state.conversation_id)
+        assert [row.role for row in rows] == ["user", "user"]  # no provider → no replies
+        mirrored = memory_store.list_memories(session_id)
+        assert any("PostgreSQL" in record["text"] for record in mirrored)
+
+        payload = controller.export_session()
+        assert len(payload["transcript"]) == 2
+        assert any("PostgreSQL" in record["text"] for record in payload["memories"])
+
+        controller.end_session()
+        assert conversation_store.list_conversations(session_id) == []
+        assert memory_store.list_memories(session_id) == []
+    finally:
+        manager.end(controller.state.session_id)

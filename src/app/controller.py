@@ -23,8 +23,12 @@ Rules carried forward from the Phase 3 hand-off contract:
 from __future__ import annotations
 
 import dataclasses
+import json
+import os
+import tempfile
 from collections.abc import Callable
 from dataclasses import replace
+from datetime import datetime, timezone
 from typing import Any
 
 from brain.adapter import BrainOSNotConfiguredError
@@ -145,6 +149,9 @@ class ChatController:
         manager: SessionManager | None = None,
         service_factory: Callable[[SessionState], ConversationService] | None = None,
         max_turns: int = DEFAULT_MAX_TURNS,
+        conversation_store: Any | None = None,
+        memory_store: Any | None = None,
+        evaluation_store: Any | None = None,
     ) -> None:
         self.manager = manager
         if state is not None:
@@ -157,6 +164,14 @@ class ChatController:
             lambda session_state: ConversationService(session_state)
         )
         self._service: ConversationService | None = None
+        # Phase 5 persistence. Stores are controller-owned and attached to the
+        # service at creation time. The controller knows only the storage
+        # *protocols*; choosing the SQLite backend is deployment wiring
+        # (``app.ui.create_app``), so a bare controller — scripts, unit tests —
+        # stays purely in-memory and never touches disk.
+        self._conversation_store = conversation_store
+        self._memory_store = memory_store
+        self._evaluation_store = evaluation_store
         self._turns_used = 0
         self.max_turns = max_turns
         self._connection_status = (
@@ -180,12 +195,40 @@ class ChatController:
 
         Creation imports the BrainOS runtime and may raise
         :class:`BrainOSNotConfiguredError`; browser-facing callers convert that
-        into the install hint instead of a traceback.
+        into the install hint instead of a traceback. The controller's stores
+        are attached after creation when the factory did not supply them, so
+        persistence works through any service seam.
         """
 
         if self._service is None:
             self._service = self._service_factory(self.state)
+            if self._conversation_store is not None and getattr(
+                self._service, "conversation_store", None
+            ) is None:
+                self._service.conversation_store = self._conversation_store
+            if self._memory_store is not None and getattr(
+                self._service, "memory_store", None
+            ) is None:
+                self._service.memory_store = self._memory_store
         return self._service
+
+    @property
+    def conversation_store(self) -> Any:
+        """The injected transcript store, or ``None`` for in-memory sessions."""
+
+        return self._conversation_store
+
+    @property
+    def memory_store(self) -> Any:
+        """The injected memory mirror, or ``None`` for in-memory sessions."""
+
+        return self._memory_store
+
+    @property
+    def evaluation_store(self) -> Any:
+        """The injected evaluation-run store, or ``None``."""
+
+        return self._evaluation_store
 
     def _secrets(self) -> tuple[str, ...]:
         key = self.state.provider.api_key
@@ -421,9 +464,42 @@ class ChatController:
             )
         )
 
-    def end_session(self) -> tuple[ChatController, dict[str, Any]]:
-        """Clear credentials from server memory and start a fresh session."""
+    def clear_memory(self) -> dict[str, Any]:
+        """Drop BrainOS memory while keeping the transcript (plan §19).
 
+        Distinct from :meth:`clear_conversation`: the conversation continues,
+        but the runtime — and its persisted mirror — start empty. The next
+        turn lazily creates a fresh runtime through the usual seam.
+        """
+
+        self.state.brain = None
+        self.state.diagnostics.clear()
+        self.state.last_context.clear()
+        self._service = None
+        self._turn_view = _empty_turn_view()
+        if self._memory_store is not None:
+            try:
+                self._memory_store.clear(self.state.session_id)
+            except Exception:
+                pass
+        return self.views(
+            status=(
+                "BrainOS memory cleared for this session; the transcript was "
+                "kept. Facts observed from here on are stored in a fresh "
+                "runtime."
+            )
+        )
+
+    def end_session(self) -> tuple[ChatController, dict[str, Any]]:
+        """Clear credentials from server memory and start a fresh session.
+
+        *Delete session* in the plan's data-control list: everything persisted
+        for the session — transcript rows, memory mirror, evaluation runs — is
+        removed before the session itself is dropped. Deletion never creates a
+        store: a session that persisted nothing has nothing to delete.
+        """
+
+        self._delete_persisted_session(self.state.session_id)
         if self.manager is not None:
             self.manager.end(self.state.session_id)
         else:
@@ -434,13 +510,114 @@ class ChatController:
             manager=self.manager,
             service_factory=self._service_factory,
             max_turns=self.max_turns,
+            conversation_store=self._conversation_store,
+            memory_store=self._memory_store,
+            evaluation_store=self._evaluation_store,
         )
         return fresh, fresh.views(
             status=(
-                "Session ended: credentials cleared from server memory and the "
-                "BrainOS runtime dropped. A fresh session is ready."
+                "Session ended: credentials cleared from server memory, the "
+                "BrainOS runtime dropped, and all persisted session data "
+                "deleted. A fresh session is ready."
             )
         )
+
+    def _delete_persisted_session(self, session_id: str) -> None:
+        if self._conversation_store is not None:
+            try:
+                self._conversation_store.delete_session(session_id)
+            except Exception:
+                pass
+        if self._memory_store is not None:
+            try:
+                self._memory_store.clear(session_id)
+            except Exception:
+                pass
+        if self._evaluation_store is not None:
+            try:
+                self._evaluation_store.delete_session_data(session_id)
+            except Exception:
+                pass
+
+    # ------------------------------------------------------------------ #
+    # Export
+    # ------------------------------------------------------------------ #
+
+    def export_session(self) -> dict[str, Any]:
+        """Return the session export: config, transcript, memories, last turn.
+
+        Reads the persisted mirrors when they exist and falls back to process
+        state otherwise, so an export is complete even for a session that was
+        never persisted. The payload passes the same sanitizer as every other
+        browser-visible value.
+        """
+
+        payload = {
+            "exported_at": datetime.now(timezone.utc).isoformat(),
+            "application": "BrainOS Context Lab",
+            "session_id": self.state.session_id,
+            "conversation_id": self.state.conversation_id,
+            "provider": self.state.provider.safe_dict(),
+            "context_settings": dataclasses.asdict(self.state.context),
+            "turns_used": self._turns_used,
+            "max_turns": self.max_turns,
+            "transcript": self._export_transcript(),
+            "memories": self._export_memories(),
+            "last_turn": {
+                "context_stats": self._turn_view.get("context_stats", {}),
+                "ranking": self._turn_view.get("ranking_json", []),
+                "dropped": self._turn_view.get("dropped_rows", []),
+                "conflicts": self._turn_view.get("conflict_rows", []),
+            },
+        }
+        return self._sanitize(payload)
+
+    def export_session_file(self) -> tuple[str, str]:
+        """Write :meth:`export_session` to a temporary JSON file for download."""
+
+        payload = self.export_session()
+        handle, path = tempfile.mkstemp(prefix="brainos-session-", suffix=".json")
+        with os.fdopen(handle, "w", encoding="utf-8") as stream:
+            json.dump(payload, stream, indent=2, default=str)
+        summary = (
+            f"Session exported: {len(payload['transcript'])} messages, "
+            f"{len(payload['memories'])} memories."
+        )
+        return path, summary
+
+    def _export_transcript(self) -> list[dict[str, Any]]:
+        store = self._conversation_store
+        if store is not None:
+            try:
+                rows: list[dict[str, Any]] = []
+                for conversation_id in store.list_conversations(self.state.session_id):
+                    for message in store.list_messages(self.state.session_id, conversation_id):
+                        rows.append(
+                            {
+                                "conversation_id": conversation_id,
+                                "role": message.role,
+                                "content": message.content,
+                                "created_at": message.created_at,
+                            }
+                        )
+                return rows
+            except Exception:
+                pass
+        return [dict(message) for message in self.state.messages]
+
+    def _export_memories(self) -> list[dict[str, Any]]:
+        store = self._memory_store
+        if store is not None:
+            try:
+                return list(store.list_memories(self.state.session_id))
+            except Exception:
+                pass
+        if self._service is not None or self.state.brain is not None:
+            try:
+                return list(self.service.inspect()["memories"])
+            except Exception:
+                return []
+        return []
 
     # ------------------------------------------------------------------ #
     # View models
