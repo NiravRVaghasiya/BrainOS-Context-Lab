@@ -30,6 +30,58 @@ The context-rot dataset should include:
 
 Evaluate at increasing conversation lengths, such as 5k, 10k, 20k, 40k, 80k, and 120k tokens where model limits and budget permit.
 
+## Dataset (Phase 7)
+
+The dataset is generated, not hand-written:
+[`benchmarks/context_rot/spec.py`](../benchmarks/context_rot/spec.py) holds the
+vocabulary, templates, categories, and tiers;
+[`generation.py`](../benchmarks/context_rot/generation.py) turns them into
+deterministic tasks; [`MANIFEST.json`](../benchmarks/context_rot/MANIFEST.json)
+pins the committed file by generator version, seed, and SHA-256. Each task
+carries a **fact ledger** (every fact, its markers, where it was planted, and its
+supersession chain) and an **evidence contract** (required / supporting /
+forbidden facts, plus whether abstention is the correct behaviour).
+
+Two validity properties are enforced by tests, because a benchmark that violates
+them produces plausible-looking numbers that mean nothing:
+
+1. every planted fact is storable by the application's own memory policy — a fact
+   that is never stored cannot be retrieved by any mode;
+2. no filler turn is storable — filler is there to make the conversation long,
+   not to pollute memory.
+
+Tiers: `smoke` (800 tokens, committed), `quick` (2k/4k), `standard`
+(5k/10k/20k/40k), `research` (5k/10k/20k/40k/80k/120k). Lengths are estimated,
+and every run records which token counter produced the numbers.
+
+## Scoring (Phase 7)
+
+Scoring is split in two so that most of a run needs no credentials:
+
+- **Retrieval scoring is model-free.** Given the evidence a mode selected and
+  the prompt it produced, facts are detected by marker co-occurrence and scored
+  with Recall@K / Precision@K, plus whether every required fact reached the
+  prompt and whether a forbidden (stale) fact was present. Mode A retrieves
+  nothing and still reports evidence-in-prompt — the two are deliberately
+  separate fields.
+- **Answer scoring needs an answer string, never a model call.** Answers are
+  supplied with `--answers` (JSONL: `{task_id, mode?, answer}`), so a real model
+  run, a re-grade, or a deterministic mock all go through the same rules.
+
+Verdicts: `correct`, `abstained`, `wrong_abstention`, `stale_answer`,
+`incorrect`, `ungraded`. When abstention is expected — the abstention category,
+or a cross-session task replayed with `--session-isolation` — declining is the
+only correct behaviour; asserting a value there is a hallucination. Every
+non-correct verdict carries a label from the error taxonomy above, with two
+refinements that need both halves of a record: declining although the evidence
+was in the prompt is `wrong_abstention`, and an incorrect answer whose evidence
+was missing from the prompt is `missed_memory` rather than `hallucination`.
+
+The aggregate a run reports is descriptive only: counts, rates, and means, each
+with its own denominator, plus a per-category breakdown. Confidence intervals
+across trials, paired comparisons, effect sizes, and the planned plots belong to
+Phases 8 and 10.
+
 ## Metrics
 
 ### Quality
