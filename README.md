@@ -8,7 +8,17 @@ This repository integrates BrainOS as an upstream dependency. It does **not** mo
 
 ## Current status
 
-The repository is currently at the initial scaffolding stage. The package boundaries, public interfaces, documentation locations, benchmark layout, and test layout are in place. BrainOS integration, provider calls, persistence, and the complete evaluation pipeline will be implemented incrementally after the Phase 0 dependency and API validation.
+Phase 1, the provider-abstraction phase, is complete at the adapter/test level.
+OpenAI and generic OpenAI-compatible adapters now support model listing,
+credential validation, chat generation, response normalization, and secret-safe
+errors through a provider-neutral interface. A deterministic fake-client suite
+covers the behavior without network access.
+
+The repository is still intentionally incremental: the upstream BrainOS
+revision is now pinned and its API is documented, but the application adapter
+has not yet been mapped to that runtime and the Gradio scaffold is not yet
+wired to provider or BrainOS callbacks. See [`CONTEXT.md`](CONTEXT.md) for the
+living implementation state and the Phase 0/Phase 1 logs in `docs/`.
 
 ## Repository layout
 
@@ -48,11 +58,37 @@ python app.py
 
 The scaffold displays the planned application surfaces and does not yet make provider requests.
 
-To enable the validated upstream BrainOS revision later, install the `integration` extra only after Phase 0 has confirmed the compatible commit:
+The upstream BrainOS revision has been validated and pinned, but remains an
+optional dependency until the Phase 2 adapter mapping is wired. Install it
+when working on the real integration:
 
 ```bash
 pip install -e ".[integration]"
 ```
+
+### Provider adapter smoke test
+
+The provider layer is usable without a live request by injecting a client in
+unit tests. In an application service, construct a session-only configuration
+and use the factory:
+
+```python
+from providers import ProviderConfig, create_provider
+
+config = ProviderConfig(
+    provider="openai",
+    model="gpt-4o-mini",
+    api_key="provided-for-this-session",
+)
+provider = create_provider(config)
+provider.validate_credentials()
+reply = provider.generate([{"role": "user", "content": "Hello"}])
+print(reply.text)
+```
+
+Do not put a real key in source code, logs, benchmark records, or committed
+examples. Generic OpenAI-compatible endpoints use
+`provider="openai-compatible"` and a session-local `base_url`.
 
 ## Evaluation commands
 
