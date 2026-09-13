@@ -1,0 +1,3 @@
+# Hugging Face Space/runtime dependencies for the initial UI scaffold.
+# Install the project itself with: pip install -e ".[ui,providers]"
+-e .[ui,providers]
