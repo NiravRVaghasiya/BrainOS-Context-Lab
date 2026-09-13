@@ -1,3 +1,3 @@
-"""Application-facing UI and session lifecycle components."""
+"""Application-facing UI, session lifecycle, and service layer."""
 
-__all__ = ["ui", "session", "state"]
+__all__ = ["ui", "session", "state", "service"]

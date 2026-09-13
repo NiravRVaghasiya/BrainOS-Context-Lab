@@ -94,15 +94,25 @@ observations, not BrainOS Context Lab research results.
 
 ## Application adapter status
 
-The application boundary remains intentionally separate in
-[`src/brain/adapter.py`](../src/brain/adapter.py). Its injected fake-runtime
-contract was created before the upstream API was validated and currently uses
-`metadata=`, `limit=`, and a list-style trace. The validated signature mapping
-above is the input to **Phase 2 — BrainOS Adapter**; the real runtime should not
-be wired by guessing or silently adapting incompatible return shapes.
+Phase 2 mapped the pinned runtime in
+[`src/brain/adapter.py`](../src/brain/adapter.py). The application-facing
+contract is unchanged (`observe` / `recall` / `decide` / `explain` / `trace`);
+the adapter performs the explicit translations:
 
-Until Phase 2 is complete, the application must not claim that the live
-BrainOS runtime is active. The Phase 1 provider adapters do not import BrainOS.
+- `observe(text, metadata=...)` → `runtime.observe(text, source=..., event_type=...)`
+- `recall(query, limit=...)` → `runtime.recall(query, top_k=...)`
+- `decide(query)` prefers `assess()` and normalizes decision strings
+- `explain(query)` sanitizes `why(query)`
+- `trace()` maps the structured session-trace dict into `TraceEvent` values
+
+`create_brain_adapter(session_id=..., actor_id=...)` constructs one runtime per
+application session and must not share a runtime or storage backend across
+sessions. `ConversationService` is the application service that uses this
+adapter together with the provider factory.
+
+Live coverage lives in `tests/integration/test_brainos_runtime.py` and is
+skipped when `brainos_runtime` is not installed. Provider adapters still do
+not import BrainOS.
 
 ## Memory and security boundary
 

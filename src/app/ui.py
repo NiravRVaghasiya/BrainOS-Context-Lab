@@ -31,8 +31,8 @@ def create_app():
         gr.Markdown(
             "# BrainOS Context Lab\n"
             "> Bring your model. Give it memory. Measure context efficiency.\n\n"
-            "**Scaffold status:** provider calls and BrainOS integration are not "
-            "wired yet."
+            "**Status:** Phase 2 BrainOS adapter mapping is in place. Chat "
+            "callbacks are not wired yet."
         )
 
         with gr.Row():

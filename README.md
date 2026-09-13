@@ -8,17 +8,18 @@ This repository integrates BrainOS as an upstream dependency. It does **not** mo
 
 ## Current status
 
-Phase 1, the provider-abstraction phase, is complete at the adapter/test level.
-OpenAI and generic OpenAI-compatible adapters now support model listing,
-credential validation, chat generation, response normalization, and secret-safe
-errors through a provider-neutral interface. A deterministic fake-client suite
-covers the behavior without network access.
+Phase 2, the BrainOS adapter, is complete at the adapter/service/test level.
+The application now maps the pinned BrainOS v2 runtime (`observe(source=,
+event_type=)`, `recall(top_k=)`, decision strings / `assess()`, `why()`, and
+structured `trace()`) behind a stable `BrainMemoryAdapter`. A session-scoped
+`ConversationService` combines that adapter with the Phase 1 provider factory
+and the existing context builder. Deterministic fakes cover the mapping
+without BrainOS installed; optional live tests exercise the pinned runtime.
 
-The repository is still intentionally incremental: the upstream BrainOS
-revision is now pinned and its API is documented, but the application adapter
-has not yet been mapped to that runtime and the Gradio scaffold is not yet
-wired to provider or BrainOS callbacks. See [`CONTEXT.md`](CONTEXT.md) for the
-living implementation state and the Phase 0/Phase 1 logs in `docs/`.
+The Gradio scaffold is not yet wired to chat callbacks (Phase 4), and the
+context builder is still a first-pass implementation (Phase 3). See
+[`CONTEXT.md`](CONTEXT.md) for the living implementation state and the Phase
+0/1/2 logs in `docs/`.
 
 ## Repository layout
 
@@ -58,9 +59,8 @@ python app.py
 
 The scaffold displays the planned application surfaces and does not yet make provider requests.
 
-The upstream BrainOS revision has been validated and pinned, but remains an
-optional dependency until the Phase 2 adapter mapping is wired. Install it
-when working on the real integration:
+The upstream BrainOS revision is pinned and the Phase 2 adapter mapping is
+wired. Install the optional integration extra to use the live runtime:
 
 ```bash
 pip install -e ".[integration]"
