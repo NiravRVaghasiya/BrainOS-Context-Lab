@@ -10,6 +10,13 @@ from brain.context_builder import ContextBudget
 from brain.retrieval_policy import RetrievalPolicy
 from providers.base import ProviderConfig
 
+#: Baseline-mode selectors the chat UI can offer today. Phase 6 adds
+#: ``sliding_window`` and ``rag``; an unrecognized value keeps memory enabled so
+#: a new mode degrades to the BrainOS behaviour rather than to silence.
+BRAINOS_MODE = "brainos"
+NO_MEMORY_MODE = "no_memory"
+MEMORY_MODES: tuple[str, ...] = (BRAINOS_MODE, NO_MEMORY_MODE)
+
 
 def new_id() -> str:
     """Return a non-secret identifier for a session or conversation."""
@@ -47,6 +54,17 @@ class ContextSettings:
     resolve_conflicts: bool = True
     drop_stale_memories: bool = True
     drop_suspicious_memories: bool = False
+
+    def uses_memory(self) -> bool:
+        """Whether this mode injects BrainOS memories into the prompt.
+
+        The baseline modes of Phase 6 will extend this mapping. Until then the
+        selector the plan puts in the sidebar distinguishes exactly two
+        behaviours the application can already perform honestly: recall and
+        inject memories, or build the prompt from the recent window alone.
+        """
+
+        return self.mode != NO_MEMORY_MODE
 
     def context_budget(self) -> ContextBudget:
         """Return the token budget for one context construction."""

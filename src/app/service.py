@@ -7,6 +7,7 @@ them into diagnostics, traces, or returned inspection data.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field, replace
 from typing import Any
 
@@ -20,6 +21,7 @@ from brain.context_builder import BuiltContext, build_context
 from brain.memory_policy import MemoryPolicy, extract_candidates
 from brain.trace import sanitize_trace, sanitize_value
 from providers import ProviderError, ProviderResponse, create_provider
+from providers.base import ProviderConfig
 
 from .state import SessionState
 
@@ -64,31 +66,61 @@ class ConversationService:
         provider: Any | None = None,
         policy: MemoryPolicy | None = None,
         system_instructions: str = DEFAULT_SYSTEM_INSTRUCTIONS,
+        adapter_factory: Callable[..., BrainOSAdapter] | None = None,
+        provider_factory: Callable[[ProviderConfig], Any] | None = None,
     ) -> None:
+        """Bind a service to one session.
+
+        ``adapter_factory`` and ``provider_factory`` are seams: the UI and the
+        evaluation runner construct both through the session's own ids and
+        configuration, so a test can substitute fakes without weakening the
+        production path. An *object* passed as ``adapter`` or ``provider`` is
+        treated as an injected test double instead.
+        """
+
         self.state = state
         self.policy = policy or MemoryPolicy()
         self.system_instructions = system_instructions
         self._provider = provider
         self._adapter_injected = adapter is not None
+        self._provider_injected = provider is not None
+        self._adapter_factory = adapter_factory or create_brain_adapter
+        self._provider_factory = provider_factory or create_provider
         if adapter is not None:
             self.adapter = adapter
             state.brain = adapter
         elif state.brain is not None:
             self.adapter = state.brain
         else:
-            self.adapter = create_brain_adapter(
-                session_id=state.session_id,
-                actor_id=state.actor_id,
-                policy=self.policy,
-            )
+            self.adapter = self._new_adapter()
             state.brain = self.adapter
 
+    def _new_adapter(self) -> BrainOSAdapter:
+        """Create a runtime bound to this session's ids (never shared)."""
+
+        return self._adapter_factory(
+            session_id=self.state.session_id,
+            actor_id=self.state.actor_id,
+            policy=self.policy,
+        )
+
     def provider(self) -> Any:
-        """Return the injected provider or construct one from session configuration."""
+        """Return the cached provider or construct one from session configuration."""
 
         if self._provider is None:
-            self._provider = create_provider(self.state.provider)
+            self._provider = self._provider_factory(self.state.provider)
         return self._provider
+
+    def reset_provider(self) -> None:
+        """Drop the cached provider after the session configuration changed.
+
+        Without this a client built from an old key would keep serving requests
+        after the user replaced or cleared that key.
+        """
+
+        if self._provider_injected:
+            return
+        self._provider = None
 
     def observe_text(self, text: str, *, role: str = "user") -> list[MemoryRecord]:
         """Observe policy-accepted candidates from a turn and return stored memories."""
@@ -116,7 +148,7 @@ class ConversationService:
         user_text = text.strip()
         self.state.messages.append({"role": "user", "content": user_text})
         stored = self.observe_text(user_text, role="user")
-        recalled = self._guard_memories(self.adapter.recall(user_text))
+        recalled = self._recall(user_text)
         decision = self.adapter.decide(user_text)
         explanation = self._sanitize(self.adapter.explain(user_text))
         retrieved = self._enrich(recalled, explanation)
@@ -155,6 +187,15 @@ class ConversationService:
         self.state.diagnostics = self._diagnostics(turn)
         return turn
 
+    def stored_memories(self) -> list[MemoryRecord]:
+        """Return the memories BrainOS currently holds for this session.
+
+        Memory text is passed through the credential guard: a key pasted into an
+        earlier turn must not be rendered back into the browser.
+        """
+
+        return self._guard_memories(self._safe_list_memories())
+
     def inspect(self) -> dict[str, Any]:
         """Return sanitized inspection data for the current session."""
 
@@ -175,6 +216,18 @@ class ConversationService:
         """Clear conversation content and drop the session's BrainOS runtime."""
 
         self.state.clear_conversation()
+        self.reset_memory()
+
+    def reset_memory(self) -> None:
+        """Drop the session's BrainOS memory while keeping the transcript.
+
+        "Clear memory" and "clear conversation" are separate user-data controls
+        in the plan: wiping the transcript should not be the only way to forget
+        what BrainOS has observed, and vice versa. An injected adapter is a
+        test seam and is deliberately retained so a test can assert that the
+        application did *not* create a new runtime.
+        """
+
         if self._adapter_injected:
             return
         self.adapter = create_brain_adapter(
@@ -183,6 +236,13 @@ class ConversationService:
             policy=self.policy,
         )
         self.state.brain = self.adapter
+
+    def _recall(self, user_text: str) -> list[MemoryRecord]:
+        """Recall memories unless the active mode builds context without them."""
+
+        if not self.state.context.uses_memory():
+            return []
+        return self._guard_memories(self.adapter.recall(user_text))
 
     def _build_context(self, user_text: str, memories: list[MemoryRecord]) -> BuiltContext:
         """Assemble the model-ready prompt for one turn.
@@ -298,6 +358,9 @@ class ConversationService:
     def _diagnostics(self, turn: ConversationTurn) -> dict[str, Any]:
         return self._sanitize(
             {
+                "mode": self.state.context.mode,
+                "turn": len(self.state.messages),
+                "stored_memory_count": len(self.stored_memories()),
                 "retrieved_memory_count": len(turn.retrieved_memories),
                 "retrieved_memories": [
                     {
