@@ -41,6 +41,10 @@ The application-relevant methods and return shapes are:
 | `assess(query)` | Returns a dict with confidence, decision, rationale, and retrieval signals. | Prefer this for a richer application decision/explanation. |
 | `why(query)` | Returns a dict with `query`, selected memories, scores/signals, decision, and rationale. | Sanitize before sending to the UI. |
 | `trace(formatted=False)` | Returns a structured session-trace dict; `formatted=True` returns text. | Map the structured records into application `TraceEvent` values in Phase 2. |
+| `contradictions()` | Returns same-subject `Contradiction(subject, older_id, newer_id, older_content, newer_content)` records. | Phase 3 maps these into the application `Conflict` record; the context engine drops the older claim. Only populated for subject-versioned memories (`remember(subject=...)`). |
+| `stale_memories()` | Returns superseded/expired `Memory` objects. | Phase 3 collects their ids and excludes them from the prompt. |
+| `active_memories()` / `memories()` | Returns `Memory` objects with `entities`, `created_at`, `observed_at`, `valid_from/until`, `confidence`, `salience`, `utility`, `access_count`, `supersedes`, `contradicts`, `status`, `verification_status`. | Phase 3 maps these onto `MemoryRecord` so relevance, recency, and conflict handling use runtime evidence rather than guesses. |
+| `explain(query)` / `why(query)` `selected[]` | Per-memory `score` plus `signals{semantic, lexical, task_relevance, temporal_relevance, salience, confidence, recency, utility, redundancy, token_cost}`. | Phase 3 attaches these to recalled records (`enrich_with_explanation`). The query-dependent subset gates the relevance floor; the rest contributes to ranking. |
 
 The runtime supports `session_id` and `actor_id` tenancy anchors. The adapter
 must construct one runtime per isolated application session and must not share a
@@ -110,9 +114,42 @@ application session and must not share a runtime or storage backend across
 sessions. `ConversationService` is the application service that uses this
 adapter together with the provider factory.
 
-Live coverage lives in `tests/integration/test_brainos_runtime.py` and is
-skipped when `brainos_runtime` is not installed. Provider adapters still do
-not import BrainOS.
+Live coverage lives in `tests/integration/test_brainos_runtime.py` and
+`tests/integration/test_context_pipeline.py`, and is skipped when
+`brainos_runtime` is not installed. Provider adapters still do not import
+BrainOS.
+
+## Phase 3 signal consumption
+
+The context construction engine prefers runtime evidence over application
+heuristics, in this order:
+
+| Decision | Runtime evidence used | Application fallback |
+| --- | --- | --- |
+| relevance | `why()` `signals.lexical/semantic/task_relevance` | IDF-weighted lexical overlap |
+| priority | `why()` `score`, `signals.salience/confidence/recency/utility`, penalties `redundancy/token_cost` | lexical score |
+| recency | `observed_at` / `created_at` (48 h half-life, matching the runtime's own decay) | conversation turn, then recall position |
+| staleness | `status`, `valid_until`, `stale_memories()` | — (never inferred) |
+| conflicts | `contradictions()`, `supersedes`, `contradicts` | subject→value claim heuristic, gated on an explicit correction marker |
+| memory type | runtime `type` mapping | the application's own policy label, recorded at `observe()` time |
+
+Two mapping rules matter for reproducibility:
+
+- **Unknown timestamps stay unknown.** A missing `created_at` maps to `""`, not
+  to `now`; fabricating a timestamp would make every memory look maximally
+  recent and silently disable recency weighting.
+- **Recall position is priority, not chronology.** BrainOS returns its best
+  match first, so position is a valid recency proxy for *ranking* but is never
+  used to decide which of two contradictory claims is newer. When neither a
+  timestamp nor a turn is available, the pair is flagged `contested` and both
+  memories are kept.
+
+BrainOS stores content, not the application's memory-policy label or
+conversation turn, so the adapter keeps lightweight observation bookkeeping
+keyed by normalized text to restore both onto recalled records. A
+runtime-reported type always wins; the policy label only refines the generic
+`FACT` mapping. This is application-side annotation, not a reimplementation of
+BrainOS memory.
 
 ## Memory and security boundary
 

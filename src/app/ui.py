@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import os
 
-
 TITLE = "BrainOS Context Lab"
 
 
@@ -73,7 +72,9 @@ def create_app():
                         "Context construction → LLM → Observation"
                     )
                 with gr.Tab("Evaluation"):
-                    gr.Markdown("Benchmark controls and exports will be added in the evaluation phases.")
+                    gr.Markdown(
+                        "Benchmark controls and exports will be added in the evaluation phases."
+                    )
 
     return demo
 

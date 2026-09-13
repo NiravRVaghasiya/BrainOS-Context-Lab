@@ -7,7 +7,7 @@ them into diagnostics, traces, or returned inspection data.
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from typing import Any
 
 from brain.adapter import (
@@ -16,7 +16,7 @@ from brain.adapter import (
     MemoryRecord,
     create_brain_adapter,
 )
-from brain.context_builder import BuiltContext, ContextBudget, build_context
+from brain.context_builder import BuiltContext, build_context
 from brain.memory_policy import MemoryPolicy, extract_candidates
 from brain.trace import sanitize_trace, sanitize_value
 from providers import ProviderError, ProviderResponse, create_provider
@@ -42,6 +42,8 @@ class ConversationTurn:
     explanation: dict[str, Any] = field(default_factory=dict)
     context_messages: tuple[dict[str, str], ...] = ()
     context_stats: dict[str, Any] = field(default_factory=dict)
+    context_report: dict[str, Any] = field(default_factory=dict)
+    memory_ranking: tuple[dict[str, Any], ...] = ()
     trace: tuple[dict[str, str], ...] = ()
     generated: bool = False
     error: str | None = None
@@ -93,6 +95,7 @@ class ConversationService:
 
         before = {record.memory_id for record in self._safe_list_memories()}
         candidates = self.policy.select(extract_candidates(text, source=role))
+        turn = len(self.state.messages)
         for candidate in candidates:
             self.adapter.observe(
                 candidate.text,
@@ -101,6 +104,7 @@ class ConversationService:
                     "role": role,
                     "memory_type": candidate.memory_type.value,
                     "confidence": candidate.confidence,
+                    "turn": turn,
                 },
             )
         after = self._safe_list_memories()
@@ -112,9 +116,10 @@ class ConversationService:
         user_text = text.strip()
         self.state.messages.append({"role": "user", "content": user_text})
         stored = self.observe_text(user_text, role="user")
-        retrieved = self.adapter.recall(user_text)
+        recalled = self._guard_memories(self.adapter.recall(user_text))
         decision = self.adapter.decide(user_text)
-        explanation = self.adapter.explain(user_text)
+        explanation = self._sanitize(self.adapter.explain(user_text))
+        retrieved = self._enrich(recalled, explanation)
         built = self._build_context(user_text, retrieved)
 
         reply: str | None = None
@@ -140,8 +145,10 @@ class ConversationService:
             decision=decision,
             explanation=explanation,
             context_messages=tuple(built.messages),
-            context_stats=_stats_dict(built),
-            trace=tuple(sanitize_trace(self.adapter.trace())),
+            context_stats=built.stats.to_dict(),
+            context_report=built.report.to_dict(),
+            memory_ranking=tuple(item.components() for item in built.ranking),
+            trace=tuple(sanitize_trace(self.adapter.trace(), secrets=self._secrets())),
             generated=generated,
             error=error,
         )
@@ -151,14 +158,16 @@ class ConversationService:
     def inspect(self) -> dict[str, Any]:
         """Return sanitized inspection data for the current session."""
 
-        return sanitize_value(
+        return self._sanitize(
             {
                 "session_id": self.state.session_id,
                 "conversation_id": self.state.conversation_id,
-                "memories": [asdict(record) for record in self._safe_list_memories()],
+                "memories": [
+                    asdict(record) for record in self._guard_memories(self._safe_list_memories())
+                ],
                 "diagnostics": dict(self.state.diagnostics),
                 "provider": self.state.provider.safe_dict(),
-                "trace": sanitize_trace(self.adapter.trace()),
+                "trace": sanitize_trace(self.adapter.trace(), secrets=self._secrets()),
             }
         )
 
@@ -176,6 +185,13 @@ class ConversationService:
         self.state.brain = self.adapter
 
     def _build_context(self, user_text: str, memories: list[MemoryRecord]) -> BuiltContext:
+        """Assemble the model-ready prompt for one turn.
+
+        BrainOS stays authoritative: the runtime's own contradictions and stale
+        reports are handed to the builder, which applies the application-level
+        heuristic only for pairs the runtime did not classify.
+        """
+
         settings = self.state.context
         history = [message for message in self.state.messages[:-1] if isinstance(message, dict)]
         return build_context(
@@ -183,13 +199,83 @@ class ConversationService:
             current_user_message=user_text,
             recent_conversation=history,
             memories=memories,
-            budget=ContextBudget(
-                max_tokens=settings.max_tokens,
-                recent_turn_budget=settings.recent_turn_budget,
-                memory_budget=settings.memory_budget,
-                system_budget=settings.system_budget,
-            ),
+            budget=settings.context_budget(),
+            policy=settings.retrieval_policy(),
+            conflicts=self._safe_conflicts(),
+            stale_ids=self._safe_stale_ids(),
+            current_turn=len(self.state.messages),
         )
+
+    def _secrets(self) -> tuple[str, ...]:
+        """Return the credential values that must never leave the process.
+
+        Only the active session key is included. Pattern-based scrubbing cannot
+        recognise an arbitrary credential a user pasted into conversation
+        content, so anything browser-visible is redacted against this value too.
+        """
+
+        key = self.state.provider.api_key
+        return (key,) if key else ()
+
+    def _sanitize(self, value: Any) -> Any:
+        """Sanitize a value for browser-visible use, redacting the session key."""
+
+        return sanitize_value(value, secrets=self._secrets())
+
+    def _guard_memories(self, records: list[MemoryRecord]) -> list[MemoryRecord]:
+        """Remove the live session credential from recalled memory text.
+
+        Memory is user content that BrainOS may have stored verbatim. If a
+        credential was pasted into a conversation it must not be replayed into a
+        later prompt (possibly to a different provider) or into diagnostics.
+        """
+
+        secrets = self._secrets()
+        if not secrets:
+            return records
+        guarded: list[MemoryRecord] = []
+        for record in records:
+            text = record.text
+            for secret in secrets:
+                if secret in text:
+                    text = text.replace(secret, "[redacted]")
+            guarded.append(replace(record, text=text) if text != record.text else record)
+        return guarded
+
+    def _enrich(
+        self, records: list[MemoryRecord], explanation: dict[str, Any]
+    ) -> list[MemoryRecord]:
+        """Attach the runtime's per-memory retrieval signals to recalled records."""
+
+        enricher = getattr(self.adapter, "enrich_with_explanation", None)
+        if not callable(enricher):
+            return records
+        try:
+            return list(enricher(records, explanation))
+        except Exception:
+            return records
+
+    def _safe_conflicts(self) -> list[Any]:
+        """Return runtime-reported contradictions, or an empty list."""
+
+        getter = getattr(self.adapter, "conflicts", None)
+        if not callable(getter):
+            return []
+        try:
+            return list(getter())
+        except Exception:
+            return []
+
+    def _safe_stale_ids(self) -> set[str]:
+        """Return runtime-reported superseded/expired ids, or an empty set."""
+
+        getter = getattr(self.adapter, "stale_memory_ids", None)
+        if not callable(getter):
+            return set()
+        try:
+            return {str(value) for value in getter()}
+        except Exception:
+            return set()
 
     def _can_generate(self) -> bool:
         config = self.state.provider
@@ -210,7 +296,7 @@ class ConversationService:
             return []
 
     def _diagnostics(self, turn: ConversationTurn) -> dict[str, Any]:
-        return sanitize_value(
+        return self._sanitize(
             {
                 "retrieved_memory_count": len(turn.retrieved_memories),
                 "retrieved_memories": [
@@ -229,21 +315,11 @@ class ConversationService:
                     "action": turn.decision.action if turn.decision else "",
                 },
                 "context_stats": dict(turn.context_stats),
+                "context_report": dict(turn.context_report),
+                "memory_ranking": [dict(item) for item in turn.memory_ranking],
                 "provider": self.state.provider.safe_dict(),
                 "generated": turn.generated,
                 "error": turn.error,
             }
         )
 
-
-def _stats_dict(built: BuiltContext) -> dict[str, Any]:
-    stats = built.stats
-    return {
-        "raw_history_tokens": stats.raw_history_tokens,
-        "recent_history_tokens": stats.recent_history_tokens,
-        "retrieved_memory_tokens": stats.retrieved_memory_tokens,
-        "system_tokens": stats.system_tokens,
-        "final_context_tokens": stats.final_context_tokens,
-        "selected_memory_count": stats.selected_memory_count,
-        "token_savings_vs_raw_history": stats.token_savings_vs_raw_history,
-    }

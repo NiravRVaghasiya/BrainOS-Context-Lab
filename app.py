@@ -20,6 +20,5 @@ if __name__ == "app":
 
 from app.ui import main  # noqa: E402  (path bootstrap must happen first)
 
-
 if __name__ == "__main__":
     main()

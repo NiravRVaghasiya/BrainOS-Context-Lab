@@ -8,18 +8,45 @@ This repository integrates BrainOS as an upstream dependency. It does **not** mo
 
 ## Current status
 
-Phase 2, the BrainOS adapter, is complete at the adapter/service/test level.
-The application now maps the pinned BrainOS v2 runtime (`observe(source=,
-event_type=)`, `recall(top_k=)`, decision strings / `assess()`, `why()`, and
-structured `trace()`) behind a stable `BrainMemoryAdapter`. A session-scoped
-`ConversationService` combines that adapter with the Phase 1 provider factory
-and the existing context builder. Deterministic fakes cover the mapping
-without BrainOS installed; optional live tests exercise the pinned runtime.
+Phase 3, the context construction engine, is complete and validated against the
+pinned BrainOS runtime.
 
-The Gradio scaffold is not yet wired to chat callbacks (Phase 4), and the
-context builder is still a first-pass implementation (Phase 3). See
+- **Phase 1** maps the provider abstraction (OpenAI and OpenAI-compatible)
+  behind `LLMProvider`, with secret-safe errors and diagnostics.
+- **Phase 2** maps the pinned BrainOS v2 runtime (`observe(source=, event_type=)`,
+  `recall(top_k=)`, decision strings / `assess()`, `why()`, structured `trace()`,
+  `contradictions()`, `stale_memories()`) behind a stable `BrainMemoryAdapter`.
+- **Phase 3** turns recall results into a model-ready prompt through the full
+  retrieval pipeline — deduplicate, IDF-weighted relevance filter, conflict
+  check, recency weighting, enforced token budget — with complete accounting and
+  a per-memory audit trail.
+
+A session-scoped `ConversationService` combines the adapter, the retrieval
+policy, the context builder, and the provider factory. Deterministic fakes cover
+the whole pipeline without BrainOS installed; optional live tests exercise the
+pinned runtime. 154 tests pass and `ruff check .` is clean repository-wide.
+
+The Gradio scaffold is not yet wired to chat callbacks (Phase 4). See
 [`CONTEXT.md`](CONTEXT.md) for the living implementation state and the Phase
-0/1/2 logs in `docs/`.
+0–3 logs in `docs/`.
+
+### Measured behaviour so far
+
+On a synthetic 60-turn conversation with six durable facts (one corrected mid-
+conversation), validated with the live pinned runtime and an estimated token
+counter:
+
+| Context configuration | mean tokens sent | full-context baseline | reduction |
+| --- | --- | --- | --- |
+| wide history window | 1486 | 1391 | 0.0% |
+| memory-first | 387 | 1391 | **72.2%** |
+| memory-first, tight | 308 | 1391 | **77.8%** |
+
+6/6 probe questions received exactly the evidence they needed, and the corrected
+fact never re-entered a prompt. These are integration-validation observations,
+**not** research results: no model was in the loop, the benchmark dataset and
+baseline modes (Phases 6–8) do not exist yet, and the reduction is driven mainly
+by the history-window setting rather than by memory selection.
 
 ## Repository layout
 
@@ -27,8 +54,9 @@ context builder is still a first-pass implementation (Phase 3). See
 app.py                         # Local/Hugging Face Space entry point
 pyproject.toml                 # Package metadata and optional dependencies
 src/
-  app/                         # UI, session lifecycle, and application state
-  brain/                       # BrainOS adapter and context construction
+  app/                         # UI, session lifecycle, service, and state
+  brain/                       # BrainOS adapter, retrieval policy, context
+                               #   builder, memory policy, tokenizers, traces
   providers/                   # LLM provider interfaces and adapters
   storage/                     # Conversation and evaluation persistence
   evaluation/                  # Benchmark runners, metrics, and reports
@@ -105,7 +133,11 @@ At scaffolding stage these commands provide interfaces and validation errors; be
 
 - Provider API keys are session-only secrets and must never be persisted or logged.
 - Conversation and memory data are isolated by session.
-- Retrieved memory is data, not a higher-priority instruction.
+- Retrieved memory is data, not a higher-priority instruction: it is delimited,
+  stripped of delimiter breakouts and role prefixes, and flagged when it matches
+  an instruction-override pattern.
+- The active session key is redacted by exact match from browser-visible
+  diagnostics and from recalled memory text before it can reach a prompt.
 - Evaluation artifacts never contain provider credentials.
 - Users remain responsible for usage and costs charged by their provider account.
 

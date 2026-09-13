@@ -6,10 +6,10 @@ can be tested independently of any provider or model.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from math import sqrt
 from statistics import mean, stdev
-from typing import Iterable
 
 
 @dataclass(frozen=True)

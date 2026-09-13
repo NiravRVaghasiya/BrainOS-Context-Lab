@@ -19,9 +19,21 @@ class FakeMemory:
 
 
 class FakeRuntime:
-    """Injected runtime whose signatures match the pinned BrainOS facade."""
+    """Injected runtime whose signatures match the pinned BrainOS facade.
 
-    def __init__(self, session_id: str = "session-a", actor_id: str = "actor-a") -> None:
+    ``contradictions`` and ``stale`` let tests exercise the Phase 3 conflict and
+    staleness paths without the live runtime; both default to empty so the fake
+    behaves like a runtime that reports nothing.
+    """
+
+    def __init__(
+        self,
+        session_id: str = "session-a",
+        actor_id: str = "actor-a",
+        *,
+        contradictions: list[dict[str, Any]] | None = None,
+        stale: list[str] | None = None,
+    ) -> None:
         self.session_id = session_id
         self.actor_id = actor_id
         self.stored: list[FakeMemory] = []
@@ -29,6 +41,8 @@ class FakeRuntime:
         self.recall_calls: list[dict[str, Any]] = []
         self.cycles: list[dict[str, Any]] = []
         self.why_calls: list[str] = []
+        self.contradiction_records: list[dict[str, Any]] = list(contradictions or [])
+        self.stale_ids: list[str] = list(stale or [])
 
     def observe(
         self, event: Any, *, source: str = "user", event_type: Any = "user_message"
@@ -120,6 +134,12 @@ class FakeRuntime:
             return f"TRACE session={self.session_id} cycles={len(self.cycles)}"
         return payload
 
+    def contradictions(self) -> list[dict[str, Any]]:
+        return list(self.contradiction_records)
+
+    def stale_memories(self) -> list[FakeMemory]:
+        return [memory for memory in self.stored if memory.id in self.stale_ids]
+
     def active_memories(self) -> list[FakeMemory]:
         return list(self.stored)
 
@@ -139,3 +159,34 @@ class FakeProvider:
 
         self.requests.append(messages)
         return ProviderResponse(text=self.text, model="fake-model", usage={"total_tokens": 4})
+
+
+class LooseFakeRuntime(FakeRuntime):
+    """Fake whose recall is deliberately imprecise but whose ``why()`` is honest.
+
+    Used by security and pipeline tests that need irrelevant candidates to reach
+    the context engine, which is what the relevance filter exists for.
+    """
+
+    def recall(self, query: str, top_k: int = 8) -> list[str]:
+        self.recall_calls.append({"query": query, "top_k": top_k})
+        return [memory.content for memory in self.stored[:top_k]]
+
+    def why(self, query: str) -> dict[str, Any]:
+        query_tokens = {token for token in query.lower().split() if len(token) > 2}
+        selected = []
+        for memory in self.stored:
+            memory_tokens = {
+                token.strip(".,!?") for token in memory.content.lower().split() if len(token) > 2
+            }
+            union = query_tokens | memory_tokens
+            lexical = len(query_tokens & memory_tokens) / len(union) if union else 0.0
+            selected.append(
+                {
+                    "id": memory.id,
+                    "content": memory.content,
+                    "score": round(3.0 * lexical, 4),
+                    "signals": {"lexical": round(lexical, 4), "semantic": 0.0},
+                }
+            )
+        return {"query": query, "selected": selected, "decision": "retrieve", "confidence": 0.5}

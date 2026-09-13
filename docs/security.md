@@ -18,7 +18,40 @@ Every request must be associated with `session_id`, `actor_id`, and `conversatio
 
 ## Prompt injection through memory
 
-User content may contain malicious text such as “ignore system instructions.” Retrieved memories are untrusted data. The context builder must wrap them in explicit `<retrieved_memory>` delimiters and instruct the model not to follow instructions contained within them.
+User content may contain malicious text such as “ignore system instructions.” Retrieved memories are untrusted data. The context builder wraps them in explicit `<retrieved_memory>` delimiters and instructs the model not to follow instructions contained within them.
+
+Phase 3 hardened that boundary in the retrieval policy's memory-text guard:
+
+- **Delimiter breakout** — any `<retrieved_memory>` / `</retrieved_memory>` (and
+  `<system>`, `<user>`, `<assistant>`, `<memory>`) sequence inside memory text is
+  removed, so a memory cannot close its own block and start a new instruction
+  section. The rendered block contains exactly one opening and one closing
+  delimiter, and closes last.
+- **Role smuggling** — a line beginning `system:`, `assistant:`, `developer:`,
+  `tool:`, or `user:` has that prefix stripped, and newlines are collapsed so a
+  memory renders as a single bullet rather than a fake multi-turn transcript.
+- **Control characters** are removed and memory text is length-bounded.
+- **Override detection** — text matching instruction-override patterns ("ignore
+  previous instructions", "new system prompt", "you are now", "reveal the system
+  prompt/api key") is flagged `suspicious` in the ranking and audit report. By
+  default it is kept-but-flagged so retrieval quality stays measurable;
+  `RetrievalPolicy.drop_suspicious_memories` opts into removal. Phase 13 must
+  test both settings.
+
+## Credential replay through memory
+
+A user can paste a provider key into a conversation, where BrainOS will store it
+as ordinary content. Phase 3 closes two paths out of that store:
+
+- the active session key is redacted **by exact match** from every
+  browser-visible value the service produces (diagnostics, inspection data,
+  context reports, rankings, traces) — pattern-based scrubbing alone cannot
+  recognise an arbitrary key; and
+- recalled memory text is redacted before it is placed in a prompt, so a key
+  captured in one conversation cannot be replayed to a different provider later.
+
+Conversation history is not yet redacted on the render path; that is Phase 13
+work and is tracked as such.
 
 ## Data lifecycle
 

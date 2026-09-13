@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass, field
+import re
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from typing import Any, Protocol
 
@@ -41,7 +42,14 @@ class BrainOSNotConfiguredError(RuntimeError):
 
 @dataclass(frozen=True)
 class MemoryRecord:
-    """A sanitized memory returned to the application layer."""
+    """A sanitized memory returned to the application layer.
+
+    Phase 3 added the retrieval/lifecycle signals the context construction
+    engine needs (entities, scoring signals, temporal validity, supersession).
+    Every field is optional and provider-neutral: BrainOS enums and objects are
+    converted here so no upstream type reaches the context builder, UI, or
+    evaluation runner.
+    """
 
     memory_id: str
     text: str
@@ -51,6 +59,41 @@ class MemoryRecord:
     created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     retrieval_count: int = 0
     metadata: dict[str, Any] = field(default_factory=dict)
+    # --- Phase 3 retrieval signals ------------------------------------- #
+    observed_at: str = ""
+    entities: tuple[str, ...] = ()
+    confidence: float | None = None
+    salience: float | None = None
+    utility: float | None = None
+    valid_from: str | None = None
+    valid_until: str | None = None
+    supersedes: tuple[str, ...] = ()
+    contradicts: tuple[str, ...] = ()
+    status: str | None = None
+    signals: dict[str, float] = field(default_factory=dict)
+    type_source: str = "runtime"
+
+    @property
+    def timestamp(self) -> str:
+        """Best available event time, used for recency weighting."""
+
+        return self.observed_at or self.created_at
+
+
+@dataclass(frozen=True)
+class Conflict:
+    """A runtime-reported contradiction between two memories.
+
+    Mapped from BrainOS ``contradictions()`` so the context builder can prefer
+    the newer claim without importing any upstream type.
+    """
+
+    subject: str = ""
+    older_id: str = ""
+    newer_id: str = ""
+    older_text: str = ""
+    newer_text: str = ""
+    source: str = "runtime"
 
 
 @dataclass(frozen=True)
@@ -89,6 +132,21 @@ class BrainMemoryAdapter(Protocol):
 
     def trace(self) -> list[TraceEvent]:
         """Return a sanitized cognitive trace without credentials or raw secrets."""
+
+    # --- Phase 3 context-construction extensions ------------------------ #
+    def list_memories(self) -> list[MemoryRecord]:
+        """Return currently stored memories for inspection."""
+
+    def conflicts(self) -> list[Conflict]:
+        """Return runtime-detected contradictions between memories."""
+
+    def stale_memory_ids(self) -> set[str]:
+        """Return ids the runtime reports as superseded or expired."""
+
+    def enrich_with_explanation(
+        self, records: list[MemoryRecord], explanation: dict[str, Any]
+    ) -> list[MemoryRecord]:
+        """Attach per-memory retrieval scores/signals from ``explain()``."""
 
 
 def create_runtime(
@@ -176,6 +234,13 @@ class BrainOSAdapter:
         self.session_id = session_id
         self.actor_id = actor_id
         self._trace: list[TraceEvent] = []
+        # Application-side observation bookkeeping. BrainOS keeps the memories;
+        # this only remembers *which* application memory type and conversation
+        # turn produced each observation, so recalled content can be annotated
+        # and recency-weighted without asking the runtime for anything it does
+        # not model.
+        self._observations: dict[str, dict[str, Any]] = {}
+        self._observe_count = 0
 
     def _require_runtime(self) -> Any:
         if self.runtime is None:
@@ -212,6 +277,15 @@ class BrainOSAdapter:
         stored = 0
         if isinstance(result, dict):
             stored = len(result.get("stored_ids") or [])
+        self._observe_count += 1
+        self._observations[_normalize_key(stripped)] = {
+            "memory_type": candidate.memory_type.value,
+            "confidence": candidate.confidence,
+            "source": source,
+            "turn": _as_int(payload.get("turn")) or self._observe_count,
+            "observed_at": datetime.now(timezone.utc).isoformat(),
+            "stored": stored,
+        }
         self._trace.append(TraceEvent("observe", f"source={source} stored={stored}"))
 
     def recall(self, query: str, *, limit: int = 8, top_k: int | None = None) -> list[MemoryRecord]:
@@ -270,6 +344,89 @@ class BrainOSAdapter:
         ]
         return records
 
+    def conflicts(self) -> list[Conflict]:
+        """Return runtime-detected same-subject contradictions.
+
+        Maps BrainOS ``contradictions()`` onto the application ``Conflict``
+        record. Returns an empty list when the runtime (or an injected test
+        double) does not expose contradiction detection, so callers can fall
+        back to the application-level heuristic in ``retrieval_policy``.
+        """
+
+        runtime = self.runtime
+        getter = getattr(runtime, "contradictions", None) if runtime is not None else None
+        if not callable(getter):
+            return []
+        try:
+            raw = getter()
+        except Exception:
+            return []
+        conflicts = [_to_conflict(item) for item in (raw or []) if item is not None]
+        self._trace.append(TraceEvent("conflict_check", f"contradictions={len(conflicts)}"))
+        return conflicts
+
+    def stale_memory_ids(self) -> set[str]:
+        """Return ids the runtime reports as superseded or expired."""
+
+        runtime = self.runtime
+        getter = getattr(runtime, "stale_memories", None) if runtime is not None else None
+        if not callable(getter):
+            return set()
+        try:
+            raw = getter()
+        except Exception:
+            return set()
+        ids: set[str] = set()
+        for item in raw or []:
+            if isinstance(item, str):
+                ids.add(item)
+                continue
+            memory_id: Any
+            if isinstance(item, dict):
+                memory_id = item.get("memory_id", item.get("id"))
+            else:
+                memory_id = getattr(item, "id", getattr(item, "memory_id", None))
+            if memory_id:
+                ids.add(str(memory_id))
+        self._trace.append(TraceEvent("stale_check", f"stale={len(ids)}"))
+        return ids
+
+    def enrich_with_explanation(
+        self, records: list[MemoryRecord], explanation: dict[str, Any]
+    ) -> list[MemoryRecord]:
+        """Attach query-specific retrieval scores and signals from ``explain()``.
+
+        ``recall()`` returns content only. ``why()``/``explain()`` returns the
+        runtime's per-signal evidence for the same query, so the context engine
+        can rank with BrainOS's own signals instead of re-deriving relevance.
+        After enrichment ``relevance`` is the query-specific runtime score and
+        ``salience`` remains the query-independent importance signal.
+        """
+
+        selected = explanation.get("selected") if isinstance(explanation, dict) else None
+        if not isinstance(selected, list) or not selected:
+            return list(records)
+        by_id: dict[str, dict[str, Any]] = {}
+        by_content: dict[str, dict[str, Any]] = {}
+        for entry in selected:
+            if not isinstance(entry, dict):
+                continue
+            entry_id = str(entry.get("id", entry.get("memory_id", "")) or "")
+            content = str(entry.get("content", entry.get("text", "")) or "")
+            if entry_id:
+                by_id.setdefault(entry_id, entry)
+            if content:
+                by_content.setdefault(_normalize_key(content), entry)
+
+        enriched: list[MemoryRecord] = []
+        for record in records:
+            entry = by_id.get(record.memory_id) or by_content.get(_normalize_key(record.text))
+            if entry is None:
+                enriched.append(record)
+                continue
+            enriched.append(_with_explanation(record, entry))
+        return enriched
+
     def trace(self) -> list[TraceEvent]:
         """Return mapped runtime cycle events followed by adapter-local events."""
 
@@ -326,53 +483,115 @@ class BrainOSAdapter:
                 return values
         return []
 
-    @staticmethod
-    def _to_memory_record(item: Any, *, fallback_text: str | None = None) -> MemoryRecord:
+    def _to_memory_record(self, item: Any, *, fallback_text: str | None = None) -> MemoryRecord:
         if isinstance(item, MemoryRecord):
-            return item
+            return self._apply_observation(item)
         if isinstance(item, str):
-            text = item
-            return MemoryRecord(
-                memory_id=_stable_id(text),
-                text=text,
-                metadata={"source": "brainos"},
+            return self._apply_observation(
+                MemoryRecord(
+                    memory_id=_stable_id(item),
+                    text=item,
+                    created_at="",
+                    metadata={"source": "brainos"},
+                )
             )
         if isinstance(item, dict):
             text = str(item.get("text", item.get("content", fallback_text or "")))
-            memory_id = str(item.get("memory_id", item.get("id", _stable_id(text))))
-            raw_type = item.get("memory_type", item.get("type", "FACT"))
-            relevance = item.get("relevance", item.get("score", item.get("salience")))
-            created = item.get("created_at")
-            retrieval_count = int(item.get("retrieval_count", item.get("access_count", 0)) or 0)
-            return MemoryRecord(
-                memory_id=memory_id,
-                text=text,
-                memory_type=_map_memory_type(raw_type),
-                relevance=_as_float(relevance),
-                source_turn=item.get("source_turn"),
-                created_at=_as_iso(created),
-                retrieval_count=retrieval_count,
-                metadata=_public_memory_metadata(item),
+            provenance = item.get("provenance") if isinstance(item.get("provenance"), dict) else {}
+            supersedes = _id_tuple(item.get("supersedes")) or _id_tuple(
+                provenance.get("superseded_id")
             )
+            return self._apply_observation(
+                MemoryRecord(
+                    memory_id=str(item.get("memory_id", item.get("id", _stable_id(text)))),
+                    text=text,
+                    memory_type=_map_memory_type(item.get("memory_type", item.get("type", "FACT"))),
+                    relevance=_as_float(item.get("relevance", item.get("score"))),
+                    source_turn=_as_int(item.get("source_turn", item.get("turn"))),
+                    created_at=_iso_or_empty(item.get("created_at")),
+                    retrieval_count=_as_int(
+                        item.get("retrieval_count", item.get("access_count"))
+                    )
+                    or 0,
+                    metadata=_public_memory_metadata(item),
+                    observed_at=_iso_or_empty(
+                        item.get("observed_at", provenance.get("observed_at"))
+                    ),
+                    entities=_text_tuple(item.get("entities")),
+                    confidence=_as_float(item.get("confidence", provenance.get("confidence"))),
+                    salience=_as_float(item.get("salience")),
+                    utility=_as_float(item.get("utility")),
+                    valid_from=_iso_or_none(item.get("valid_from")),
+                    valid_until=_iso_or_none(item.get("valid_until")),
+                    supersedes=supersedes,
+                    contradicts=_id_tuple(item.get("contradicts")),
+                    status=_status_text(item.get("status")),
+                    signals=_signal_map(item.get("signals")),
+                )
+            )
+
         text = fallback_text or _text_of(item)
-        raw_type = getattr(item, "type", getattr(item, "memory_type", "FACT"))
-        relevance = getattr(
-            item, "salience", getattr(item, "score", getattr(item, "relevance", None))
+        provenance = getattr(item, "provenance", None)
+        supersedes = _id_tuple(getattr(item, "supersedes", None)) or _id_tuple(
+            getattr(provenance, "superseded_id", None)
         )
-        created = getattr(item, "created_at", None)
-        retrieval_count = int(
-            getattr(item, "access_count", getattr(item, "retrieval_count", 0)) or 0
+        return self._apply_observation(
+            MemoryRecord(
+                memory_id=str(getattr(item, "id", getattr(item, "memory_id", _stable_id(text)))),
+                text=text,
+                memory_type=_map_memory_type(
+                    getattr(item, "type", getattr(item, "memory_type", "FACT"))
+                ),
+                relevance=_as_float(getattr(item, "score", getattr(item, "relevance", None))),
+                source_turn=_as_int(getattr(item, "source_turn", getattr(item, "turn", None))),
+                created_at=_iso_or_empty(getattr(item, "created_at", None)),
+                retrieval_count=_as_int(
+                    getattr(item, "access_count", getattr(item, "retrieval_count", None))
+                )
+                or 0,
+                metadata=_public_memory_metadata(item),
+                observed_at=_iso_or_empty(
+                    getattr(item, "observed_at", getattr(provenance, "observed_at", None))
+                ),
+                entities=_text_tuple(getattr(item, "entities", None)),
+                confidence=_as_float(
+                    getattr(item, "confidence", getattr(provenance, "confidence", None))
+                ),
+                salience=_as_float(getattr(item, "salience", None)),
+                utility=_as_float(getattr(item, "utility", None)),
+                valid_from=_iso_or_none(getattr(item, "valid_from", None)),
+                valid_until=_iso_or_none(getattr(item, "valid_until", None)),
+                supersedes=supersedes,
+                contradicts=_id_tuple(getattr(item, "contradicts", None)),
+                status=_status_text(getattr(item, "status", None)),
+                signals=_signal_map(getattr(item, "signals", None)),
+            )
         )
-        memory_id = str(getattr(item, "id", getattr(item, "memory_id", _stable_id(text))))
-        return MemoryRecord(
-            memory_id=memory_id,
-            text=text,
-            memory_type=_map_memory_type(raw_type),
-            relevance=_as_float(relevance),
-            created_at=_as_iso(created),
-            retrieval_count=retrieval_count,
-            metadata=_public_memory_metadata(item),
-        )
+
+    def _apply_observation(self, record: MemoryRecord) -> MemoryRecord:
+        """Re-attach application observation metadata to a recalled memory.
+
+        BrainOS stores content, not the application's memory-policy label or
+        conversation turn. Restoring them here (keyed by normalized text) gives
+        the context engine a usable ``source_turn`` for recency weighting and a
+        specific memory type for annotation. Runtime-reported types are only
+        refined when they collapsed to the generic ``FACT`` mapping.
+        """
+
+        observation = self._observations.get(_normalize_key(record.text))
+        if not observation:
+            return record
+        updates: dict[str, Any] = {}
+        if record.memory_type == MemoryType.FACT.value and observation.get("memory_type"):
+            updates["memory_type"] = str(observation["memory_type"])
+            updates["type_source"] = "policy"
+        if record.source_turn is None and observation.get("turn") is not None:
+            updates["source_turn"] = int(observation["turn"])
+        if not record.observed_at and observation.get("observed_at"):
+            updates["observed_at"] = str(observation["observed_at"])
+        if record.confidence is None and observation.get("confidence") is not None:
+            updates["confidence"] = _as_float(observation["confidence"])
+        return replace(record, **updates) if updates else record
 
 
 def _candidate_from_text(text: str, metadata: dict[str, Any]) -> MemoryCandidate:
@@ -526,10 +745,125 @@ def _as_float(value: Any) -> float | None:
         return None
 
 
-def _as_iso(value: Any) -> str:
-    if value is None:
-        return datetime.now(timezone.utc).isoformat()
+def _iso_or_empty(value: Any) -> str:
+    """Return an ISO timestamp, or ``""`` when the runtime did not report one.
+
+    Unknown times stay unknown. Fabricating ``now`` would make every memory look
+    maximally recent and silently disable recency weighting.
+    """
+
+    if value is None or value == "":
+        return ""
     iso = getattr(value, "isoformat", None)
     if callable(iso):
         return str(iso())
     return str(value)
+
+
+def _iso_or_none(value: Any) -> str | None:
+    """Return an optional ISO timestamp for validity windows."""
+
+    if value is None or value == "":
+        return None
+    iso = getattr(value, "isoformat", None)
+    if callable(iso):
+        return str(iso())
+    return str(value)
+
+
+def _as_int(value: Any) -> int | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _normalize_key(text: str) -> str:
+    """Casefold and collapse whitespace for observation bookkeeping keys."""
+
+    return re.sub(r"\s+", " ", str(text).casefold()).strip()
+
+
+def _text_tuple(value: Any) -> tuple[str, ...]:
+    """Normalize a runtime collection of strings into a tuple."""
+
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        return (value,) if value.strip() else ()
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return tuple(str(item) for item in value if str(item).strip())
+    return (str(value),)
+
+
+def _id_tuple(value: Any) -> tuple[str, ...]:
+    """Normalize one id, a list of ids, or nothing into a tuple of ids."""
+
+    if not value:
+        return ()
+    if isinstance(value, str):
+        return (value,)
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return tuple(str(item) for item in value if item)
+    return (str(value),)
+
+
+def _status_text(value: Any) -> str | None:
+    if value is None:
+        return None
+    return str(getattr(value, "value", value))
+
+
+def _signal_map(value: Any) -> dict[str, float]:
+    """Keep only numeric retrieval signals, dropping anything non-numeric."""
+
+    if not isinstance(value, dict):
+        return {}
+    signals: dict[str, float] = {}
+    for key, item in value.items():
+        numeric = _as_float(item)
+        if numeric is not None:
+            signals[str(key)] = numeric
+    return signals
+
+
+def _to_conflict(item: Any) -> Conflict:
+    """Map a runtime contradiction record onto the application ``Conflict``."""
+
+    if isinstance(item, Conflict):
+        return item
+    if isinstance(item, dict):
+        return Conflict(
+            subject=str(item.get("subject", "") or ""),
+            older_id=str(item.get("older_id", item.get("older_memory_id", "")) or ""),
+            newer_id=str(item.get("newer_id", item.get("newer_memory_id", "")) or ""),
+            older_text=str(item.get("older_content", item.get("older_text", "")) or ""),
+            newer_text=str(item.get("newer_content", item.get("newer_text", "")) or ""),
+            source="runtime",
+        )
+    return Conflict(
+        subject=str(getattr(item, "subject", "") or ""),
+        older_id=str(getattr(item, "older_id", "") or ""),
+        newer_id=str(getattr(item, "newer_id", "") or ""),
+        older_text=str(getattr(item, "older_content", getattr(item, "older_text", "")) or ""),
+        newer_text=str(getattr(item, "newer_content", getattr(item, "newer_text", "")) or ""),
+        source="runtime",
+    )
+
+
+def _with_explanation(record: MemoryRecord, entry: dict[str, Any]) -> MemoryRecord:
+    """Return a copy of ``record`` carrying the runtime's retrieval evidence."""
+
+    score = _as_float(entry.get("score", entry.get("relevance")))
+    signals = _signal_map(entry.get("signals"))
+    updates: dict[str, Any] = {}
+    if score is not None:
+        updates["relevance"] = score
+    if signals:
+        updates["signals"] = signals
+    if not record.salience and signals.get("salience") is not None:
+        updates["salience"] = signals["salience"]
+    return replace(record, **updates) if updates else record
+

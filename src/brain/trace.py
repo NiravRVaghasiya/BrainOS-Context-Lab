@@ -42,17 +42,25 @@ _KEY_VALUE_RE = re.compile(
 _OPENAI_KEY_RE = re.compile(r"\bsk-[A-Za-z0-9][A-Za-z0-9_-]{3,}\b")
 
 
-def redact_text(text: str) -> str:
-    """Remove credential-shaped values from a trace or explanation string."""
+def redact_text(text: str, *, secrets: tuple[str, ...] = ()) -> str:
+    """Remove credential-shaped values from a trace or explanation string.
+
+    ``secrets`` are credential values the caller knows are live (for example the
+    active session's provider key). They are removed by exact match first,
+    because pattern-based scrubbing cannot recognise an arbitrary key that a
+    user pasted into conversation content and that BrainOS then stored.
+    """
 
     result = str(text)
+    for secret in sorted({value for value in secrets if value}, key=len, reverse=True):
+        result = result.replace(secret, "[redacted]")
     result = _BEARER_RE.sub(r"\1[redacted]", result)
     result = _KEY_VALUE_RE.sub(r"\1[redacted]", result)
     result = _OPENAI_KEY_RE.sub("[redacted]", result)
     return result
 
 
-def sanitize_value(value: Any) -> Any:
+def sanitize_value(value: Any, *, secrets: tuple[str, ...] = ()) -> Any:
     """Return a JSON-like value with secret fields omitted and strings scrubbed."""
 
     if isinstance(value, Mapping):
@@ -61,22 +69,22 @@ def sanitize_value(value: Any) -> Any:
             key_text = str(key)
             if key_text.lower().replace("-", "_") in _SECRET_FIELD_NAMES:
                 continue
-            safe[key_text] = sanitize_value(item)
+            safe[key_text] = sanitize_value(item, secrets=secrets)
         return safe
     if isinstance(value, (list, tuple)):
-        return [sanitize_value(item) for item in value]
+        return [sanitize_value(item, secrets=secrets) for item in value]
     if isinstance(value, (int, float, bool)) or value is None:
         return value
     if isinstance(value, str):
-        return redact_text(value)
+        return redact_text(value, secrets=secrets)
     for method_name in ("to_dict", "model_dump", "dict"):
         dump = getattr(value, method_name, None)
         if callable(dump):
             try:
-                return sanitize_value(dump())
+                return sanitize_value(dump(), secrets=secrets)
             except Exception:
                 break
-    return redact_text(str(value))
+    return redact_text(str(value), secrets=secrets)
 
 
 def map_runtime_trace(payload: Any) -> list[TraceEvent]:
@@ -142,7 +150,9 @@ def map_runtime_trace(payload: Any) -> list[TraceEvent]:
     return events
 
 
-def sanitize_trace(events: Iterable[TraceEvent | dict[str, Any]]) -> list[dict[str, str]]:
+def sanitize_trace(
+    events: Iterable[TraceEvent | dict[str, Any]], *, secrets: tuple[str, ...] = ()
+) -> list[dict[str, str]]:
     """Convert trace events to browser-safe, non-secret dictionaries."""
 
     output: list[dict[str, str]] = []
@@ -157,8 +167,8 @@ def sanitize_trace(events: Iterable[TraceEvent | dict[str, Any]]) -> list[dict[s
                 detail = "[redacted]"
         output.append(
             {
-                "name": redact_text(name),
-                "detail": redact_text(detail),
+                "name": redact_text(name, secrets=secrets),
+                "detail": redact_text(detail, secrets=secrets),
                 "timestamp": timestamp,
             }
         )
