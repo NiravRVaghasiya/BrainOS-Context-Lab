@@ -1,0 +1,57 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "brainos-context-lab"
+version = "0.1.0"
+description = "An experimental platform for evaluating BrainOS as an external cognitive-memory layer for LLMs."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [
+  { name = "BrainOS Context Lab contributors" }
+]
+dependencies = []
+
+[project.optional-dependencies]
+ui = [
+  "gradio>=4.0"
+]
+providers = [
+  "openai>=1.0"
+]
+evaluation = [
+  "matplotlib>=3.7",
+  "pandas>=2.0"
+]
+dev = [
+  "pytest>=8.0",
+  "ruff>=0.6"
+]
+# Enable this extra only after the upstream BrainOS revision has been validated.
+integration = [
+  "brainos @ git+https://github.com/NiravRVaghasiya/BrainOS.git"
+]
+
+[project.scripts]
+brainos-context-lab = "app.ui:main"
+brainos-context-evaluate = "evaluation.run:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+addopts = "-ra"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]
