@@ -1,832 +1,757 @@
-"""Session-scoped controller between the UI callbacks and the service layer.
+"""Gradio-free controller behind the chat UI.
 
-Phase 4 wires the Gradio interface to :class:`app.service.ConversationService`.
-Callbacks stay thin: this controller owns everything a callback would otherwise
-improvise — lazy service creation, settings application, view construction, and
-credential discipline. It never imports Gradio, so the whole UI behaviour is
-unit-testable headlessly.
+The web layer is deliberately thin. Every behaviour the plan asks the UI to
+expose lives here, where it can be tested without a browser or a web
+framework:
 
-Rules carried forward from the Phase 3 hand-off contract:
+* session lifecycle (start / clear conversation / clear memory / end),
+* provider connection with credential validation and model listing,
+* one chat turn through :class:`ConversationService`,
+* rendering of the Memory, Context, and Cognitive Trace panels,
+* session export.
 
-* Context is configured through :class:`~app.state.ContextSettings` only, so
-  the token budget and the retrieval policy can never desynchronize.
-* Panels render the sanitized values the service already produces
-  (``inspect()``, ``context_stats``, ``context_report``, ``memory_ranking``,
-  ``trace``); nothing is re-serialized by hand.
-* The API key travels browser → server only. No view produced here ever
-  contains it, and runtime-derived strings are additionally scrubbed against
-  the active key before they are returned.
-* BrainOS stays behind ``BrainMemoryAdapter``; this module never imports
-  ``brainos_runtime``.
+Phase 5 makes these actions durable: the controller owns optional storage
+backends (``create_app`` injects the SQLite ones), forwards them to each
+session's service, deletes every persisted row when a session ends, and the
+export snapshot includes what the stores hold.
+
+Two constraints shape the module:
+
+1. **No credential leaves the process.** The controller accepts a key from the
+   form, stores it on the session's :class:`ProviderConfig`, and returns an
+   empty string for the key box. Every value it returns passes through
+   :func:`brain.trace.sanitize_value` with the active key as a known secret, so
+   a key pasted into a conversation cannot be echoed back by a panel either.
+2. **BrainOS stays behind the adapter.** The controller talks to
+   :class:`ConversationService` only; it never imports ``brainos_runtime``.
 """
 
 from __future__ import annotations
 
-import dataclasses
-import json
-import os
-import tempfile
-from collections.abc import Callable
-from dataclasses import replace
-from datetime import datetime, timezone
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, field, replace
 from typing import Any
 
-from brain.adapter import BrainOSNotConfiguredError
+from brain.adapter import BrainOSAdapter, BrainOSNotConfiguredError, MemoryRecord
 from brain.trace import sanitize_value
-from providers import ProviderConfigurationError, ProviderError, create_provider
-from providers.base import safe_error_message
+from providers import ProviderError, create_provider
+from providers.base import ProviderConfig, ProviderConfigurationError
 
-from .service import ConversationService, ConversationTurn
+from . import panels
+from .service import ConversationService, _warn_storage
 from .session import SessionManager
 from .state import ContextSettings, SessionState
 
-BRAINOS_INSTALL_HINT = (
-    "BrainOS runtime is not installed on this server. Cognitive memory needs "
-    "the integration extra: `pip install -e '.[integration]'`."
+PROVIDER_LABELS: tuple[tuple[str, str], ...] = (
+    ("OpenAI", "openai"),
+    ("OpenAI-compatible", "openai-compatible"),
 )
+DEFAULT_MODEL_PLACEHOLDER = "gpt-4o-mini"
 
-#: Baseline modes planned for Phase 6. Selecting one today keeps the BrainOS
-#: pipeline active and says so in the UI rather than silently mislabeling runs.
-BASELINE_MODES_PENDING = ("full_context", "sliding_window", "rag")
-
-#: Early guard against runaway sessions; full cost controls arrive in Phase 15.
-DEFAULT_MAX_TURNS = 400
-
-PROVIDER_CHOICES = ("OpenAI", "OpenAI-compatible")
-MEMORY_MODE_CHOICES = ("brainos", *BASELINE_MODES_PENDING)
-
-_TABLE_TEXT_LIMIT = 240
-
-_CONTEXT_FIELDS = frozenset(
-    field.name for field in dataclasses.fields(ContextSettings) if field.name != "mode"
-)
-_INT_CONTEXT_FIELDS = frozenset(
-    {
-        "max_tokens",
-        "recent_turn_budget",
-        "memory_budget",
-        "system_budget",
-        "max_recent_turns",
-        "per_message_overhead",
-        "max_memories",
-    }
+_BRAINOS_INSTALL_HINT = (
+    "BrainOS runtime is not installed, so no memory can be stored or retrieved. "
+    "Install the pinned upstream revision with "
+    "`pip install -e '.[integration]'`."
 )
 
 
-def _provider_name(label: Any) -> str:
-    """Normalize a UI provider label onto the factory's provider name."""
+@dataclass(frozen=True)
+class UILimits:
+    """Guard rails that protect a bring-your-own-key user from runaway usage.
 
-    return str(label or "").strip().lower().replace(" ", "-")
-
-
-def _optional_int(value: Any) -> int | None:
-    """Coerce an optional numeric UI value; zero and empty mean 'unset'."""
-
-    if value is None or value == "":
-        return None
-    try:
-        number = int(value)
-    except (TypeError, ValueError):
-        return None
-    return number if number > 0 else None
-
-
-def _clip(text: str, limit: int = _TABLE_TEXT_LIMIT) -> str:
-    """Bound table cell length so panels stay readable."""
-
-    text = str(text)
-    return text if len(text) <= limit else text[: limit - 1] + "…"
-
-
-def _score(value: Any) -> Any:
-    """Render an optional float for a table cell."""
-
-    if value is None:
-        return ""
-    try:
-        return round(float(value), 4)
-    except (TypeError, ValueError):
-        return ""
-
-
-def _render_prompt(messages: Any) -> str:
-    """Render a message list exactly as ``BuiltContext.final_prompt()`` does."""
-
-    blocks = [
-        f"{str(message.get('role', '')).upper()}\n{message.get('content', '')}"
-        for message in messages
-        if isinstance(message, dict)
-    ]
-    return "\n\n".join(blocks)
-
-
-def _empty_turn_view() -> dict[str, Any]:
-    return {
-        "retrieved_rows": [],
-        "ranking_json": [],
-        "context_summary": "",
-        "context_stats": {},
-        "final_prompt": "",
-        "trace_rows": [],
-        "decision_md": "",
-        "dropped_rows": [],
-        "conflict_rows": [],
-    }
-
-
-class ChatController:
-    """One browser session: state, lazily created service, and view models.
-
-    The controller is stored in ``gr.State``. Every public method returns plain
-    data (strings, row lists, dicts) that the UI maps onto components; no
-    method returns the API key or any value derived from it unredacted.
+    These are the two limits the plan's Phase 15 list that matter before any
+    network-facing surface exists: a session cannot grow without bound, and a
+    single message cannot be large enough to be a paste accident rather than a
+    chat turn. Benchmark controls (the rest of Phase 15) are not exposed yet.
     """
+
+    max_turns: int = 200
+    max_message_chars: int = 8000
+
+
+@dataclass(frozen=True)
+class ConnectionView:
+    """Result of a connect / disconnect / validate action."""
+
+    status: str
+    session_id: str = ""
+    connected: bool = False
+    models: tuple[str, ...] = ()
+    model_value: str = ""
+    key_value: str = ""
+    diagnostics: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class TurnView:
+    """Everything the UI panels need after one turn (or after a reset)."""
+
+    #: Session identifier, so the UI can persist the (non-secret) id it needs
+    #: even when the controller had to start a fresh session.
+    session_id: str = ""
+    history: list[dict[str, str]] = field(default_factory=list)
+    status: str = ""
+    stored_rows: list[list[Any]] = field(default_factory=list)
+    retrieved_rows: list[list[Any]] = field(default_factory=list)
+    dropped_rows: list[list[Any]] = field(default_factory=list)
+    conflict_rows: list[list[Any]] = field(default_factory=list)
+    stats: dict[str, Any] = field(default_factory=dict)
+    summary: str = ""
+    prompt: str = ""
+    trace: str = ""
+    trace_events: list[dict[str, str]] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class SessionView:
+    """Status of a session-level action (clear / end / export)."""
+
+    status: str = ""
+    session_id: str = ""
+
+
+class UIController:
+    """Own the mapping between UI actions and the application service layer."""
 
     def __init__(
         self,
-        state: SessionState | None = None,
+        sessions: SessionManager | None = None,
         *,
-        manager: SessionManager | None = None,
-        service_factory: Callable[[SessionState], ConversationService] | None = None,
-        max_turns: int = DEFAULT_MAX_TURNS,
+        provider_factory: Callable[[ProviderConfig], Any] | None = None,
+        adapter_factory: Callable[..., BrainOSAdapter] | None = None,
+        limits: UILimits | None = None,
         conversation_store: Any | None = None,
         memory_store: Any | None = None,
         evaluation_store: Any | None = None,
     ) -> None:
-        self.manager = manager
-        if state is not None:
-            self.state = state
-        elif manager is not None:
-            self.state = manager.start()
-        else:
-            self.state = SessionState()
-        self._service_factory = service_factory or (
-            lambda session_state: ConversationService(session_state)
-        )
-        self._service: ConversationService | None = None
-        # Phase 5 persistence. Stores are controller-owned and attached to the
-        # service at creation time. The controller knows only the storage
-        # *protocols*; choosing the SQLite backend is deployment wiring
-        # (``app.ui.create_app``), so a bare controller — scripts, unit tests —
-        # stays purely in-memory and never touches disk.
+        """Create a controller.
+
+        The three ``*_store`` parameters are the Phase 5 persistence seam
+        (structural protocols from :mod:`storage.conversations` and
+        :mod:`storage.evaluations`). They default to ``None`` — a purely
+        in-memory controller — and ``create_app`` injects the SQLite backends.
+        The controller forwards them to each session's
+        :class:`ConversationService` and uses them for session-level deletion
+        and export; it never lets a storage failure break a UI action.
+        """
+
+        self.sessions = sessions or SessionManager()
+        self.limits = limits or UILimits()
+        self._provider_factory = provider_factory or create_provider
+        self._adapter_factory = adapter_factory
         self._conversation_store = conversation_store
         self._memory_store = memory_store
         self._evaluation_store = evaluation_store
-        self._turns_used = 0
-        self.max_turns = max_turns
-        self._connection_status = (
-            "Not connected. Enter an API key and model, then validate the connection."
-        )
-        self._model_choices: list[str] = []
-        self._mode_notice = ""
-        self._last_status = (
-            "Session ready. Configure a provider to generate replies; "
-            "BrainOS observes and retrieves either way."
-        )
-        self._turn_view: dict[str, Any] = _empty_turn_view()
+        self._services: dict[str, ConversationService] = {}
+        self._last_turn: dict[str, Any] = {}
 
     # ------------------------------------------------------------------ #
-    # Service lifecycle
+    # Sessions
     # ------------------------------------------------------------------ #
 
-    @property
-    def service(self) -> ConversationService:
-        """Return the session's service, creating it on first use.
+    def ensure_session(self, session_id: str | None) -> SessionState:
+        """Return the session for ``session_id``, starting a fresh one if needed.
 
-        Creation imports the BrainOS runtime and may raise
-        :class:`BrainOSNotConfiguredError`; browser-facing callers convert that
-        into the install hint instead of a traceback. The controller's stores
-        are attached after creation when the factory did not supply them, so
-        persistence works through any service seam.
+        A browser may present an identifier the server no longer holds (process
+        restart, ended session). The fallback starts a new isolated session
+        instead of failing, because an expired id must never restore another
+        user's memory.
         """
 
-        if self._service is None:
-            self._service = self._service_factory(self.state)
-            if self._conversation_store is not None and getattr(
-                self._service, "conversation_store", None
-            ) is None:
-                self._service.conversation_store = self._conversation_store
-            if self._memory_store is not None and getattr(
-                self._service, "memory_store", None
-            ) is None:
-                self._service.memory_store = self._memory_store
-        return self._service
+        if session_id:
+            state = self.sessions.get(session_id)
+            if state is not None:
+                return state
+        return self.sessions.start()
 
-    @property
-    def conversation_store(self) -> Any:
-        """The injected transcript store, or ``None`` for in-memory sessions."""
+    def service(self, session_id: str | None) -> ConversationService:
+        """Return the cached service for a session, creating it on first use."""
 
-        return self._conversation_store
-
-    @property
-    def memory_store(self) -> Any:
-        """The injected memory mirror, or ``None`` for in-memory sessions."""
-
-        return self._memory_store
-
-    @property
-    def evaluation_store(self) -> Any:
-        """The injected evaluation-run store, or ``None``."""
-
-        return self._evaluation_store
-
-    def _secrets(self) -> tuple[str, ...]:
-        key = self.state.provider.api_key
-        return (key,) if key else ()
-
-    def _sanitize(self, value: Any) -> Any:
-        return sanitize_value(value, secrets=self._secrets())
-
-    def _active_provider(self) -> Any:
-        """Return the session's provider, preferring the service's seam.
-
-        Falling back to the factory directly when the BrainOS runtime is
-        unavailable keeps provider credentials validatable even on a server
-        without the integration extra installed.
-        """
-
-        try:
-            return self.service.provider()
-        except BrainOSNotConfiguredError:
-            return create_provider(self.state.provider)
+        state = self.ensure_session(session_id)
+        service = self._services.get(state.session_id)
+        if service is None:
+            service = ConversationService(
+                state,
+                adapter_factory=self._adapter_factory,
+                provider_factory=self._provider_factory,
+                conversation_store=self._conversation_store,
+                memory_store=self._memory_store,
+            )
+            self._services[state.session_id] = service
+        return service
 
     # ------------------------------------------------------------------ #
-    # Settings
+    # Provider connection
     # ------------------------------------------------------------------ #
 
-    def apply_provider(
+    def connect(
         self,
+        session_id: str | None,
         *,
-        provider: Any = None,
-        model: Any = None,
-        api_key: Any = None,
-        base_url: Any = None,
-        temperature: Any = None,
-        max_output_tokens: Any = None,
-    ) -> str:
-        """Store sidebar provider settings on the session state.
+        provider: str,
+        model: str,
+        api_key: str,
+        endpoint: str = "",
+        temperature: float = 0.2,
+        max_output_tokens: int | None = None,
+    ) -> ConnectionView:
+        """Validate and store a session-local provider configuration.
 
-        An empty ``api_key`` keeps the credential already held in server
-        memory, so the browser never has to echo the key back. Any real change
-        drops the cached service (and with it the cached provider client); the
-        session's BrainOS runtime lives on ``state.brain`` and survives.
+        A blank key keeps the key already configured for this session, so
+        changing the model (or the endpoint) does not require retyping it. The
+        key box is always cleared in the response — the value stays in server
+        memory and is never rendered back into the browser.
         """
 
-        current = self.state.provider
-        name = _provider_name(current.provider if provider is None else provider)
-        key = current.api_key
-        if api_key is not None and str(api_key).strip():
-            key = str(api_key).strip()
-        url: str | None = current.base_url if base_url is None else str(base_url).strip()
-        if url is not None and not url:
-            url = None
+        state = self.ensure_session(session_id)
+        secrets = self._secrets(state)
+        existing = state.provider
+        key = (api_key or "").strip() or existing.api_key
         try:
-            temperature_value = (
-                current.temperature if temperature is None else float(temperature)
-            )
-            model_text = (current.model if model is None else str(model)).strip()
-            output_tokens = (
-                current.max_tokens
-                if max_output_tokens is None
-                else _optional_int(max_output_tokens)
-            )
-            candidate = replace(
-                current,
-                provider=name,
-                model=model_text,
+            config = ProviderConfig(
+                provider=(provider or existing.provider).strip() or existing.provider,
+                model=(model or "").strip() or existing.model,
                 api_key=key,
-                base_url=url,
-                temperature=temperature_value,
-                max_tokens=output_tokens,
+                base_url=(endpoint or "").strip() or None,
+                temperature=float(temperature),
+                max_tokens=max_output_tokens,
             )
         except (ProviderConfigurationError, TypeError, ValueError) as exc:
-            return f"Provider settings not applied: {exc}"
-        if candidate == current:
-            return "Provider settings unchanged."
-        self.state.provider = candidate
-        self._service = None
-        return "Provider settings applied to this session."
+            return ConnectionView(
+                status=self._redact(f"⚠️ {exc}", secrets),
+                session_id=state.session_id,
+                key_value="",
+            )
 
-    def apply_context_settings(self, **changes: Any) -> str:
-        """Validate and store context knobs through ``ContextSettings`` only.
+        state.provider = config
+        # Only reset an *existing* service. Connecting a provider must not
+        # create the BrainOS runtime as a side effect, otherwise a missing
+        # installation would break the connect button instead of the chat.
+        service = self._services.get(state.session_id)
+        if service is not None:
+            service.reset_provider()
 
-        The candidate settings must build both a ``ContextBudget`` and a
-        ``RetrievalPolicy`` before they are accepted, so an invalid slider
-        value can never reach context construction mid-turn.
+        if not key:
+            return ConnectionView(
+                status=(
+                    "No API key set — BrainOS will still observe and retrieve "
+                    "memory, but no model will be called."
+                ),
+                connected=False,
+                models=(),
+                model_value=config.model,
+                session_id=state.session_id,
+                key_value="",
+            )
+
+        try:
+            client = self._provider_factory(config)
+            client.validate_credentials()
+            models = tuple(self._clean_models(client.list_models()))
+        except ProviderError as exc:
+            return ConnectionView(
+                status=self._redact(f"⚠️ {exc}", self._secrets(state)),
+                session_id=state.session_id,
+                connected=False,
+                models=(),
+                model_value=config.model,
+                key_value="",
+            )
+        except Exception as exc:  # noqa: BLE001 - surfaced to the user, redacted
+            return ConnectionView(
+                status=self._redact(
+                    f"⚠️ {type(exc).__name__}: {exc}", self._secrets(state)
+                ),
+                session_id=state.session_id,
+                connected=False,
+                models=(),
+                model_value=config.model,
+                key_value="",
+            )
+
+        if config.model and config.model not in models:
+            models = (config.model, *models)
+        return ConnectionView(
+            status=(
+                f"Connected to **{config.provider}** · model `{config.model or '—'}` · "
+                f"{len(models)} model(s) available. The key is held in server "
+                "memory for this session only."
+            ),
+            session_id=state.session_id,
+            connected=True,
+            models=models,
+            model_value=config.model,
+            key_value="",
+            diagnostics=config.safe_dict(),
+        )
+
+    def disconnect(self, session_id: str | None) -> ConnectionView:
+        """Forget the session key and drop the cached provider client."""
+
+        state = self.ensure_session(session_id)
+        service = self._services.get(state.session_id)
+        if service is not None:
+            service.reset_provider()
+        state.clear_credentials()
+        return ConnectionView(
+            status="API key cleared from server memory. Generation is disabled.",
+            session_id=state.session_id,
+            connected=False,
+            models=(),
+            model_value=state.provider.model,
+            key_value="",
+        )
+
+    def refresh_models(self, session_id: str | None) -> ConnectionView:
+        """Re-list models for the configured key without changing it."""
+
+        state = self.ensure_session(session_id)
+        if not state.provider.api_key:
+            return ConnectionView(
+                status="Set an API key to list models.",
+                session_id=state.session_id,
+                connected=False,
+                model_value=state.provider.model,
+                key_value="",
+            )
+        return self.connect(
+            state.session_id,
+            provider=state.provider.provider,
+            model=state.provider.model,
+            api_key="",
+            endpoint=state.provider.base_url or "",
+            temperature=state.provider.temperature,
+            max_output_tokens=state.provider.max_tokens,
+        )
+
+    # ------------------------------------------------------------------ #
+    # Context configuration
+    # ------------------------------------------------------------------ #
+
+    def update_context(self, session_id: str | None, **fields: Any) -> str:
+        """Apply context-budget and retrieval settings from the sidebar.
+
+        Unknown fields are rejected rather than ignored: a typo in a slider name
+        would otherwise leave the user looking at settings that do nothing.
         """
 
-        updates: dict[str, Any] = {}
-        for key, value in changes.items():
-            if key not in _CONTEXT_FIELDS or value is None:
-                continue
-            if key in _INT_CONTEXT_FIELDS:
-                try:
-                    value = int(value)
-                except (TypeError, ValueError):
-                    return f"Context settings not applied: {key} must be a whole number."
-            updates[key] = value
-        if not updates:
-            return "Context settings unchanged."
-        candidate = replace(self.state.context, **updates)
-        if candidate == self.state.context:
-            return "Context settings unchanged."
+        state = self.ensure_session(session_id)
+        known = set(ContextSettings().__dataclass_fields__)
+        unknown = sorted(set(fields) - known)
+        if unknown:
+            return f"⚠️ Unknown context setting(s): {', '.join(unknown)}"
+        settings = replace(state.context, **fields)
         try:
-            candidate.context_budget()
-            candidate.retrieval_policy()
-        except Exception as exc:
-            return f"Context settings not applied: {exc}"
-        self.state.context = candidate
-        return "Context settings applied."
+            settings.context_budget()
+            settings.retrieval_policy()
+        except (TypeError, ValueError) as exc:
+            return f"⚠️ {exc}"
+        state.context = settings
+        return (
+            f"Context updated · max {settings.max_tokens} tokens · "
+            f"history window {settings.recent_turn_budget} · "
+            f"memory budget {settings.memory_budget} · "
+            f"max {settings.max_memories} memories · mode `{settings.mode}`"
+        )
 
-    def set_memory_mode(self, mode: Any) -> str:
-        """Record the baseline-mode selection and return its UI notice."""
+    def context_payload(self, session_id: str | None) -> dict[str, Any]:
+        """Return the current context settings for diagnostics and export."""
 
-        name = str(mode or "brainos").strip().lower() or "brainos"
-        self.state.context.mode = name
-        if name in BASELINE_MODES_PENDING:
-            self._mode_notice = (
-                f"Baseline mode `{name}` arrives with Phase 6; until then every "
-                "turn runs the BrainOS pipeline. The selection is recorded so "
-                "runs are never silently mislabeled."
-            )
-        else:
-            self._mode_notice = ""
-        return self._mode_notice
-
-    # ------------------------------------------------------------------ #
-    # Provider actions
-    # ------------------------------------------------------------------ #
-
-    def validate_connection(self) -> str:
-        """Check the active credentials without ever echoing them back."""
-
-        config = self.state.provider
-        if not config.api_key or not config.model:
-            self._connection_status = (
-                "Connection not validated: an API key and a model identifier are required."
-            )
-            return self._connection_status
-        try:
-            provider = self._active_provider()
-            provider.validate_credentials()
-        except (ProviderError, BrainOSNotConfiguredError) as exc:
-            self._connection_status = (
-                f"Connection failed: {safe_error_message(exc, secrets=self._secrets())}"
-            )
-        except Exception as exc:  # never send a traceback to the browser
-            self._connection_status = (
-                f"Connection failed: {safe_error_message(exc, secrets=self._secrets())}"
-            )
-        else:
-            self._connection_status = (
-                f"Connected: credentials accepted for model `{config.model}` "
-                f"on `{config.provider}`."
-            )
-        return self._connection_status
-
-    def list_models(self) -> str:
-        """Fetch model identifiers for the sidebar dropdown."""
-
-        config = self.state.provider
-        if not config.api_key:
-            self._connection_status = "Cannot list models without an API key."
-            return self._connection_status
-        try:
-            provider = self._active_provider()
-            models = provider.list_models()
-        except (ProviderError, BrainOSNotConfiguredError) as exc:
-            self._connection_status = (
-                f"Model listing failed: {safe_error_message(exc, secrets=self._secrets())}"
-            )
-        except Exception as exc:
-            self._connection_status = (
-                f"Model listing failed: {safe_error_message(exc, secrets=self._secrets())}"
-            )
-        else:
-            self._model_choices = [str(model).strip() for model in models if str(model).strip()]
-            self._connection_status = (
-                f"{len(self._model_choices)} models available for `{config.provider}`."
-            )
-        return self._connection_status
+        state = self.ensure_session(session_id)
+        settings = state.context
+        payload = {
+            "mode": settings.mode,
+            "uses_memory": settings.uses_memory(),
+            "budget": settings.context_budget().__dict__,
+            "policy": settings.retrieval_policy().__dict__,
+        }
+        return self._redact(payload, self._secrets(state))
 
     # ------------------------------------------------------------------ #
     # Conversation
     # ------------------------------------------------------------------ #
 
-    def send_message(self, text: str) -> dict[str, Any]:
-        """Run one turn through the service and return the full panel view."""
+    def chat(self, session_id: str | None, message: str) -> TurnView:
+        """Run one user turn and render every inspection panel."""
 
-        message = str(text or "").strip()
-        if not message:
-            return self.views(status="Type a message to send.")
-        if self._turns_used >= self.max_turns:
-            return self.views(
-                status=(
-                    f"Session turn limit ({self.max_turns}) reached. End the session "
-                    "to start a fresh conversation."
-                )
+        state = self.ensure_session(session_id)
+        text = (message or "").strip()
+        if not text:
+            return self._view(state, notice="Type a message to start.")
+        if len(text) > self.limits.max_message_chars:
+            return self._view(
+                state,
+                notice=(
+                    f"⚠️ Message is {len(text)} characters; the limit is "
+                    f"{self.limits.max_message_chars}. Shorten it or raise the limit."
+                ),
             )
+        if self._user_turns(state) >= self.limits.max_turns:
+            return self._view(
+                state,
+                notice=(
+                    f"⚠️ This session reached {self.limits.max_turns} turns. "
+                    "Start a new session to continue."
+                ),
+            )
+
         try:
-            turn = self.service.handle_user_message(message)
+            service = self.service(state.session_id)
         except BrainOSNotConfiguredError:
-            return self.views(status=BRAINOS_INSTALL_HINT)
-        except ProviderError as exc:
-            return self.views(
-                status=(
-                    "Provider configuration error: "
-                    f"{safe_error_message(exc, secrets=self._secrets())}"
-                )
-            )
-        except Exception as exc:  # never send a traceback to the browser
-            return self.views(
-                status=f"Turn failed: {safe_error_message(exc, secrets=self._secrets())}"
-            )
-        self._turns_used += 1
-        self._turn_view = self._turn_view_from(turn)
-        return self.views(status=self._compose_status(turn))
-
-    def clear_conversation(self) -> dict[str, Any]:
-        """Clear the transcript and drop the session's BrainOS memory."""
+            return self._view(state, notice=f"⚠️ {_BRAINOS_INSTALL_HINT}")
 
         try:
-            self.service.clear_conversation()
-        except Exception:
-            # Without a usable runtime the local transcript is still cleared.
-            self.state.clear_conversation()
-        self._service = None
-        self._turns_used = 0
-        self._turn_view = _empty_turn_view()
-        return self.views(
-            status=(
-                "Conversation cleared and BrainOS memory dropped for this session. "
-                "Provider settings were kept; the API key stays in server memory "
-                "until the session ends."
+            turn = service.handle_user_message(text)
+        except BrainOSNotConfiguredError:
+            return self._view(state, notice=f"⚠️ {_BRAINOS_INSTALL_HINT}")
+        except Exception as exc:  # noqa: BLE001 - a web turn must not crash the app
+            return self._view(
+                state,
+                notice=self._redact(
+                    f"⚠️ {type(exc).__name__}: {exc}", self._secrets(state)
+                ),
             )
+
+        self._last_turn[state.session_id] = turn
+        return self._view(
+            state,
+            turn=turn,
+            error=turn.error or "",
+            notice=(
+                "The provider request failed; the error below is redacted."
+                if turn.error
+                else ""
+            ),
         )
 
-    def clear_memory(self) -> dict[str, Any]:
-        """Drop BrainOS memory while keeping the transcript (plan §19).
+    def refresh(self, session_id: str | None) -> TurnView:
+        """Re-render the panels from the last turn without sending anything."""
 
-        Distinct from :meth:`clear_conversation`: the conversation continues,
-        but the runtime — and its persisted mirror — start empty. The next
-        turn lazily creates a fresh runtime through the usual seam.
-        """
+        state = self.ensure_session(session_id)
+        return self._view(state, turn=self._last_turn.get(state.session_id))
 
-        self.state.brain = None
-        self.state.diagnostics.clear()
-        self.state.last_context.clear()
-        self._service = None
-        self._turn_view = _empty_turn_view()
-        if self._memory_store is not None:
-            try:
-                self._memory_store.clear(self.state.session_id)
-            except Exception:
-                pass
-        return self.views(
-            status=(
-                "BrainOS memory cleared for this session; the transcript was "
-                "kept. Facts observed from here on are stored in a fresh "
-                "runtime."
-            )
-        )
+    def clear_conversation(self, session_id: str | None) -> TurnView:
+        """Clear the transcript and the session's BrainOS runtime."""
 
-    def end_session(self) -> tuple[ChatController, dict[str, Any]]:
-        """Clear credentials from server memory and start a fresh session.
-
-        *Delete session* in the plan's data-control list: everything persisted
-        for the session — transcript rows, memory mirror, evaluation runs — is
-        removed before the session itself is dropped. Deletion never creates a
-        store: a session that persisted nothing has nothing to delete.
-        """
-
-        self._delete_persisted_session(self.state.session_id)
-        if self.manager is not None:
-            self.manager.end(self.state.session_id)
+        state = self.ensure_session(session_id)
+        service = self._services.get(state.session_id)
+        if service is None:
+            state.clear_conversation()
         else:
-            self.state.clear_credentials()
-            self.state.clear_conversation()
-        self._service = None
-        fresh = ChatController(
-            manager=self.manager,
-            service_factory=self._service_factory,
-            max_turns=self.max_turns,
-            conversation_store=self._conversation_store,
-            memory_store=self._memory_store,
-            evaluation_store=self._evaluation_store,
-        )
-        return fresh, fresh.views(
-            status=(
-                "Session ended: credentials cleared from server memory, the "
-                "BrainOS runtime dropped, and all persisted session data "
-                "deleted. A fresh session is ready."
-            )
+            service.clear_conversation()
+        self._last_turn.pop(state.session_id, None)
+        return self._view(
+            state,
+            notice=(
+                "Conversation and memory cleared — persisted rows deleted too."
+            ),
         )
 
-    def _delete_persisted_session(self, session_id: str) -> None:
-        if self._conversation_store is not None:
-            try:
-                self._conversation_store.delete_session(session_id)
-            except Exception:
-                pass
-        if self._memory_store is not None:
-            try:
-                self._memory_store.clear(session_id)
-            except Exception:
-                pass
-        if self._evaluation_store is not None:
-            try:
-                self._evaluation_store.delete_session_data(session_id)
-            except Exception:
-                pass
+    def clear_memory(self, session_id: str | None) -> TurnView:
+        """Drop BrainOS memory while keeping the visible transcript."""
+
+        state = self.ensure_session(session_id)
+        service = self._services.get(state.session_id)
+        if service is None:
+            state.brain = None
+        else:
+            service.reset_memory()
+        self._last_turn.pop(state.session_id, None)
+        return self._view(
+            state,
+            notice=(
+                "BrainOS memory cleared (persisted mirror too); transcript kept."
+            ),
+        )
+
+    def end_session(self, session_id: str | None) -> SessionView:
+        """End a session: drop memory, transcript, and the provider key."""
+
+        if not session_id:
+            return SessionView(status="No active session.", session_id="")
+        self._services.pop(session_id, None)
+        self._last_turn.pop(session_id, None)
+        self._delete_persisted_session(session_id)
+        ended = self.sessions.end(session_id)
+        state = self.sessions.start()
+        return SessionView(
+            status=(
+                "Session ended — key, transcript, memory, and all persisted "
+                "session rows dropped."
+                if ended
+                else "No active session."
+            ),
+            session_id=state.session_id,
+        )
 
     # ------------------------------------------------------------------ #
     # Export
     # ------------------------------------------------------------------ #
 
-    def export_session(self) -> dict[str, Any]:
-        """Return the session export: config, transcript, memories, last turn.
+    def export_session(self, session_id: str | None) -> dict[str, Any]:
+        """Return a sanitized, JSON-serializable snapshot of a session."""
 
-        Reads the persisted mirrors when they exist and falls back to process
-        state otherwise, so an export is complete even for a session that was
-        never persisted. The payload passes the same sanitizer as every other
-        browser-visible value.
+        state = self.ensure_session(session_id)
+        service = self._services.get(state.session_id)
+        memories: Sequence[MemoryRecord] = (
+            service.stored_memories() if service is not None else []
+        )
+        payload = {
+            "session_id": state.session_id,
+            "conversation_id": state.conversation_id,
+            "provider": state.provider.safe_dict(),
+            "context": self.context_payload(state.session_id),
+            "messages": [dict(message) for message in state.messages],
+            "memories": [
+                {
+                    "memory_id": record.memory_id,
+                    "text": record.text,
+                    "memory_type": record.memory_type,
+                    "source_turn": record.source_turn,
+                    "observed_at": record.observed_at,
+                    "retrieval_count": record.retrieval_count,
+                    "confidence": record.confidence,
+                    "status": record.status,
+                }
+                for record in memories
+            ],
+            "persistence": self._persistence_payload(state.session_id),
+        }
+        return self._redact(payload, self._secrets(state))
+
+    def export_text(self, session_id: str | None) -> str:
+        """Return the export snapshot as indented JSON text."""
+
+        return panels.export_payload(self.export_session(session_id))
+
+    # ------------------------------------------------------------------ #
+    # Rendering
+    # ------------------------------------------------------------------ #
+
+    def _view(
+        self,
+        state: SessionState,
+        *,
+        turn: Any | None = None,
+        error: str = "",
+        notice: str = "",
+    ) -> TurnView:
+        """Render every panel from session state and the last turn."""
+
+        secrets = self._secrets(state)
+        service = self._services.get(state.session_id)
+        memories = self._stored_memories_safe(service)
+
+        retrieved: list[MemoryRecord] = []
+        ranking: list[Mapping[str, Any]] = []
+        stats: Mapping[str, Any] = {}
+        report: Mapping[str, Any] = {}
+        events: list[Mapping[str, str]] = []
+        generated = False
+        if turn is not None:
+            retrieved = list(turn.retrieved_memories)
+            ranking = [dict(item) for item in turn.memory_ranking]
+            stats = dict(turn.context_stats)
+            report = dict(turn.context_report)
+            events = list(turn.trace)
+            generated = bool(turn.generated)
+
+        # Redaction happens on the *rendered* values, not on the records:
+        # sanitize_value would turn a MemoryRecord into a dict and the panel
+        # formatting would then read the wrong shape.
+        history = [
+            {"role": str(message.get("role", "user")), "content": str(message.get("content", ""))}
+            for message in state.messages
+            if isinstance(message, Mapping)
+        ]
+        query = next(
+            (
+                str(message.get("content", ""))
+                for message in reversed(state.messages)
+                if isinstance(message, Mapping) and message.get("role") == "user"
+            ),
+            "",
+        )
+        status = panels.status_line(
+            turn=len(state.messages),
+            mode=state.context.mode,
+            model=state.provider.model,
+            generated=generated and not error,
+            stats=stats,
+            error=error,
+            notice=notice,
+            configured=bool(state.provider.api_key),
+            has_turn=turn is not None,
+        )
+        return TurnView(
+            session_id=state.session_id,
+            history=self._redact(history, secrets),
+            status=self._redact(status, secrets),
+            stored_rows=self._redact(panels.memory_rows(memories), secrets),
+            retrieved_rows=self._redact(
+                panels.retrieved_rows(retrieved, ranking), secrets
+            ),
+            dropped_rows=panels.dropped_rows(self._redact(report, secrets)),
+            conflict_rows=panels.conflict_rows(self._redact(report, secrets)),
+            stats=self._redact(dict(stats), secrets),
+            summary=self._redact(
+                panels.context_summary(
+                    self._redact(stats, secrets),
+                    report=self._redact(report, secrets),
+                    mode=state.context.mode,
+                    turn=len(state.messages),
+                ),
+                secrets,
+            ),
+            prompt=self._redact(
+                panels.render_prompt(
+                    turn.context_messages if turn is not None else state.last_context
+                ),
+                secrets,
+            ),
+            trace=self._redact(
+                panels.trace_markdown(
+                    query=str(query),
+                    stats=self._redact(stats, secrets),
+                    report=self._redact(report, secrets),
+                    events=self._redact(events, secrets),
+                    stored=list(turn.stored_memories)
+                    if turn is not None
+                    else memories,
+                    generated=generated,
+                    error=error,
+                    model=state.provider.model,
+                ),
+                secrets,
+            ),
+            trace_events=self._redact(
+                [dict(event) for event in events if isinstance(event, Mapping)], secrets
+            ),
+        )
+
+    # ------------------------------------------------------------------ #
+    # Helpers
+    # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def _stored_memories_safe(service: ConversationService | None) -> list[MemoryRecord]:
+        """List stored memories, tolerating an unavailable runtime.
+
+        The memory panel is a best-effort surface: if BrainOS is not installed
+        or the runtime has no memory yet, the chat still works and the panel is
+        simply empty.
         """
 
-        payload = {
-            "exported_at": datetime.now(timezone.utc).isoformat(),
-            "application": "BrainOS Context Lab",
-            "session_id": self.state.session_id,
-            "conversation_id": self.state.conversation_id,
-            "provider": self.state.provider.safe_dict(),
-            "context_settings": dataclasses.asdict(self.state.context),
-            "turns_used": self._turns_used,
-            "max_turns": self.max_turns,
-            "transcript": self._export_transcript(),
-            "memories": self._export_memories(),
-            "last_turn": {
-                "context_stats": self._turn_view.get("context_stats", {}),
-                "ranking": self._turn_view.get("ranking_json", []),
-                "dropped": self._turn_view.get("dropped_rows", []),
-                "conflicts": self._turn_view.get("conflict_rows", []),
-            },
-        }
-        return self._sanitize(payload)
-
-    def export_session_file(self) -> tuple[str, str]:
-        """Write :meth:`export_session` to a temporary JSON file for download."""
-
-        payload = self.export_session()
-        handle, path = tempfile.mkstemp(prefix="brainos-session-", suffix=".json")
-        with os.fdopen(handle, "w", encoding="utf-8") as stream:
-            json.dump(payload, stream, indent=2, default=str)
-        summary = (
-            f"Session exported: {len(payload['transcript'])} messages, "
-            f"{len(payload['memories'])} memories."
-        )
-        return path, summary
-
-    def _export_transcript(self) -> list[dict[str, Any]]:
-        store = self._conversation_store
-        if store is not None:
-            try:
-                rows: list[dict[str, Any]] = []
-                for conversation_id in store.list_conversations(self.state.session_id):
-                    for message in store.list_messages(self.state.session_id, conversation_id):
-                        rows.append(
-                            {
-                                "conversation_id": conversation_id,
-                                "role": message.role,
-                                "content": message.content,
-                                "created_at": message.created_at,
-                            }
-                        )
-                return rows
-            except Exception:
-                pass
-        return [dict(message) for message in self.state.messages]
-
-    def _export_memories(self) -> list[dict[str, Any]]:
-        store = self._memory_store
-        if store is not None:
-            try:
-                return list(store.list_memories(self.state.session_id))
-            except Exception:
-                pass
-        if self._service is not None or self.state.brain is not None:
-            try:
-                return list(self.service.inspect()["memories"])
-            except Exception:
-                return []
-        return []
-
-    # ------------------------------------------------------------------ #
-    # View models
-    # ------------------------------------------------------------------ #
-
-    def views(self, *, status: str | None = None) -> dict[str, Any]:
-        """Return every browser-visible value for the current session state."""
-
-        if status is not None:
-            self._last_status = status
-        stored_rows = self._stored_rows()
-        provider = self.state.provider
-        view: dict[str, Any] = {
-            "history": [dict(message) for message in self.state.messages],
-            "status": self._last_status,
-            "stored_rows": stored_rows,
-            "stored_count": len(stored_rows),
-            "provider_summary": (
-                f"{provider.provider} · {provider.model or 'no model'} · "
-                f"key {'set' if provider.api_key else 'not set'}"
-            ),
-            "connection_status": self._connection_status,
-            "model_choices": list(self._model_choices),
-            "model_value": provider.model,
-            "mode": self.state.context.mode,
-            "mode_notice": self._mode_notice,
-            "turns_used": self._turns_used,
-            "max_turns": self.max_turns,
-        }
-        view.update(self._turn_view)
-        return view
-
-    def _stored_rows(self) -> list[list[Any]]:
-        """Render stored memories from the service's sanitized inspection."""
-
-        if self._service is None and self.state.brain is None:
-            # Nothing can have been stored yet; do not create a runtime just
-            # to render an empty table (page load must stay BrainOS-optional).
+        if service is None:
             return []
         try:
-            memories = self.service.inspect()["memories"]
-        except Exception:
+            return service.stored_memories()
+        except Exception:  # noqa: BLE001 - panel is best-effort
             return []
-        rows: list[list[Any]] = []
-        for record in memories:
-            observed = str(record.get("observed_at") or record.get("created_at") or "")
-            source_turn = record.get("source_turn")
-            retrieval_count = record.get("retrieval_count")
-            rows.append(
-                [
-                    str(record.get("memory_type", "")),
-                    _clip(str(record.get("text", ""))),
-                    observed[:19].replace("T", " "),
-                    int(retrieval_count) if isinstance(retrieval_count, int) else 0,
-                    "" if source_turn is None else int(source_turn),
-                    str(record.get("status") or "active"),
-                ]
-            )
-        return rows
 
-    def _turn_view_from(self, turn: ConversationTurn) -> dict[str, Any]:
-        text_by_id = {record.memory_id: record.text for record in turn.retrieved_memories}
-        retrieved_rows: list[list[Any]] = []
-        for item in turn.memory_ranking:
-            flags = [name for name in ("contested", "suspicious") if item.get(name)]
-            memory_text = text_by_id.get(str(item.get("memory_id", "")), "")
-            retrieved_rows.append(
-                [
-                    item.get("rank", ""),
-                    _score(item.get("score")),
-                    _score(item.get("relevance")),
-                    str(item.get("memory_type", "")),
-                    _clip(str(self._sanitize(memory_text))),
-                    ", ".join(flags),
-                ]
-            )
-        report = turn.context_report or {}
-        dropped_rows = [
-            [
-                str(item.get("reason", "")),
-                _clip(str(self._sanitize(item.get("text", "")))),
-                str(self._sanitize(item.get("detail", ""))),
-                _score(item.get("score")),
-            ]
-            for item in report.get("dropped", [])
-            if isinstance(item, dict)
-        ]
-        conflict_rows = [
-            [
-                str(self._sanitize(item.get("subject", ""))),
-                str(item.get("kept_memory_id", "")),
-                str(item.get("dropped_memory_id", "")) or "(contested — both kept)",
-                str(item.get("source", "")),
-                str(self._sanitize(item.get("reason", ""))),
-            ]
-            for item in report.get("conflicts", [])
-            if isinstance(item, dict)
-        ]
-        trace_rows = [
-            [
-                str(event.get("name", "")),
-                str(event.get("detail", "")),
-                str(event.get("timestamp", ""))[:19].replace("T", " "),
-            ]
-            for event in turn.trace
-        ]
-        return {
-            "retrieved_rows": retrieved_rows,
-            "ranking_json": [dict(item) for item in turn.memory_ranking],
-            "context_summary": self._context_summary(turn.context_stats),
-            "context_stats": dict(turn.context_stats),
-            "final_prompt": _render_prompt(turn.context_messages),
-            "trace_rows": trace_rows,
-            "decision_md": self._decision_markdown(turn),
-            "dropped_rows": dropped_rows,
-            "conflict_rows": conflict_rows,
+    def _persistence_payload(self, session_id: str) -> dict[str, Any]:
+        """The persisted view of a session for the export snapshot.
+
+        ``messages`` (top level) is the live transcript; ``persistence`` shows
+        what the durable stores hold for this session — every conversation
+        with rows still in the database plus the memory mirror. Conversations
+        cleared through the UI are absent because clearing deletes their rows.
+        Reads are best-effort: a failing backend downgrades the export instead
+        of failing it.
+        """
+
+        payload: dict[str, Any] = {
+            "enabled": self._conversation_store is not None
+            or self._memory_store is not None,
+            "conversations": [],
+            "memories": [],
         }
+        if self._conversation_store is not None:
+            try:
+                for conversation_id in self._conversation_store.list_conversations(
+                    session_id
+                ):
+                    messages = self._conversation_store.list_messages(
+                        session_id, conversation_id
+                    )
+                    payload["conversations"].append(
+                        {
+                            "conversation_id": conversation_id,
+                            "messages": [
+                                {
+                                    "role": message.role,
+                                    "content": message.content,
+                                    "created_at": message.created_at,
+                                }
+                                for message in messages
+                            ],
+                        }
+                    )
+            except Exception as exc:  # noqa: BLE001 - export is best-effort
+                _warn_storage("export transcript read failed", exc)
+        if self._memory_store is not None:
+            try:
+                payload["memories"] = self._memory_store.list_memories(session_id)
+            except Exception as exc:  # noqa: BLE001 - export is best-effort
+                _warn_storage("export memory read failed", exc)
+        return payload
 
-    def _context_summary(self, stats: dict[str, Any]) -> str:
-        """Markdown digest of the plan's required accounting fields."""
+    def _delete_persisted_session(self, session_id: str) -> None:
+        """Forget everything a session persisted (plan §19 user-data deletion).
 
-        if not stats:
-            return ""
+        Best-effort per backend: a failing store logs the exception type and
+        the remaining stores are still cleared, so one broken table cannot
+        retain rows the user asked to delete.
+        """
 
-        def number(name: str) -> Any:
-            return stats.get(name, 0)
+        if self._conversation_store is not None:
+            try:
+                self._conversation_store.delete_session(session_id)
+            except Exception as exc:  # noqa: BLE001 - best-effort deletion
+                _warn_storage("conversation deletion failed", exc)
+        if self._memory_store is not None:
+            try:
+                self._memory_store.clear(session_id)
+            except Exception as exc:  # noqa: BLE001 - best-effort deletion
+                _warn_storage("memory deletion failed", exc)
+        if self._evaluation_store is not None:
+            try:
+                self._evaluation_store.delete_session_data(session_id)
+            except Exception as exc:  # noqa: BLE001 - best-effort deletion
+                _warn_storage("evaluation deletion failed", exc)
 
-        lines = [
-            (
-                f"**Final context:** {number('final_context_tokens')} tokens "
-                f"(budget {number('max_tokens')}, "
-                f"{100.0 * float(stats.get('budget_utilization', 0.0)):.1f}% used, "
-                f"counter `{stats.get('token_counter', 'estimate_tokens')}`)"
-            ),
-            (
-                f"**Raw history:** {number('raw_history_tokens')} tokens → recent window "
-                f"{number('recent_history_tokens')} tokens "
-                f"({number('history_messages_selected')}/{number('history_messages_considered')} "
-                "messages kept)"
-            ),
-            (
-                f"**Memory:** {number('retrieved_memory_tokens')} tokens across "
-                f"{number('selected_memory_count')} selected of "
-                f"{number('candidate_memory_count')} candidates"
-            ),
-            (
-                f"**System:** {number('system_tokens')} tokens"
-                f"{' (truncated)' if stats.get('system_truncated') else ''} · "
-                f"**current message:** {number('current_message_tokens')} tokens"
-            ),
-        ]
-        reference = int(number("full_context_reference_tokens") or 0)
-        if reference > 0:
-            reduction = 100.0 * float(stats.get("context_reduction_vs_full_context", 0.0))
-            lines.append(
-                f"**Full-context reference:** {reference} tokens → saved "
-                f"{number('token_savings_vs_full_context')} ({reduction:.1f}% reduction)"
-            )
-        if stats.get("exceeds_max_tokens"):
-            lines.append("**Warning:** the final context exceeds the configured ceiling.")
-        return "\n\n".join(lines)
+    def _secrets(self, state: SessionState) -> tuple[str, ...]:
+        key = state.provider.api_key
+        return (key,) if key else ()
 
-    def _decision_markdown(self, turn: ConversationTurn) -> str:
-        decision = turn.decision
-        if decision is None:
-            return "No decision signal was produced for this turn."
-        verdict = "sufficient" if decision.sufficient else "insufficient"
-        parts = [f"**Decision:** context {verdict}"]
-        if decision.action:
-            parts.append(f"action `{decision.action}`")
-        if decision.confidence is not None:
-            parts.append(f"confidence {float(decision.confidence):.2f}")
-        text = " · ".join(parts)
-        if decision.reason:
-            text += f"\n\n{decision.reason}"
-        return str(self._sanitize(text))
+    def _redact(self, value: Any, secrets: tuple[str, ...]) -> Any:
+        return sanitize_value(value, secrets=secrets)
 
-    def _compose_status(self, turn: ConversationTurn) -> str:
-        stats = turn.context_stats or {}
-        if turn.error:
-            # Real provider adapters redact before raising, but the browser
-            # boundary must not trust that: scrub the session key and common
-            # credential shapes from any error text before it is rendered.
-            headline = f"Provider error: {self._sanitize(turn.error)}"
-        elif turn.generated:
-            headline = "Reply generated."
-        else:
-            headline = (
-                "No provider credentials — BrainOS observed and retrieved, but no "
-                "reply was generated. Set an API key and model in the sidebar."
-            )
-        summary = (
-            f" {len(turn.stored_memories)} new memories stored; "
-            f"{stats.get('selected_memory_count', 0)} selected for context "
-            f"({stats.get('final_context_tokens', 0)} tokens"
+    def _user_turns(self, state: SessionState) -> int:
+        return sum(
+            1
+            for message in state.messages
+            if isinstance(message, Mapping) and message.get("role") == "user"
         )
-        reference = int(stats.get("full_context_reference_tokens", 0) or 0)
-        if reference > 0:
-            reduction = 100.0 * float(stats.get("context_reduction_vs_full_context", 0.0))
-            summary += f" vs {reference} full-context, {reduction:.1f}% reduction"
-        summary += f"). Turn {self._turns_used + 1} of {self.max_turns}."
-        return headline + summary
+
+    @staticmethod
+    def _clean_models(models: Any) -> list[str]:
+        if not isinstance(models, (list, tuple)):
+            return []
+        cleaned: list[str] = []
+        for item in models:
+            text = str(getattr(item, "id", item)).strip()
+            if text and text not in cleaned:
+                cleaned.append(text)
+        return cleaned
 
 
 __all__ = [
-    "BASELINE_MODES_PENDING",
-    "BRAINOS_INSTALL_HINT",
-    "DEFAULT_MAX_TURNS",
-    "MEMORY_MODE_CHOICES",
-    "PROVIDER_CHOICES",
-    "ChatController",
+    "DEFAULT_MODEL_PLACEHOLDER",
+    "PROVIDER_LABELS",
+    "ConnectionView",
+    "SessionView",
+    "TurnView",
+    "UIController",
+    "UILimits",
 ]

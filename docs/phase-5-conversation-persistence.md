@@ -1,203 +1,197 @@
 # Phase 5 log — Conversation persistence
 
-**Date:** 2026-09-13
-**Branch:** `arena/01a09bc4-brainos-context-lab`
-**Starting commit:** `2dfd5b3b8ed7e438cd0ae382d6f8773846d56bf7`
-**Plan section:** [Phase 5 — Conversation Persistence](../BrainOS_Context_Lab_Implementation_Plan.md#9-phase-5--conversation-persistence)
+**Status:** complete (branch `arena/01a09bc4-brainos-context-lab`, PR #6)
+**Plan section:** Phase 5 — Conversation persistence
+**Depends on:** Phase 4 (chat web UI, merged to `main` via PR #5) and every
+phase before it.
+
+> **Merge note.** PR #6 originally carried this branch's own Phase 4
+> implementation (`ChatController` + rewritten Gradio UI) with Phase 5 built on
+> top of it. While the PR was open, PR #5 merged a parallel Phase 4 — the
+> Gradio-free `UIController` + `panels` stack — into `main`. The conflicts were
+> resolved by treating **upstream PR #5 as the canonical Phase 4**: its
+> controller, panels, UI, and tests were adopted as merged, this branch's
+> superseded Phase 4 modules, tests, and log were retired, and Phase 5 was
+> ported onto the upstream seams. Everything below describes the *ported*
+> result, which is what the branch now contains.
 
 ## Objective
 
-Implement the plan's session-local persistence MVP — SQLite behind the
-`ConversationStore` / `MemoryStore` / `EvaluationStore` abstractions — with
-hard session isolation, the plan's absolute rule that **keys are never stored
-in the database**, and the data-control operations `docs/security.md` already
-promised: *Clear conversation, Clear memory, Delete session, Export session*.
+From the plan: persist conversations and BrainOS memory so a session survives
+process boundaries, give users real data controls (clear / export / delete),
+and keep the storage layer strictly credential-free and session-isolated.
+Persistence must be best-effort: a storage failure may never break a
+conversation turn, and headless runs (CLI, evaluation, unit tests) must never
+touch disk unless they opt in.
 
-The Phase 4 hand-off added five constraints: persistence must not change the
-Phase 3/4 contracts; the controller and service stay the only writers; the
-BrainOS runtime remains authoritative for recall (the store is a mirror);
-SQLite files stay out of Git; and the data-control semantics get defined here,
-before Phase 14 deployment needs them.
+## Starting-state audit (after the merge)
 
-## Starting-state audit
-
-| Available at Phase 4 | Missing for Phase 5 |
-| --- | --- |
-| `ConversationStore` / `MemoryStore` protocols (`src/storage/conversations.py`, Phase 0 scaffold) | no implementation of any protocol |
-| `EvaluationStore` protocol | no writer/reader; no `session_id` index |
-| Protocols covered `append` / `list` / `clear` only | no `list_conversations`, `delete_session`, `save_memories` (needed by Delete-session and the mirror upsert) |
-| `SessionState` ids + `conversation_id` rotation on clear | nothing persisted them |
-| `security.md` promised four data controls | only *Clear conversation* and *End session* existed |
+- Upstream Phase 4 was already complete on `main`: `UIController` with
+  `provider_factory`/`adapter_factory` seams, session lifecycle actions
+  (clear conversation, clear memory, end session), an in-memory
+  `export_session()` snapshot, `panels.py` rendering, and the Gradio UI with a
+  `DownloadButton` export. 216 tests passed.
+- `src/storage/conversations.py` held this branch's Phase 5 protocol
+  finalization (`list_conversations`, `delete_session`, `save_memories`
+  upsert) — kept unchanged by the merge.
+- `src/storage/sqlite.py`, the persistence test files, and this log are this
+  branch's Phase 5 contribution — kept, with the app-layer wiring and the
+  tests retargeted to the upstream controller/service API.
 
 ## Work completed
 
 ### 1. Protocol finalization (`src/storage/conversations.py`)
 
-Minimal, documented extensions so the plan's data controls are expressible:
-
-- `ConversationStore.list_conversations(session_id)` and
-  `ConversationStore.delete_session(session_id)` — *Delete session* removes
-  every conversation of a session, not just the active one.
-- `MemoryStore.save_memories(session_id, memories)` — an **upsert by
-  `memory_id`**, so mirroring the same memory each turn updates counters
-  instead of duplicating rows. The docstring pins the mirror semantics:
-  BrainOS stays authoritative for recall.
+Unchanged from this branch's Phase 5 work and kept by the merge:
+`ConversationMessage` dataclass; `ConversationStore` protocol with `append`,
+`list_messages`, `clear(session_id, conversation_id)`, `list_conversations`,
+`delete_session`; `MemoryStore` protocol with `save_memories` (upsert mirror
+semantics documented on the protocol), `list_memories`, `clear`.
 
 ### 2. SQLite backend (`src/storage/sqlite.py`, new)
 
-Three stores over one shared base:
-
-- **Thread safety by construction** — Gradio runs callbacks in worker threads,
-  so every operation opens and closes its own connection (`timeout=30`); no
-  shared connection, no locking bugs. The database file is server-wide;
-  isolation is row-level via exact `session_id` / `conversation_id` filters on
-  every read and delete.
-- **Lazy schema** (`CREATE TABLE IF NOT EXISTS` on connect): `messages`
-  (append-only, `seq AUTOINCREMENT` preserves order, indexed by
-  session+conversation), `memories` (primary key `(session_id, memory_id)`,
-  indexed columns plus the full sanitized record as JSON `payload`), and
-  `evaluation_runs` (run id primary key, session-indexed for
-  `delete_session_data`) — the Phase 16/17 writer already has its home.
-- **Secrets never reach disk** — `strip_secret_fields` recursively drops
-  secret-named keys from every metadata/payload blob at the store level
-  (defence in depth over service-layer sanitization). Strings are deliberately
-  *not* pattern-scrubbed here: transcript fidelity is a documented decision,
-  and the session key itself is redacted by the caller before writing.
-- **Location** — `BRAINOS_LAB_DB` env override, default
-  `data/brainos_lab.sqlite3`; the existing `*.sqlite3` ignore rule keeps
-  runtime data out of Git, and the env var gives HF Spaces a writable path.
-- Unicode, JSON round-trips, and reopened-database persistence are tested.
+- `SqliteConversationStore`, `SqliteMemoryStore`, `SqliteEvaluationStore` on a
+  shared `SqliteStore` base: **per-operation connections** (safe across
+  Gradio's threadpool; no cross-thread connection reuse), lazy schema creation
+  on first use.
+- Schema: `messages` (sequence-ordered, indexed by
+  `(session_id, conversation_id)`), `memories` (mirror keyed
+  `(session_id, memory_id)` with the full sanitized record as JSON payload),
+  `evaluation_runs` (session-indexed, ready for Phase 16).
+- `strip_secret_fields` recursively removes secret-named keys (`api_key`,
+  `authorization`, `token`, …) from any metadata/payload before it is written.
+- Database path: `BRAINOS_LAB_DB` environment variable, default
+  `data/brainos_lab.sqlite3` (Git-ignored). Constructed once per deployment in
+  `create_app`, never lazily inside the controller.
 
 ### 3. Service persistence hooks (`src/app/service.py`)
 
-`ConversationService` gained optional `conversation_store` / `memory_store`
-parameters — `None` keeps the Phase 4 purely-in-memory behaviour, so no
-existing caller or test changed semantics.
+Ported onto the upstream service (which already had `reset_provider()` /
+`reset_memory()` / `stored_memories()`):
 
-- `_persist_message` appends user and assistant messages with
-  `{turn: n}` metadata, after `_redact_for_storage` replaces the **exact
-  session key** in content (the plan's "never store keys in the database",
-  enforced at the write site).
-- `_persist_memories` mirrors the whole current memory set each turn through
-  `_guard_memories` (same session-key guard as recalled memories), upserted by
-  id — counters and status transitions (stale/superseded) stay current without
-  diffing.
-- `clear_conversation()` now captures the pre-rotation `conversation_id` and
-  deletes that conversation's rows plus the session's memory mirror, so
-  *Clear conversation* means the same thing in the store as in process memory.
-- **Best-effort discipline**: every store call is wrapped; a failing backend
-  logs one safe server-side line (`_warn_storage` prints the exception *type*
-  only — never content) and the turn proceeds. Storage never drives behaviour.
+- Optional `conversation_store` / `memory_store` constructor parameters;
+  `None` (the default) keeps the service purely in-memory — upstream Phase 4
+  behaviour is byte-for-byte unchanged without stores.
+- `handle_user_message` persists the user message on append and the assistant
+  reply when generated (`_persist_message`), then mirrors the whole guarded
+  memory set (`_persist_memories`, upsert by `memory_id`, so retrieval
+  counters and status transitions stay current without per-turn growth).
+- `_redact_for_storage` replaces the exact session key with `[redacted]` at
+  the write site; memory records pass through the same `_guard_memories`
+  credential guard as recalled memories.
+- `clear_conversation()` captures the old `conversation_id`, deletes that
+  conversation's rows, then resets memory; `reset_memory()` also clears the
+  persisted mirror **regardless of the injected-adapter test seam** — when the
+  user asks the app to forget, the durable copy forgets too.
+- Every store call is best-effort: failures are logged server-side with the
+  exception **type only** (`_warn_storage` — exception text could carry user
+  content) and never break a turn.
 
 ### 4. Controller lifecycle + export (`src/app/controller.py`)
 
-- Stores are controller-owned and attached to the service at creation (also
-  when a test factory built the service without them). The controller knows
-  only the **protocols** — backend choice is deployment wiring, so a bare
-  `ChatController` (scripts, unit tests) never touches disk. This replaced the
-  first design, in which the controller lazily materialized SQLite defaults:
-  it would have made every headless test write `data/…sqlite3` into the
-  repository working tree.
-- **`clear_memory()`** — the plan's distinct *Clear memory* control: drops the
-  BrainOS runtime (`state.brain = None`, service cache released) and the
-  persisted mirror, **keeps the transcript**; the next turn lazily creates a
-  fresh runtime through the existing seam.
-- **`end_session()` = Delete session** — before clearing credentials, deletes
-  every persisted row for the session (transcript, memory mirror, evaluation
-  runs). Deletion never materializes a store: a session that persisted nothing
-  touches no disk.
-- **`export_session()` / `export_session_file()`** — reads the persisted
-  mirrors (falling back to process state when none exist) and returns a
-  sanitized JSON payload: ids, provider `safe_dict()`, full context settings,
-  turn counters, transcript, memories, and the last turn's stats/ranking/drop
-  audit. The file variant writes a temp JSON for browser download.
-- `create_app()`'s default factory now constructs one server-wide SQLite store
-  set and passes it to every session's controller.
+Ported onto the upstream `UIController`:
+
+- The controller owns the three store protocols (inject-or-`None`) and passes
+  them to each session's `ConversationService` at creation. It never
+  materializes a backend itself.
+- `end_session()` now deletes **every persisted row of the ended session**
+  (conversation rows, memory mirror, evaluation runs) before dropping the
+  in-process session, and its status says so.
+- `export_session()` keeps the upstream payload (ids, provider `safe_dict`,
+  context payload, live transcript, live memories) and adds a `persistence`
+  block: `enabled`, every persisted conversation of the session with its
+  messages, and the memory mirror. Reads are best-effort — a failing backend
+  downgrades the export instead of failing it. The UI's existing
+  `DownloadButton` serves it as JSON with no UI changes.
 
 ### 5. UI (`src/app/ui.py`)
 
-Sidebar Session section grew *Clear memory* and *Export session* buttons plus
-a `gr.File` download slot (two new wired events, ten total); the security
-notice now states what is persisted, that it is row-isolated, and that *End
-session* deletes it together with the key.
+- `create_app()`'s **default** controller is constructed with one server-wide
+  SQLite store set — the backend choice lives at the deployment edge; an
+  injected controller keeps exactly the stores its caller gave it (tests pass
+  fakes and never touch the real database).
+- Header text now discloses persistence honestly: keys are still never written
+  to disk, transcripts and memory mirrors are persisted with credentials
+  redacted, and the clear/end controls delete the matching rows.
+
+### 6. Merge repairs (small, deliberate changes to upstream code)
+
+- `ConversationService.reset_memory()` recreates the runtime through
+  `_new_adapter()` so an injected `adapter_factory` is honoured after a memory
+  clear (upstream called `create_brain_adapter` directly there, bypassing its
+  own seam).
+- `ui` extra floor raised to `gradio>=6.0`: the upstream UI renders message
+  dicts natively (Gradio 6 default), while Gradio 5 requires the
+  `type="messages"` parameter it no longer passes.
+- Lifecycle status strings now mention persisted-row deletion ("persisted rows
+  deleted too", "persisted mirror too", "all persisted session rows dropped").
 
 ## Data-control semantics (defined for Phase 13/14)
 
-| Control | Process memory | SQLite |
+| Control | In-process effect | Persisted effect |
 | --- | --- | --- |
-| Clear conversation | transcript, diagnostics, BrainOS runtime dropped; `conversation_id` rotates; settings kept | that conversation's rows + session memory mirror deleted |
-| Clear memory | BrainOS runtime dropped, transcript kept | memory mirror deleted, transcript rows kept |
-| Export session | unchanged | read-only; sanitized JSON download |
-| End/Delete session | credentials cleared, session unregistered, fresh session issued | every row of the session deleted (transcript, memories, evaluation runs) |
+| Clear conversation | transcript emptied, runtime dropped, new `conversation_id` | that conversation's rows deleted + memory mirror cleared |
+| Clear memory | runtime dropped, transcript kept | memory mirror cleared, transcript rows kept |
+| Export session | — | read-only sanitized JSON: live views + `persistence` block |
+| End session | credentials cleared, session dropped, fresh session started | **every** row of the ended session deleted (messages, memories, evaluation runs) |
 
-Known caveat, documented for Phase 13 hardening: SQLite `DELETE` frees pages
-but does not physically scrub them; byte-level removal would need a `VACUUM`
-(or per-session files). The isolation contract — no query can reach a deleted
-session's rows — is tested.
+Known caveat (documented, deferred to Phase 13 hardening): SQLite `DELETE`
+frees pages without physically scrubbing bytes. The tested contract is
+API-level isolation — no query can reach a deleted session's rows; `VACUUM` or
+per-session files are the hardening candidates.
 
 ## Security tests (the phase's hard requirement)
 
-`tests/security/test_storage_secrets.py` asserts at the strongest level
-available: after a session that *types its live credential into the chat*,
+`tests/security/test_storage_secrets.py` runs the upstream `UIController` on
+the **real SQLite backends** with a session that actively tries to persist its
+credential:
 
-- the **raw bytes** of the SQLite file do not contain the key, while
-  `[redacted]` does (transcript survives, key does not);
-- mirrored memory rows and the export JSON/file are key-free;
-- every diagnostic view surface is key-free — with `history` and
-  `final_prompt` as the documented faithful surfaces (they show the user what
-  they typed and what was sent to their own provider, per the Phase 4
-  decision);
-- secret-named metadata cannot be smuggled onto disk even when nested
-  (`{"note": {"authorization": …}}` → `{"note": {}}`);
-- deleted sessions are unreachable through every store API while other
-  sessions' rows survive the delete.
+- raw database **bytes** never contain the session key after it is typed into
+  chat; `[redacted]` appears in the transcript instead;
+- mirrored memory rows never contain the key (the guarded record is what gets
+  written);
+- the export JSON (live views *and* the `persistence` block) and every
+  rendered `TurnView` surface are key-free;
+- secret-named metadata fields cannot be smuggled onto disk
+  (`strip_secret_fields` is recursive);
+- ending a session removes exactly that session's rows — another session's
+  rows provably survive.
 
 ## Validation
 
-```bash
-.venv/bin/pytest -q      # 216 passed   (184 → 216)
-.venv/bin/ruff check .   # All checks passed!  (whole repository)
-```
-
-New tests: 16 SQLite-store cases (`tests/unit/test_storage_sqlite.py`), 12
-persistence-wiring cases on in-memory doubles
-(`tests/unit/test_persistence.py`, including `RaisingStore` proving a failing
-backend never breaks a turn), 4 storage-security cases, 1 live-runtime
-SQLite round-trip (`tests/integration/test_ui_live.py`), extended wiring
-labels (10 events). `tests/fakes.py` gained `InMemoryConversationStore`,
-`InMemoryMemoryStore`, `InMemoryEvaluationStore`, and `RaisingStore`.
-
-**Live HTTP validation** (running Gradio server + pinned BrainOS + real
-SQLite on disk, no API key):
-
-- two turns persisted 2 transcript rows and 1 memory row classified
-  `PROJECT_STATE` by the live runtime; a follow-up session added a
-  `TEMPORAL_EVENT` row ("Deployments happen every Friday at 17:00 UTC");
-- `/on_export` returned a downloadable JSON with transcript, memories,
-  provider `safe_dict` (no `api_key` field), context settings, and last-turn
-  accounting;
-- `/on_clear_memory` kept the transcript (history intact, stored rows empty);
-- `/on_end` deleted exactly the ended session's rows — a per-session `GROUP
-  BY` proved the orphaned earlier session's rows were untouched and the ended
-  session's were gone.
+- `.venv/bin/pytest -q` → **249 passed** (upstream Phase 4's 216 + 15
+  SQLite-store + 12 persistence-wiring + 4 storage-security + 2 live-SQLite
+  integration tests). `ruff check .` clean.
+- Live tests run against the pinned BrainOS runtime and skip without it.
+- **Live HTTP validation** (running Gradio server + pinned runtime + real
+  SQLite at `data/brainos_lab.sqlite3`, via `gradio_client`): two chat turns
+  persisted 2 transcript rows and 1 memory row classified `PROJECT_STATE` by
+  the live runtime; the recall panel retrieved the fact; `/export_session`
+  downloaded `brainos-context-lab-session-*.json` containing the live payload
+  plus `persistence` (1 conversation, 2 messages, 1 memory) with no `api_key`
+  anywhere; `/clear_memory` kept the 2-message transcript, emptied the stored
+  panel, and left 2 message rows / 0 memory rows on disk; `/end_session`
+  deleted the session's rows exactly (0 / 0 afterwards). Dev database rows
+  were removed after validation.
 
 ## Decisions carried forward
 
-- **Protocol-first storage**: the evaluation runner (Phase 17) should write
-  through `EvaluationStore.save_run` with the Phase 16 reproducibility
-  metadata block; the schema already carries `session_id` for
-  `delete_session_data`.
-- **Mirror, not source**: no code path may hydrate BrainOS memory from the
-  store; rows exist for inspection, export, and later offline analysis.
-- The in-process turn transcript (`state.messages`) remains the render source;
-  the store is written after, never read back mid-turn.
-- A bare `ChatController`/`ConversationService` (no stores) is fully
-  functional in memory — evaluation harnesses can opt out of disk entirely.
+- Backend at the edge, protocols at the core: controller/service know only the
+  store protocols; `create_app` picks SQLite. A bare `UIController` /
+  `ConversationService` (no stores) is fully functional and purely in-memory —
+  the evaluation runner and CLI paths stay disk-free by default.
+- Mirror, not source: nothing rehydrates BrainOS memory from the store;
+  `state.messages` remains the render source; storage is written after a turn,
+  never read back mid-turn.
+- Storage failures are invisible to users and typed-only in server logs.
+- Upstream UI gap noted for a follow-up: the `/end_session` handler renders
+  the fresh session's panels but discards the controller's "Session ended …"
+  confirmation string — the richer status exists, the UI just does not surface
+  it yet.
 
 ## Next
 
-Phase 6 — Baseline modes: implement Mode A (full context), B (sliding
-window), C (conventional RAG), D (BrainOS), E (BrainOS + RAG) behind
-`ContextSettings.mode`, **setting `recent_turn_budget` per mode** — the Phase
-3 finding showed Mode A and Mode D are otherwise indistinguishable — and wire
-the strategies into the `evaluation/runner.py` shell.
+Phase 6 — Baseline modes A–E behind `ContextSettings.mode`, extending the
+upstream `MEMORY_MODES` / `uses_memory()` seam, with each mode setting its own
+`recent_turn_budget` (the Phase 3/4 finding). See `CONTEXT.md` →
+"Next safe step".

@@ -1,83 +1,162 @@
-"""Gradio chat UI wired to the session-scoped ConversationService (Phase 4).
+"""Gradio web UI for BrainOS Context Lab.
 
-Layout follows the plan: a configuration sidebar (provider, model, API key,
-endpoint, temperature, context budget, memory mode), the chat in the middle,
-and an inspection column with Memory / Context / Cognitive Trace / Evaluation
-tabs.
+The layout follows the plan's Phase 4 sketch — configuration sidebar, chat in
+the middle, inspection panels on the right — but every callback is a thin
+adapter over :class:`app.controller.UIController`. The UI owns no state of its
+own beyond the session identifier: the server-side session is authoritative for
+the transcript, the memories, and the provider key.
 
-Callbacks are deliberately thin. Each one forwards to
-:class:`app.controller.ChatController`, which returns plain view data; this
-module only maps that data onto Gradio components. No BrainOS import, no
-provider SDK import, and the API key never travels back to the browser.
+Security properties this file must preserve:
+
+* the API key box is cleared on every connect attempt; the key is never echoed
+  back into the browser, not even masked,
+* all panel values come from the controller, which sanitizes them against the
+  active session key,
+* ``gr.State`` only ever holds the non-secret session identifier.
 """
 
 from __future__ import annotations
 
-import inspect
 import os
-from collections.abc import Callable
+import tempfile
+from dataclasses import dataclass, field
 from typing import Any
 
-from .controller import MEMORY_MODE_CHOICES, PROVIDER_CHOICES, ChatController
-from .session import SessionManager
+from .controller import (
+    DEFAULT_MODEL_PLACEHOLDER,
+    PROVIDER_LABELS,
+    UIController,
+)
+from .panels import (
+    CONFLICT_COLUMNS,
+    DROPPED_MEMORY_COLUMNS,
+    RETRIEVED_MEMORY_COLUMNS,
+    STORED_MEMORY_COLUMNS,
+)
+from .state import BRAINOS_MODE, NO_MEMORY_MODE
 
 TITLE = "BrainOS Context Lab"
 
-STORED_HEADERS = ["Type", "Memory", "Observed (UTC)", "Retrievals", "Source turn", "Status"]
-RETRIEVED_HEADERS = ["Rank", "Score", "Relevance", "Type", "Memory", "Flags"]
-TRACE_HEADERS = ["Stage", "Detail", "Time (UTC)"]
-DROPPED_HEADERS = ["Drop reason", "Memory", "Detail", "Score"]
-CONFLICT_HEADERS = ["Subject", "Kept", "Dropped", "Source", "Reason"]
+HEADER_MARKDOWN = f"""# {TITLE}
+> Bring your model. Give it memory. Measure context efficiency.
 
-PIPELINE_MARKDOWN = (
-    "```text\n"
-    "Query → Observe → Recall → Relevance filtering\n"
-    "      → Context construction → LLM → Observation\n"
-    "```\n\n"
-    "The trace below is sanitized (counts and stages, never credentials), and "
-    "the tables under it show every memory dropped at each retrieval stage "
-    "with its reason."
+BrainOS observes the conversation, retrieves what matters, and builds the
+prompt. The right-hand panels show exactly what was remembered, what was sent,
+and what it would have cost to send everything.
+
+**Your provider account is responsible for API usage and cost.** Keys are held
+in server memory for the active session only and are never written to disk.
+Transcript messages and BrainOS memories *are* persisted to a server-side
+SQLite database, with credentials redacted before writing; **Clear
+conversation**, **Clear memory**, and **End session** delete the matching
+rows.
+"""
+
+EVALUATION_MARKDOWN = """### Evaluation
+
+Benchmark runs are **not available yet** (plan Phase 17).
+
+The chat above already produces the raw material for them: every turn records
+raw history tokens, selected history tokens, retrieved memory tokens, system
+tokens, final context tokens, and a per-memory audit trail of everything the
+retrieval policy removed.
+
+Baseline modes (Full Context, Sliding Window, RAG, BrainOS+RAG) land in Phase 6,
+and the context-rot benchmark in Phase 7. Until then, use **Export session** to
+take a machine-readable snapshot of a conversation.
+"""
+
+FOOTER_MARKDOWN = (
+    "Memory is retrieved data, not instructions: every prompt renders it inside "
+    "`<retrieved_memory>` delimiters and tells the model to ignore instructions "
+    "found inside them."
 )
 
-EVALUATION_MARKDOWN = (
-    "### Evaluation\n\n"
-    "Benchmark controls arrive with the automated evaluation pipeline "
-    "(Phase 17) and are gated by the Phase 15 cost controls before they are "
-    "exposed here.\n\n"
-    "Until then this session enforces a conservative turn limit, and every "
-    "turn already records the accounting (tokens, reductions, drops) the "
-    "benchmark runner will consume."
-)
 
-SECURITY_MARKDOWN = (
-    "**Your provider account pays for API usage.** Keys live in server memory "
-    "for this session only — never logged, never stored, never sent back to "
-    "the browser. Transcripts and memories are mirrored to a server-side "
-    "SQLite store, row-isolated per session; *End session* deletes them along "
-    "with the key, and *Export session* downloads your own data as JSON."
-)
+@dataclass
+class SidebarComponents:
+    """Configuration widgets, in the order :meth:`connect` feeds them."""
 
-
-def _make_chatbot(gr: Any, **kwargs: Any) -> Any:
-    """Construct a messages-format chatbot across Gradio 4/5/6.
-
-    Gradio 5 requires ``type="messages"`` for role/content dicts; Gradio 6
-    removed the parameter because the messages format is the only format.
-    """
-
-    parameters = inspect.signature(gr.Chatbot.__init__).parameters
-    if "type" in parameters:
-        kwargs.setdefault("type", "messages")
-    return gr.Chatbot(**kwargs)
+    provider: Any
+    model: Any
+    api_key: Any
+    endpoint: Any
+    temperature: Any
+    max_output_tokens: Any
+    connect_btn: Any
+    disconnect_btn: Any
+    connection_status: Any
+    mode: Any
+    max_tokens: Any
+    recent_turn_budget: Any
+    memory_budget: Any
+    max_memories: Any
+    relevance_floor: Any
+    recency_half_life_turns: Any
+    resolve_conflicts: Any
+    drop_stale_memories: Any
+    drop_suspicious_memories: Any
+    context_btn: Any
+    context_status: Any
 
 
-def create_app(controller_factory: Callable[[], ChatController] | None = None) -> Any:
+@dataclass
+class ChatComponents:
+    """Transcript and session controls."""
+
+    chatbot: Any
+    message: Any
+    send_btn: Any
+    chat_status: Any
+    clear_chat_btn: Any
+    clear_memory_btn: Any
+    refresh_btn: Any
+    end_session_btn: Any
+    export_btn: Any
+
+
+@dataclass
+class PanelComponents:
+    """Inspection panels, in the order :func:`_panel_values` emits them."""
+
+    stored: Any
+    retrieved: Any
+    dropped: Any
+    conflicts: Any
+    summary: Any
+    stats: Any
+    prompt: Any
+    trace: Any
+    trace_events: Any
+    order: tuple[str, ...] = field(
+        default=(
+            "stored",
+            "retrieved",
+            "dropped",
+            "conflicts",
+            "summary",
+            "stats",
+            "prompt",
+            "trace",
+            "trace_events",
+        )
+    )
+
+    def as_outputs(self) -> list[Any]:
+        return [getattr(self, name) for name in self.order]
+
+
+def create_app(controller: UIController | None = None) -> Any:
     """Build and return the Gradio application.
 
-    Gradio is an optional dependency so the non-UI package and unit tests can
-    be used without installing a web framework. ``controller_factory`` is a
-    test seam: production uses one :class:`SessionManager` for every browser
-    session it creates.
+    Gradio is an optional dependency so the non-UI package, the CLI, and the
+    unit tests can be used without installing a web framework.
+
+    Phase 5: when no controller is injected, the default one is constructed
+    with the server-wide SQLite backends (path overridable via
+    ``BRAINOS_LAB_DB``), so the shipped app persists conversations and memory
+    mirrors. An injected controller keeps exactly the stores its caller gave
+    it — tests pass fakes and never touch the real database.
     """
 
     try:
@@ -87,365 +166,551 @@ def create_app(controller_factory: Callable[[], ChatController] | None = None) -
             "The UI requires Gradio. Install it with `pip install -e \".[ui]\"`."
         ) from exc
 
-    if controller_factory is None:
-        # Deployment wiring owns the backend choice (Phase 5): one server-wide
-        # SQLite store set, row-isolated per session, on the configured path.
+    if controller is None:
         from storage.sqlite import (
             SqliteConversationStore,
             SqliteEvaluationStore,
             SqliteMemoryStore,
         )
 
-        manager = SessionManager()
-        conversation_store = SqliteConversationStore()
-        memory_store = SqliteMemoryStore()
-        evaluation_store = SqliteEvaluationStore()
-
-        def controller_factory() -> ChatController:
-            return ChatController(
-                manager=manager,
-                conversation_store=conversation_store,
-                memory_store=memory_store,
-                evaluation_store=evaluation_store,
-            )
+        controller = UIController(
+            conversation_store=SqliteConversationStore(),
+            memory_store=SqliteMemoryStore(),
+            evaluation_store=SqliteEvaluationStore(),
+        )
 
     with gr.Blocks(title=TITLE) as demo:
-        session = gr.State(None)
-
-        gr.Markdown(
-            "# BrainOS Context Lab\n"
-            "> Bring your model. Give it memory. Measure context efficiency.\n\n"
-            "**Status:** Phase 5 — chat, inspection panels, and session "
-            "persistence (SQLite transcript/memory mirrors, export, and "
-            "data-control operations) are wired to the session-scoped "
-            "`ConversationService`. Baseline modes (Phase 6) and benchmarks "
-            "(Phase 17) are not active yet."
-        )
+        gr.Markdown(HEADER_MARKDOWN)
+        session_state = gr.State(None)  # non-secret session identifier only
 
         with gr.Row():
-            # ---------------------------------------------------------- #
-            # Sidebar: provider, context, and session controls
-            # ---------------------------------------------------------- #
             with gr.Column(scale=1, min_width=280):
-                gr.Markdown("### Provider")
-                provider_dd = gr.Dropdown(
-                    list(PROVIDER_CHOICES), value=PROVIDER_CHOICES[0], label="Provider"
-                )
-                model_dd = gr.Dropdown(
-                    choices=[],
-                    value=None,
-                    allow_custom_value=True,
-                    label="Model",
-                    info="Type a model id or fetch choices with “List models”.",
-                )
-                api_key_tb = gr.Textbox(
-                    label="API key (session-only)",
-                    type="password",
-                    placeholder="Held in server memory; never echoed back",
-                )
-                endpoint_tb = gr.Textbox(
-                    label="Endpoint (optional)",
-                    placeholder="https://… for OpenAI-compatible servers",
-                )
-                temperature_sl = gr.Slider(0.0, 2.0, value=0.2, step=0.1, label="Temperature")
-                max_output_nb = gr.Number(
-                    value=0, label="Max output tokens (0 = provider default)", precision=0
-                )
-                with gr.Row():
-                    validate_btn = gr.Button("Validate connection", variant="secondary")
-                    list_models_btn = gr.Button("List models", variant="secondary")
-                connection_md = gr.Markdown(
-                    "Not connected. Enter an API key and model, then validate the connection."
-                )
-
-                gr.Markdown("### Context")
-                context_budget_sl = gr.Slider(
-                    512, 32768, value=4096, step=256, label="Context budget (max tokens)"
-                )
-                memory_mode_dd = gr.Dropdown(
-                    list(MEMORY_MODE_CHOICES), value="brainos", label="Memory mode"
-                )
-                mode_notice_md = gr.Markdown("")
-                with gr.Accordion("Advanced context settings", open=False):
-                    recent_budget_sl = gr.Slider(
-                        0, 8192, value=2048, step=64, label="Recent-history budget (tokens)"
-                    )
-                    memory_budget_sl = gr.Slider(
-                        0, 4096, value=1536, step=64, label="Memory budget (tokens)"
-                    )
-                    max_memories_sl = gr.Slider(1, 24, value=12, step=1, label="Max memories")
-
-                gr.Markdown("### Session")
-                with gr.Row():
-                    clear_btn = gr.Button("Clear conversation")
-                    clear_memory_btn = gr.Button("Clear memory")
-                with gr.Row():
-                    export_btn = gr.Button("Export session")
-                    end_btn = gr.Button("End session", variant="stop")
-                export_file = gr.File(label="Session export")
-                gr.Markdown(SECURITY_MARKDOWN)
-
-            # ---------------------------------------------------------- #
-            # Main: chat
-            # ---------------------------------------------------------- #
-            with gr.Column(scale=2):
-                gr.Markdown("### Chat")
-                chatbot = _make_chatbot(gr, label="Conversation", height=480)
-                status_md = gr.Markdown(
-                    "Session ready. Configure a provider to generate replies; "
-                    "BrainOS observes and retrieves either way."
-                )
-                with gr.Row():
-                    message_tb = gr.Textbox(
-                        label="Message",
-                        placeholder="Tell the assistant something worth remembering…",
-                        scale=5,
-                    )
-                    send_btn = gr.Button("Send", variant="primary", scale=1)
-
-            # ---------------------------------------------------------- #
-            # Right: inspection tabs
-            # ---------------------------------------------------------- #
+                sidebar = _build_sidebar(gr)
+            with gr.Column(scale=2, min_width=420):
+                chat = _build_chat(gr)
             with gr.Column(scale=1, min_width=340):
-                gr.Markdown("### Inspection")
-                with gr.Tabs():
-                    with gr.Tab("Memory"):
-                        gr.Markdown("**Stored memories** (this session)")
-                        stored_df = gr.Dataframe(
-                            headers=STORED_HEADERS,
-                            value=[],
-                            interactive=False,
-                            wrap=True,
-                            label="Stored memories",
-                        )
-                        gr.Markdown("**Retrieved for the last turn** (rank order)")
-                        retrieved_df = gr.Dataframe(
-                            headers=RETRIEVED_HEADERS,
-                            value=[],
-                            interactive=False,
-                            wrap=True,
-                            label="Retrieved memories",
-                        )
-                        ranking_json = gr.JSON(label="Ranking components", value=[])
-                    with gr.Tab("Context"):
-                        context_md = gr.Markdown(
-                            "No turn yet — send a message to build context."
-                        )
-                        stats_json = gr.JSON(label="Context accounting (all fields)", value={})
-                        prompt_tb = gr.Textbox(
-                            label="Final prompt sent to the model",
-                            lines=14,
-                            interactive=False,
-                        )
-                    with gr.Tab("Cognitive Trace"):
-                        gr.Markdown(PIPELINE_MARKDOWN)
-                        decision_md = gr.Markdown("No decision yet.")
-                        trace_df = gr.Dataframe(
-                            headers=TRACE_HEADERS,
-                            value=[],
-                            interactive=False,
-                            wrap=True,
-                            label="Cognitive trace",
-                        )
-                        gr.Markdown("**Dropped at each retrieval stage**")
-                        dropped_df = gr.Dataframe(
-                            headers=DROPPED_HEADERS,
-                            value=[],
-                            interactive=False,
-                            wrap=True,
-                            label="Dropped memories",
-                        )
-                        gr.Markdown("**Conflict resolutions**")
-                        conflicts_df = gr.Dataframe(
-                            headers=CONFLICT_HEADERS,
-                            value=[],
-                            interactive=False,
-                            wrap=True,
-                            label="Conflict resolutions",
-                        )
-                    with gr.Tab("Evaluation"):
-                        gr.Markdown(EVALUATION_MARKDOWN)
+                panels = _build_inspection(gr)
 
-        panel_outputs = [
-            chatbot,
-            status_md,
-            stored_df,
-            retrieved_df,
-            ranking_json,
-            context_md,
-            stats_json,
-            prompt_tb,
-            decision_md,
-            trace_df,
-            dropped_df,
-            conflicts_df,
-            mode_notice_md,
-            connection_md,
-        ]
-        settings_inputs = [
-            provider_dd,
-            model_dd,
-            api_key_tb,
-            endpoint_tb,
-            temperature_sl,
-            max_output_nb,
-            memory_mode_dd,
-            context_budget_sl,
-            recent_budget_sl,
-            memory_budget_sl,
-            max_memories_sl,
-        ]
+        gr.Markdown(FOOTER_MARKDOWN)
 
-        def panel_values(view: dict[str, Any]) -> list[Any]:
-            """Map a controller view onto the inspection panels, in order."""
-
-            return [
-                view["history"],
-                view["status"],
-                view["stored_rows"],
-                view["retrieved_rows"],
-                view["ranking_json"],
-                view["context_summary"] or "No turn yet — send a message to build context.",
-                view["context_stats"],
-                view["final_prompt"],
-                view["decision_md"] or "No decision yet.",
-                view["trace_rows"],
-                view["dropped_rows"],
-                view["conflict_rows"],
-                view["mode_notice"],
-                view["connection_status"],
-            ]
-
-        def ensure(controller: ChatController | None) -> ChatController:
-            return controller if controller is not None else controller_factory()
-
-        def apply_settings(controller: ChatController, settings: tuple[Any, ...]) -> str:
-            """Push the sidebar into the session state; return any rejection."""
-
-            (
-                provider,
-                model,
-                api_key,
-                endpoint,
-                temperature,
-                max_output,
-                mode,
-                max_tokens,
-                recent_budget,
-                memory_budget,
-                max_memories,
-            ) = settings
-            notes = [
-                controller.apply_provider(
-                    provider=provider,
-                    model=model,
-                    api_key=api_key,
-                    base_url=endpoint,
-                    temperature=temperature,
-                    max_output_tokens=max_output,
-                ),
-                controller.set_memory_mode(mode),
-                controller.apply_context_settings(
-                    max_tokens=max_tokens,
-                    recent_turn_budget=recent_budget,
-                    memory_budget=memory_budget,
-                    max_memories=max_memories,
-                ),
-            ]
-            return " ".join(note for note in notes if "not applied" in note)
-
-        def on_load(controller: ChatController | None) -> list[Any]:
-            controller = ensure(controller)
-            return [controller, *panel_values(controller.views())]
-
-        def on_send(
-            controller: ChatController | None, message: str, *settings: Any
-        ) -> list[Any]:
-            controller = ensure(controller)
-            warning = apply_settings(controller, settings)
-            view = controller.send_message(message)
-            if warning:
-                view["status"] = f"{warning} — {view['status']}"
-            return [controller, *panel_values(view), ""]
-
-        def on_validate(controller: ChatController | None, *settings: Any) -> list[Any]:
-            controller = ensure(controller)
-            apply_settings(controller, settings)
-            controller.validate_connection()
-            return [controller, controller.views()["connection_status"]]
-
-        def on_list_models(controller: ChatController | None, *settings: Any) -> list[Any]:
-            controller = ensure(controller)
-            apply_settings(controller, settings)
-            controller.list_models()
-            view = controller.views()
-            return [
-                controller,
-                gr.update(choices=view["model_choices"], value=view["model_value"] or None),
-                view["connection_status"],
-            ]
-
-        def on_clear(controller: ChatController | None) -> list[Any]:
-            controller = ensure(controller)
-            return [controller, *panel_values(controller.clear_conversation())]
-
-        def on_clear_memory(controller: ChatController | None) -> list[Any]:
-            controller = ensure(controller)
-            return [controller, *panel_values(controller.clear_memory())]
-
-        def on_export(controller: ChatController | None) -> list[Any]:
-            controller = ensure(controller)
-            path, summary = controller.export_session_file()
-            return [controller, path, summary]
-
-        def on_end(controller: ChatController | None) -> list[Any]:
-            controller = ensure(controller)
-            fresh, view = controller.end_session()
-            return [fresh, *panel_values(view)]
-
-        def on_mode_change(controller: ChatController | None, mode: str) -> list[Any]:
-            controller = ensure(controller)
-            return [controller, controller.set_memory_mode(mode)]
-
-        demo.load(on_load, inputs=[session], outputs=[session, *panel_outputs])
-        send_btn.click(
-            on_send,
-            inputs=[session, message_tb, *settings_inputs],
-            outputs=[session, *panel_outputs, message_tb],
-        )
-        message_tb.submit(
-            on_send,
-            inputs=[session, message_tb, *settings_inputs],
-            outputs=[session, *panel_outputs, message_tb],
-        )
-        validate_btn.click(
-            on_validate,
-            inputs=[session, *settings_inputs],
-            outputs=[session, connection_md],
-        )
-        list_models_btn.click(
-            on_list_models,
-            inputs=[session, *settings_inputs],
-            outputs=[session, model_dd, connection_md],
-        )
-        clear_btn.click(on_clear, inputs=[session], outputs=[session, *panel_outputs])
-        clear_memory_btn.click(
-            on_clear_memory, inputs=[session], outputs=[session, *panel_outputs]
-        )
-        export_btn.click(on_export, inputs=[session], outputs=[session, export_file, status_md])
-        end_btn.click(on_end, inputs=[session], outputs=[session, *panel_outputs])
-        memory_mode_dd.change(
-            on_mode_change, inputs=[session, memory_mode_dd], outputs=[session, mode_notice_md]
-        )
+        _wire(gr, controller, session_state, sidebar, chat, panels)
+        # A fresh browser tab gets a fresh session. The controller also
+        # self-heals if this never fires (API clients, restored pages).
+        demo.load(_start_session(controller), inputs=None, outputs=[session_state])
 
     return demo
+
+
+# --------------------------------------------------------------------------- #
+# Layout
+# --------------------------------------------------------------------------- #
+
+
+def _build_sidebar(gr: Any) -> SidebarComponents:
+    """Provider and context controls."""
+
+    gr.Markdown("### Provider")
+    provider = gr.Dropdown(
+        choices=[list(pair) for pair in PROVIDER_LABELS],
+        value=PROVIDER_LABELS[0][1],
+        label="Provider",
+    )
+    model = gr.Dropdown(
+        choices=[],
+        value=None,
+        label="Model",
+        allow_custom_value=True,
+        filterable=True,
+        info=f"Type your own, e.g. {DEFAULT_MODEL_PLACEHOLDER}",
+    )
+    api_key = gr.Textbox(
+        label="API key",
+        type="password",
+        placeholder="Session-only key — never stored",
+    )
+    endpoint = gr.Textbox(
+        label="Endpoint",
+        placeholder="Optional base URL for OpenAI-compatible servers",
+    )
+    temperature = gr.Slider(0, 2, value=0.2, step=0.1, label="Temperature")
+    max_output_tokens = gr.Number(
+        value=None, label="Max output tokens (blank = provider default)", precision=0
+    )
+    with gr.Row():
+        connect_btn = gr.Button("Connect", variant="primary")
+        disconnect_btn = gr.Button("Forget key")
+    connection_status = gr.Markdown("Not connected.")
+
+    gr.Markdown("### Context")
+    mode = gr.Radio(
+        choices=[
+            ("BrainOS memory", BRAINOS_MODE),
+            ("No memory (control)", NO_MEMORY_MODE),
+        ],
+        value=BRAINOS_MODE,
+        label="Memory mode",
+    )
+    max_tokens = gr.Slider(512, 32768, value=4096, step=256, label="Max context tokens")
+    recent_turn_budget = gr.Slider(
+        0,
+        8192,
+        value=512,
+        step=64,
+        label="Recent-history budget (tokens)",
+        info="A smaller window forces the prompt to lean on memory.",
+    )
+    memory_budget = gr.Slider(0, 4096, value=1024, step=64, label="Memory budget (tokens)")
+    max_memories = gr.Slider(1, 20, value=8, step=1, label="Max memories in prompt")
+    with gr.Accordion("Retrieval policy", open=False):
+        relevance_floor = gr.Slider(0.0, 1.0, value=0.12, step=0.01, label="Relevance floor")
+        recency_half_life_turns = gr.Slider(
+            1.0, 200.0, value=20.0, step=1.0, label="Recency half-life (turns)"
+        )
+        resolve_conflicts = gr.Checkbox(value=True, label="Resolve conflicts")
+        drop_stale_memories = gr.Checkbox(value=True, label="Drop stale memories")
+        drop_suspicious_memories = gr.Checkbox(
+            value=False, label="Drop instruction-like memories"
+        )
+    context_btn = gr.Button("Apply context settings")
+    context_status = gr.Markdown("")
+
+    return SidebarComponents(
+        provider=provider,
+        model=model,
+        api_key=api_key,
+        endpoint=endpoint,
+        temperature=temperature,
+        max_output_tokens=max_output_tokens,
+        connect_btn=connect_btn,
+        disconnect_btn=disconnect_btn,
+        connection_status=connection_status,
+        mode=mode,
+        max_tokens=max_tokens,
+        recent_turn_budget=recent_turn_budget,
+        memory_budget=memory_budget,
+        max_memories=max_memories,
+        relevance_floor=relevance_floor,
+        recency_half_life_turns=recency_half_life_turns,
+        resolve_conflicts=resolve_conflicts,
+        drop_stale_memories=drop_stale_memories,
+        drop_suspicious_memories=drop_suspicious_memories,
+        context_btn=context_btn,
+        context_status=context_status,
+    )
+
+
+def _build_chat(gr: Any) -> ChatComponents:
+    """Transcript plus the session controls under it."""
+
+    # Gradio 6 renders the messages format ({"role", "content"}) natively,
+    # which is also the provider-neutral shape the context builder produces.
+    chatbot = gr.Chatbot(label="Conversation", height=520)
+    with gr.Row():
+        message = gr.Textbox(
+            label="Message",
+            placeholder="Chat with BrainOS memory in the loop",
+            scale=4,
+        )
+        send_btn = gr.Button("Send", variant="primary", scale=1)
+    chat_status = gr.Markdown("")
+
+    with gr.Row():
+        clear_chat_btn = gr.Button("Clear conversation")
+        clear_memory_btn = gr.Button("Clear memory")
+        refresh_btn = gr.Button("Refresh panels")
+        end_session_btn = gr.Button("End session", variant="stop")
+    export_btn = gr.DownloadButton("Export session JSON")
+
+    return ChatComponents(
+        chatbot=chatbot,
+        message=message,
+        send_btn=send_btn,
+        chat_status=chat_status,
+        clear_chat_btn=clear_chat_btn,
+        clear_memory_btn=clear_memory_btn,
+        refresh_btn=refresh_btn,
+        end_session_btn=end_session_btn,
+        export_btn=export_btn,
+    )
+
+
+def _build_inspection(gr: Any) -> PanelComponents:
+    """Right-hand inspection tabs."""
+
+    gr.Markdown("### Inspection")
+    with gr.Tab("Memory"):
+        stored = gr.Dataframe(
+            headers=list(STORED_MEMORY_COLUMNS),
+            label="Stored memories",
+            value=[],
+            interactive=False,
+            wrap=True,
+        )
+        retrieved = gr.Dataframe(
+            headers=list(RETRIEVED_MEMORY_COLUMNS),
+            label="In this prompt (ranked)",
+            value=[],
+            interactive=False,
+            wrap=True,
+        )
+        dropped = gr.Dataframe(
+            headers=list(DROPPED_MEMORY_COLUMNS),
+            label="Recalled but filtered out (audit)",
+            value=[],
+            interactive=False,
+            wrap=True,
+        )
+        conflicts = gr.Dataframe(
+            headers=list(CONFLICT_COLUMNS),
+            label="Conflicts",
+            value=[],
+            interactive=False,
+            wrap=True,
+        )
+    with gr.Tab("Context"):
+        summary = gr.Markdown("")
+        stats = gr.JSON(label="Context statistics", value={})
+        prompt = gr.Textbox(
+            label="Final prompt sent to the model",
+            lines=16,
+            max_lines=40,
+        )
+    with gr.Tab("Cognitive Trace"):
+        trace = gr.Markdown("")
+        trace_events = gr.JSON(label="Runtime trace events", value=[])
+    with gr.Tab("Evaluation"):
+        gr.Markdown(EVALUATION_MARKDOWN)
+
+    return PanelComponents(
+        stored=stored,
+        retrieved=retrieved,
+        dropped=dropped,
+        conflicts=conflicts,
+        summary=summary,
+        stats=stats,
+        prompt=prompt,
+        trace=trace,
+        trace_events=trace_events,
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Wiring
+# --------------------------------------------------------------------------- #
+
+
+def _wire(
+    gr: Any,
+    controller: UIController,
+    session_state: Any,
+    sidebar: SidebarComponents,
+    chat: ChatComponents,
+    panels: PanelComponents,
+) -> None:
+    """Attach the controller to the widgets.
+
+    Kept separate from the layout so the components can be built (and the
+    callback ordering asserted) without launching a server.
+    """
+
+    panel_outputs = panels.as_outputs()
+    chat_outputs = [chat.chatbot, chat.message, chat.chat_status, *panel_outputs]
+    silent_outputs = [chat.chatbot, chat.chat_status, *panel_outputs]
+
+    sidebar.connect_btn.click(
+        _connect(controller),
+        inputs=[
+            sidebar.provider,
+            sidebar.model,
+            sidebar.api_key,
+            sidebar.endpoint,
+            sidebar.temperature,
+            sidebar.max_output_tokens,
+            session_state,
+        ],
+        outputs=[
+            sidebar.connection_status,
+            sidebar.model,
+            sidebar.api_key,
+            session_state,
+        ],
+    )
+    sidebar.disconnect_btn.click(
+        _disconnect(controller),
+        inputs=[session_state],
+        outputs=[
+            sidebar.connection_status,
+            sidebar.model,
+            sidebar.api_key,
+            session_state,
+        ],
+    )
+    sidebar.context_btn.click(
+        _update_context(controller),
+        inputs=[
+            sidebar.mode,
+            sidebar.max_tokens,
+            sidebar.recent_turn_budget,
+            sidebar.memory_budget,
+            sidebar.max_memories,
+            sidebar.relevance_floor,
+            sidebar.recency_half_life_turns,
+            sidebar.resolve_conflicts,
+            sidebar.drop_stale_memories,
+            sidebar.drop_suspicious_memories,
+            session_state,
+        ],
+        outputs=[sidebar.context_status, session_state],
+    )
+
+    chat.send_btn.click(
+        _chat(controller),
+        inputs=[chat.message, session_state],
+        outputs=[*chat_outputs, session_state],
+    )
+    # Enter-to-send is the same callback; it does not need its own API endpoint.
+    chat.message.submit(
+        _chat(controller),
+        inputs=[chat.message, session_state],
+        outputs=[*chat_outputs, session_state],
+        api_name=False,
+    )
+    chat.refresh_btn.click(
+        _refresh(controller), inputs=[session_state], outputs=[*silent_outputs, session_state]
+    )
+    chat.clear_chat_btn.click(
+        _clear_conversation(controller),
+        inputs=[session_state],
+        outputs=[*silent_outputs, session_state],
+    )
+    chat.clear_memory_btn.click(
+        _clear_memory(controller),
+        inputs=[session_state],
+        outputs=[*silent_outputs, session_state],
+    )
+    chat.end_session_btn.click(
+        _end_session(controller),
+        inputs=[session_state],
+        outputs=[*silent_outputs, session_state],
+    )
+    chat.export_btn.click(
+        _export(controller), inputs=[session_state], outputs=[chat.export_btn]
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Callback factories
+# --------------------------------------------------------------------------- #
+
+
+def _start_session(controller: UIController) -> Any:
+    def start_session() -> str:
+        return controller.ensure_session(None).session_id
+
+    return start_session
+
+
+def _connect(controller: UIController) -> Any:
+    def connect(
+        provider: str,
+        model: str,
+        api_key: str,
+        endpoint: str,
+        temperature: float,
+        max_output_tokens: Any,
+        session_id: str | None,
+    ) -> tuple[Any, ...]:
+        import gradio as gr
+
+        session_id = controller.ensure_session(session_id).session_id
+        view = controller.connect(
+            session_id,
+            provider=provider,
+            model=model,
+            api_key=api_key,
+            endpoint=endpoint,
+            temperature=temperature,
+            max_output_tokens=_optional_int(max_output_tokens),
+        )
+        choices = list(view.models) or ([model] if model else [])
+        return (
+            view.status,
+            gr.update(choices=choices, value=view.model_value or model),
+            view.key_value,
+            view.session_id,
+        )
+
+    return connect
+
+
+def _disconnect(controller: UIController) -> Any:
+    def disconnect(session_id: str | None) -> tuple[Any, ...]:
+        import gradio as gr
+
+        session_id = controller.ensure_session(session_id).session_id
+        view = controller.disconnect(session_id)
+        return (
+            view.status,
+            gr.update(choices=[], value=view.model_value),
+            view.key_value,
+            view.session_id,
+        )
+
+    return disconnect
+
+
+def _update_context(controller: UIController) -> Any:
+    def update_context(
+        mode: str,
+        max_tokens: float,
+        recent_turn_budget: float,
+        memory_budget: float,
+        max_memories: float,
+        relevance_floor: float,
+        recency_half_life_turns: float,
+        resolve_conflicts: bool,
+        drop_stale_memories: bool,
+        drop_suspicious_memories: bool,
+        session_id: str | None,
+    ) -> tuple[str, str]:
+        # Resolve the session *before* acting, so the id returned to the
+        # browser is the session whose settings were changed.
+        session_id = controller.ensure_session(session_id).session_id
+        status = controller.update_context(
+            session_id,
+            mode=mode,
+            max_tokens=int(max_tokens),
+            recent_turn_budget=int(recent_turn_budget),
+            memory_budget=int(memory_budget),
+            max_memories=int(max_memories),
+            relevance_floor=float(relevance_floor),
+            recency_half_life_turns=float(recency_half_life_turns),
+            resolve_conflicts=bool(resolve_conflicts),
+            drop_stale_memories=bool(drop_stale_memories),
+            drop_suspicious_memories=bool(drop_suspicious_memories),
+        )
+        return status, controller.ensure_session(session_id).session_id
+
+    return update_context
+
+
+def _chat(controller: UIController) -> Any:
+    def chat(message: str, session_id: str | None) -> tuple[Any, ...]:
+        """Run one turn; the returned tuple is the declared output order."""
+
+        view = controller.chat(session_id, message)
+        return (
+            view.history,
+            "",
+            view.status,
+            *_panel_values(view),
+            view.session_id,
+        )
+
+    return chat
+
+
+def _refresh(controller: UIController) -> Any:
+    def refresh(session_id: str | None) -> tuple[Any, ...]:
+        return _silent_values(controller.refresh(session_id))
+
+    return refresh
+
+
+def _clear_conversation(controller: UIController) -> Any:
+    def clear_conversation(session_id: str | None) -> tuple[Any, ...]:
+        return _silent_values(controller.clear_conversation(session_id))
+
+    return clear_conversation
+
+
+def _clear_memory(controller: UIController) -> Any:
+    def clear_memory(session_id: str | None) -> tuple[Any, ...]:
+        return _silent_values(controller.clear_memory(session_id))
+
+    return clear_memory
+
+
+def _end_session(controller: UIController) -> Any:
+    def end_session(session_id: str | None) -> tuple[Any, ...]:
+        ended = controller.end_session(session_id)
+        return _silent_values(controller.refresh(ended.session_id))
+
+    return end_session
+
+
+def _export(controller: UIController) -> Any:
+    def export_session(session_id: str | None) -> Any:
+        import gradio as gr
+
+        text = controller.export_text(session_id)
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            suffix=".json",
+            prefix="brainos-context-lab-session-",
+            delete=False,
+        ) as handle:
+            handle.write(text)
+            path = handle.name
+        return gr.update(value=path, visible=True)
+
+    return export_session
+
+
+def _panel_values(view: Any) -> tuple[Any, ...]:
+    """Inspection panel values, in :class:`PanelComponents` order."""
+
+    return (
+        view.stored_rows,
+        view.retrieved_rows,
+        view.dropped_rows,
+        view.conflict_rows,
+        view.summary,
+        view.stats,
+        view.prompt,
+        view.trace,
+        view.trace_events,
+    )
+
+
+def _silent_values(view: Any) -> tuple[Any, ...]:
+    """Values for actions that do not return a new message box."""
+
+    return (view.history, view.status, *_panel_values(view), view.session_id)
+
+
+def _optional_int(value: Any) -> int | None:
+    if value is None or value == "":
+        return None
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number > 0 else None
 
 
 def main() -> None:
     """Launch the UI using settings compatible with local and HF deployment."""
 
     demo = create_app()
-    demo.launch(
-        server_name=os.getenv("GRADIO_SERVER_NAME", "0.0.0.0"),
-        server_port=int(os.getenv("GRADIO_SERVER_PORT", "7860")),
-    )
+    launch_options: dict[str, Any] = {
+        "server_name": os.getenv("GRADIO_SERVER_NAME", "0.0.0.0"),
+        "server_port": int(os.getenv("GRADIO_SERVER_PORT", "7860")),
+        "show_error": True,
+    }
+    # ``strict_cors`` defaults to True (Gradio refuses cross-origin requests to
+    # a local server). Deployments that must be embedded — the sandbox preview,
+    # an HF Space iframe — opt out explicitly rather than the app defaulting to
+    # a permissive posture.
+    strict_cors = os.getenv("GRADIO_STRICT_CORS")
+    if strict_cors is not None:
+        launch_options["strict_cors"] = strict_cors.strip().lower() not in {
+            "0",
+            "false",
+            "no",
+        }
+    demo.launch(**launch_options)
+
+
+__all__ = ["TITLE", "create_app", "main"]

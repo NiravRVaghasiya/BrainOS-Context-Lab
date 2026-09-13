@@ -3,10 +3,19 @@
 This layer is the only place that combines the BrainOS adapter, memory policy,
 context builder, and provider factory. It must never persist API keys or put
 them into diagnostics, traces, or returned inspection data.
+
+Phase 5 adds opt-in conversation persistence: when the caller injects storage
+backends, transcript messages and BrainOS memory are mirrored to SQLite so a
+session survives a page reload and the exported JSON reflects what the runtime
+actually holds. Persistence is strictly best-effort — a storage failure never
+fails a conversation turn — and credentials are redacted before anything is
+written.
 """
 
 from __future__ import annotations
 
+import sys
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field, replace
 from typing import Any
 
@@ -20,6 +29,7 @@ from brain.context_builder import BuiltContext, build_context
 from brain.memory_policy import MemoryPolicy, extract_candidates
 from brain.trace import sanitize_trace, sanitize_value
 from providers import ProviderError, ProviderResponse, create_provider
+from providers.base import ProviderConfig
 from storage.conversations import ConversationMessage
 
 from .state import SessionState
@@ -38,8 +48,6 @@ def _warn_storage(context: str, exc: Exception) -> None:
     the exception text itself could carry user content, so only its type is
     logged.
     """
-
-    import sys
 
     print(f"[storage] {context}: {type(exc).__name__}", file=sys.stderr)
 
@@ -78,41 +86,71 @@ class ConversationService:
         provider: Any | None = None,
         policy: MemoryPolicy | None = None,
         system_instructions: str = DEFAULT_SYSTEM_INSTRUCTIONS,
+        adapter_factory: Callable[..., BrainOSAdapter] | None = None,
+        provider_factory: Callable[[ProviderConfig], Any] | None = None,
         conversation_store: Any | None = None,
         memory_store: Any | None = None,
     ) -> None:
+        """Bind a service to one session.
+
+        ``adapter_factory`` and ``provider_factory`` are seams: the UI and the
+        evaluation runner construct both through the session's own ids and
+        configuration, so a test can substitute fakes without weakening the
+        production path. An *object* passed as ``adapter`` or ``provider`` is
+        treated as an injected test double instead.
+
+        ``conversation_store`` and ``memory_store`` are the Phase 5 persistence
+        seam (structural :mod:`storage.conversations` protocols). Both default
+        to ``None``, which keeps the service purely in-memory exactly as before
+        Phase 5; when present, transcript messages and memory snapshots are
+        mirrored best-effort and credentials are redacted before writing.
+        """
+
         self.state = state
         self.policy = policy or MemoryPolicy()
         self.system_instructions = system_instructions
-        # Phase 5 persistence: best-effort mirrors of the transcript and the
-        # BrainOS memory set. ``None`` keeps the service purely in-memory; the
-        # controller attaches its stores after construction when a factory did
-        # not supply them. Storage never drives behaviour — the runtime stays
-        # authoritative for recall and ``state.messages`` stays the transcript
-        # source of truth.
-        self.conversation_store = conversation_store
-        self.memory_store = memory_store
         self._provider = provider
         self._adapter_injected = adapter is not None
+        self._provider_injected = provider is not None
+        self._adapter_factory = adapter_factory or create_brain_adapter
+        self._provider_factory = provider_factory or create_provider
+        self._conversation_store = conversation_store
+        self._memory_store = memory_store
         if adapter is not None:
             self.adapter = adapter
             state.brain = adapter
         elif state.brain is not None:
             self.adapter = state.brain
         else:
-            self.adapter = create_brain_adapter(
-                session_id=state.session_id,
-                actor_id=state.actor_id,
-                policy=self.policy,
-            )
+            self.adapter = self._new_adapter()
             state.brain = self.adapter
 
+    def _new_adapter(self) -> BrainOSAdapter:
+        """Create a runtime bound to this session's ids (never shared)."""
+
+        return self._adapter_factory(
+            session_id=self.state.session_id,
+            actor_id=self.state.actor_id,
+            policy=self.policy,
+        )
+
     def provider(self) -> Any:
-        """Return the injected provider or construct one from session configuration."""
+        """Return the cached provider or construct one from session configuration."""
 
         if self._provider is None:
-            self._provider = create_provider(self.state.provider)
+            self._provider = self._provider_factory(self.state.provider)
         return self._provider
+
+    def reset_provider(self) -> None:
+        """Drop the cached provider after the session configuration changed.
+
+        Without this a client built from an old key would keep serving requests
+        after the user replaced or cleared that key.
+        """
+
+        if self._provider_injected:
+            return
+        self._provider = None
 
     def observe_text(self, text: str, *, role: str = "user") -> list[MemoryRecord]:
         """Observe policy-accepted candidates from a turn and return stored memories."""
@@ -141,7 +179,7 @@ class ConversationService:
         self.state.messages.append({"role": "user", "content": user_text})
         self._persist_message("user", user_text)
         stored = self.observe_text(user_text, role="user")
-        recalled = self._guard_memories(self.adapter.recall(user_text))
+        recalled = self._recall(user_text)
         decision = self.adapter.decide(user_text)
         explanation = self._sanitize(self.adapter.explain(user_text))
         retrieved = self._enrich(recalled, explanation)
@@ -182,6 +220,15 @@ class ConversationService:
         self.state.diagnostics = self._diagnostics(turn)
         return turn
 
+    def stored_memories(self) -> list[MemoryRecord]:
+        """Return the memories BrainOS currently holds for this session.
+
+        Memory text is passed through the credential guard: a key pasted into an
+        earlier turn must not be rendered back into the browser.
+        """
+
+        return self._guard_memories(self._safe_list_memories())
+
     def inspect(self) -> dict[str, Any]:
         """Return sanitized inspection data for the current session."""
 
@@ -199,24 +246,31 @@ class ConversationService:
         )
 
     def clear_conversation(self) -> None:
-        """Clear conversation content and drop the session's BrainOS runtime.
-
-        Persisted rows for the cleared conversation and the session's memory
-        mirror are removed as well, so *Clear conversation* means the same
-        thing in the store as it does in process memory (plan §19).
-        """
+        """Clear conversation content and drop the session's BrainOS runtime."""
 
         previous_conversation = self.state.conversation_id
         self.state.clear_conversation()
         self._delete_persisted_conversation(previous_conversation)
+        self.reset_memory()
+
+    def reset_memory(self) -> None:
+        """Drop the session's BrainOS memory while keeping the transcript.
+
+        "Clear memory" and "clear conversation" are separate user-data controls
+        in the plan: wiping the transcript should not be the only way to forget
+        what BrainOS has observed, and vice versa. An injected adapter is a
+        test seam and is deliberately retained so a test can assert that the
+        application did *not* create a new runtime.
+
+        The persisted memory mirror is cleared regardless of the seam: when the
+        user asks the application to forget, the durable copy must forget too,
+        even if the in-process runtime is a retained test double.
+        """
+
         self._clear_persisted_memories()
         if self._adapter_injected:
             return
-        self.adapter = create_brain_adapter(
-            session_id=self.state.session_id,
-            actor_id=self.state.actor_id,
-            policy=self.policy,
-        )
+        self.adapter = self._new_adapter()
         self.state.brain = self.adapter
 
     # ------------------------------------------------------------------ #
@@ -238,7 +292,7 @@ class ConversationService:
         return text
 
     def _persist_message(self, role: str, content: str) -> None:
-        store = self.conversation_store
+        store = self._conversation_store
         if store is None:
             return
         try:
@@ -251,7 +305,7 @@ class ConversationService:
                     metadata={"turn": len(self.state.messages)},
                 )
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - persistence must never fail a turn
             _warn_storage("conversation persistence failed", exc)
 
     def _persist_memories(self) -> None:
@@ -262,7 +316,7 @@ class ConversationService:
         pass through the same session-key guard as recalled memories.
         """
 
-        store = self.memory_store
+        store = self._memory_store
         if store is None:
             return
         try:
@@ -271,26 +325,33 @@ class ConversationService:
                 for record in self._guard_memories(self._safe_list_memories())
             ]
             store.save_memories(self.state.session_id, records)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - mirror is best-effort
             _warn_storage("memory mirror failed", exc)
 
     def _delete_persisted_conversation(self, conversation_id: str) -> None:
-        store = self.conversation_store
-        if store is None:
+        store = self._conversation_store
+        if store is None or not conversation_id:
             return
         try:
             store.clear(self.state.session_id, conversation_id)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - best-effort deletion
             _warn_storage("conversation deletion failed", exc)
 
     def _clear_persisted_memories(self) -> None:
-        store = self.memory_store
+        store = self._memory_store
         if store is None:
             return
         try:
             store.clear(self.state.session_id)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - best-effort deletion
             _warn_storage("memory deletion failed", exc)
+
+    def _recall(self, user_text: str) -> list[MemoryRecord]:
+        """Recall memories unless the active mode builds context without them."""
+
+        if not self.state.context.uses_memory():
+            return []
+        return self._guard_memories(self.adapter.recall(user_text))
 
     def _build_context(self, user_text: str, memories: list[MemoryRecord]) -> BuiltContext:
         """Assemble the model-ready prompt for one turn.
@@ -406,6 +467,9 @@ class ConversationService:
     def _diagnostics(self, turn: ConversationTurn) -> dict[str, Any]:
         return self._sanitize(
             {
+                "mode": self.state.context.mode,
+                "turn": len(self.state.messages),
+                "stored_memory_count": len(self.stored_memories()),
                 "retrieved_memory_count": len(turn.retrieved_memories),
                 "retrieved_memories": [
                     {

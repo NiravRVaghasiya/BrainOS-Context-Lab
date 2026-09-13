@@ -8,10 +8,11 @@ This repository integrates BrainOS as an upstream dependency. It does **not** mo
 
 ## Current status
 
-Phase 5, conversation persistence, is complete: transcripts and memory mirrors
-persist to SQLite with hard session isolation, and the UI now offers the full
-data-control set (clear conversation, clear memory, export session, end/delete
-session).
+Phase 4, the chat web UI, is complete and validated against the pinned BrainOS
+runtime, and Phase 5, conversation persistence, is complete: transcripts and
+memory mirrors persist to SQLite with hard session isolation, and the UI offers
+the full data-control set (clear conversation, clear memory, export session,
+end/delete session).
 
 - **Phase 1** maps the provider abstraction (OpenAI and OpenAI-compatible)
   behind `LLMProvider`, with secret-safe errors and diagnostics.
@@ -22,10 +23,9 @@ session).
   retrieval pipeline — deduplicate, IDF-weighted relevance filter, conflict
   check, recency weighting, enforced token budget — with complete accounting and
   a per-memory audit trail.
-- **Phase 4** wires the Gradio UI to a session-scoped `ChatController`: BYOK
-  provider sidebar, chat, and Memory / Context / Cognitive Trace inspection
-  tabs, with the API key traveling browser → server only and every panel
-  rendered from sanitized service output.
+- **Phase 4** wires the Gradio UI to a web-framework-free `UIController`:
+  bring-your-own-key provider connection, one chat turn, and the Memory,
+  Context, Cognitive Trace, and Evaluation tabs.
 - **Phase 5** persists conversations and memory mirrors to SQLite behind the
   `ConversationStore` / `MemoryStore` / `EvaluationStore` protocols:
   best-effort writes that never break a turn, session-key redaction at the
@@ -34,10 +34,12 @@ session).
 A session-scoped `ConversationService` combines the adapter, the retrieval
 policy, the context builder, and the provider factory. Deterministic fakes cover
 the whole pipeline without BrainOS installed; optional live tests exercise the
-pinned runtime. 216 tests pass and `ruff check .` is clean repository-wide.
+pinned runtime. 249 tests pass and `ruff check .` is clean repository-wide.
 
-See [`CONTEXT.md`](CONTEXT.md) for the living implementation state and the
-Phase 0–5 logs in `docs/`.
+Chat is usable without an API key: BrainOS still observes and retrieves memory,
+and the panels show exactly what the model *would* have been sent. See
+[`CONTEXT.md`](CONTEXT.md) for the living implementation state and the Phase
+0–5 logs in `docs/`.
 
 ### Measured behaviour so far
 
@@ -63,7 +65,7 @@ by the history-window setting rather than by memory selection.
 app.py                         # Local/Hugging Face Space entry point
 pyproject.toml                 # Package metadata and optional dependencies
 src/
-  app/                         # UI, session lifecycle, service, and state
+  app/                         # UI, controller, session lifecycle, service, and state
   brain/                       # BrainOS adapter, retrieval policy, context
                                #   builder, memory policy, tokenizers, traces
   providers/                   # LLM provider interfaces and adapters
@@ -88,13 +90,21 @@ python -m pip install --upgrade pip
 pip install -e ".[ui,providers,dev]"
 ```
 
-Start the initial UI scaffold with:
+Start the UI with:
 
 ```bash
-python app.py
+python app.py          # http://localhost:7860
 ```
 
-The scaffold displays the planned application surfaces and does not yet make provider requests.
+Select a provider, paste a session-only key, pick a model, and press **Connect**
+to list the models that key can reach. The key is held in server memory, the key
+box is cleared immediately, and **Forget key** drops it at any time. Without a
+key the app still observes, retrieves, and builds context — the panels show the
+exact prompt, but no model is called.
+
+The five tabs are Chat, Memory (stored / in-prompt / filtered-out / conflicts),
+Context (summary, statistics, final prompt), Cognitive Trace, and Evaluation
+(placeholder until Phase 17).
 
 The upstream BrainOS revision is pinned and the Phase 2 adapter mapping is
 wired. Install the optional integration extra to use the live runtime:
@@ -141,7 +151,12 @@ At scaffolding stage these commands provide interfaces and validation errors; be
 ## Security principles
 
 - Provider API keys are session-only secrets and must never be persisted or logged.
-- Conversation and memory data are isolated by session.
+- The API key box is cleared on every connect attempt; the key is never rendered
+  back to the browser, not even masked, and every panel value is redacted
+  against it.
+- Conversation and memory data are isolated by session, persisted only with
+  credentials redacted at the write site, and deleted from disk by the clear
+  and end-session controls.
 - Retrieved memory is data, not a higher-priority instruction: it is delimited,
   stripped of delimiter breakouts and role prefixes, and flagged when it matches
   an instruction-override pattern.
