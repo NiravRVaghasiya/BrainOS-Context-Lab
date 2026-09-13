@@ -148,15 +148,45 @@ class FakeRuntime:
 
 
 class FakeProvider:
-    """Deterministic provider used by application-service tests."""
+    """Deterministic provider used by application-service and UI tests.
 
-    def __init__(self, text: str = "You use PostgreSQL 16.") -> None:
+    ``models`` and ``validate`` drive the listing/credential-check paths the
+    Phase 4 UI exposes; ``error`` makes every call raise a ``ProviderError``
+    carrying that message, so redaction can be asserted end to end.
+    """
+
+    def __init__(
+        self,
+        text: str = "You use PostgreSQL 16.",
+        *,
+        models: tuple[str, ...] = ("fake-model-a", "fake-model-b"),
+        validate: bool = True,
+        error: str | None = None,
+    ) -> None:
         self.text = text
+        self.models = list(models)
+        self.validate = validate
+        self.error = error
         self.requests: list[list[dict[str, str]]] = []
+
+    def _raise_if_failing(self) -> None:
+        if self.error is not None:
+            from providers.base import ProviderError
+
+            raise ProviderError(self.error)
+
+    def list_models(self) -> list[str]:
+        self._raise_if_failing()
+        return list(self.models)
+
+    def validate_credentials(self) -> bool:
+        self._raise_if_failing()
+        return bool(self.validate)
 
     def generate(self, messages: list[dict[str, str]], **kwargs: Any) -> Any:
         from providers.base import ProviderResponse
 
+        self._raise_if_failing()
         self.requests.append(messages)
         return ProviderResponse(text=self.text, model="fake-model", usage={"total_tokens": 4})
 

@@ -8,8 +8,8 @@ This repository integrates BrainOS as an upstream dependency. It does **not** mo
 
 ## Current status
 
-Phase 3, the context construction engine, is complete and validated against the
-pinned BrainOS runtime.
+Phase 4, the chat web UI, is complete: the Gradio interface is wired to the
+session-scoped service and validated against the pinned BrainOS runtime.
 
 - **Phase 1** maps the provider abstraction (OpenAI and OpenAI-compatible)
   behind `LLMProvider`, with secret-safe errors and diagnostics.
@@ -20,15 +20,18 @@ pinned BrainOS runtime.
   retrieval pipeline — deduplicate, IDF-weighted relevance filter, conflict
   check, recency weighting, enforced token budget — with complete accounting and
   a per-memory audit trail.
+- **Phase 4** wires the Gradio UI to a session-scoped `ChatController`: BYOK
+  provider sidebar, chat, and Memory / Context / Cognitive Trace inspection
+  tabs, with the API key traveling browser → server only and every panel
+  rendered from sanitized service output.
 
 A session-scoped `ConversationService` combines the adapter, the retrieval
 policy, the context builder, and the provider factory. Deterministic fakes cover
 the whole pipeline without BrainOS installed; optional live tests exercise the
-pinned runtime. 154 tests pass and `ruff check .` is clean repository-wide.
+pinned runtime. 184 tests pass and `ruff check .` is clean repository-wide.
 
-The Gradio scaffold is not yet wired to chat callbacks (Phase 4). See
-[`CONTEXT.md`](CONTEXT.md) for the living implementation state and the Phase
-0–3 logs in `docs/`.
+See [`CONTEXT.md`](CONTEXT.md) for the living implementation state and the
+Phase 0–4 logs in `docs/`.
 
 ### Measured behaviour so far
 
