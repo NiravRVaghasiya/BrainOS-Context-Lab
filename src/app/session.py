@@ -47,6 +47,7 @@ class SessionManager:
             return False
         state.clear_credentials()
         state.clear_conversation()
+        state.brain = None
         return True
 
     def clear_all(self) -> None:

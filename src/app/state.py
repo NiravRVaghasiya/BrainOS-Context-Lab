@@ -38,14 +38,20 @@ class SessionState:
     messages: list[dict[str, Any]] = field(default_factory=list)
     last_context: list[dict[str, Any]] = field(default_factory=list)
     diagnostics: dict[str, Any] = field(default_factory=dict)
+    brain: Any = field(default=None, repr=False, compare=False)
 
     def clear_conversation(self) -> None:
-        """Remove conversation content while retaining session configuration."""
+        """Remove conversation content while retaining session configuration.
+
+        The session-scoped BrainOS adapter is dropped so the next turn cannot
+        reuse another conversation's runtime.
+        """
 
         self.messages.clear()
         self.last_context.clear()
         self.diagnostics.clear()
         self.conversation_id = new_id()
+        self.brain = None
 
     def clear_credentials(self) -> None:
         """Remove the active provider key from process memory."""

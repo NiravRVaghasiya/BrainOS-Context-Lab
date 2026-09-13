@@ -35,7 +35,7 @@ Application/session layer
 
 ### BrainOS adapter
 
-The adapter is the only application dependency on BrainOS. It exposes `observe`, `recall`, `decide`, `explain`, and `trace`. The concrete runtime mapping must be validated against a pinned upstream revision before production use.
+The adapter is the only application dependency on BrainOS. It exposes `observe`, `recall`, `decide`, `explain`, and `trace`. Phase 2 maps those methods onto the pinned v2 runtime (`source`/`event_type`, `top_k`, decision strings, `why()`, structured traces) and constructs one runtime per `session_id`/`actor_id`. `ConversationService` is the application service layer that combines the adapter with the provider factory and context builder.
 
 ### Provider adapter
 

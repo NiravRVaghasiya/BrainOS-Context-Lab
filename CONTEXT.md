@@ -4,8 +4,8 @@
 > repository state and decisions that should be preserved between phases.
 
 **Last updated:** 2026-09-13
-**Branch:** `arena/01a09b1f-brainos-context-lab`
-**Baseline commit:** `ec1f29445764f2f58884ee3c5c1afdc0ae6411e5`
+**Branch:** `arena/01a09b29-brainos-context-lab`
+**Baseline commit:** `199329b59a482226ed3e0f5e5a8b241bff3fe5f7`
 **Implementation plan:** [`BrainOS_Context_Lab_Implementation_Plan.md`](BrainOS_Context_Lab_Implementation_Plan.md)
 
 ## Product boundary
@@ -16,82 +16,68 @@ UI, storage, and evaluation. It must not reimplement or modify BrainOS. The
 LLM remains responsible for generation; BrainOS is an external cognitive-memory
 layer that helps select historical context.
 
-## Repository audit before Phase 1
-
-The baseline commit was a scaffold rather than a completed implementation.
-The following pieces were already present:
-
-- the planned `src/app`, `src/brain`, `src/providers`, `src/storage`, and
-  `src/evaluation` package boundaries;
-- a session-local state and cleanup boundary;
-- a BrainOS adapter contract with an injected fake-runtime integration test;
-- a dependency-free context builder, memory policy, benchmark fixture, metric
-  primitives, and evaluation runner shell;
-- architecture, security, threat-model, and evaluation documentation; and
-- provider files containing only a partial OpenAI SDK skeleton.
-
-The Phase 0 upstream audit has now been completed. The validated BrainOS
-revision is pinned in `pyproject.toml`, the upstream suite/evaluation/long-run
-checks passed, and the actual runtime signatures are recorded in
-[`docs/brainos-integration.md`](docs/brainos-integration.md). The application
-adapter still needs the explicit signature/return-shape mapping in Phase 2;
-that work is not silently claimed as complete here.
-
 ## Phase ledger
 
 | Phase | Status | Notes |
 | --- | --- | --- |
-| Phase 0 — Requirements/research baseline | **Complete as an upstream/API baseline** | BrainOS commit `1d9eb7a0ca537e7278e29809cda4f4c5da6c1dcc` is pinned; upstream tests (316), eval, long-run benchmark, and `observe → recall` smoke test passed. The application adapter mapping is Phase 2. |
-| **Phase 1 — Provider abstraction** | **Complete in this turn** | OpenAI and generic OpenAI-compatible adapters now implement model listing, credential validation, generation, normalization, a provider factory, and secret-safe errors/configuration. |
-| Phase 2 — BrainOS adapter | Next | Map the validated `BrainOS` API (`source`, `event_type`, `top_k`, decision strings, structured traces) into the application boundary with session isolation. |
-| Phase 3 — Context construction engine | Scaffold present | Existing builder is a dependency-free first pass; budget/conflict/relevance work remains. |
-| Phase 4 — Chat web UI | Pending | UI surfaces exist, but callbacks are not wired to provider/BrainOS services. |
+| Phase 0 — Requirements/research baseline | Complete | BrainOS commit `1d9eb7a0ca537e7278e29809cda4f4c5da6c1dcc` is pinned; upstream tests (316), eval, long-run benchmark, and `observe → recall` smoke test passed. |
+| Phase 1 — Provider abstraction | Complete | OpenAI and OpenAI-compatible adapters implement listing, credential validation, generation, normalization, a factory, and secret-safe errors. |
+| **Phase 2 — BrainOS adapter** | **Complete in this turn** | Explicit mapping of `observe(source/event_type)`, `recall(top_k)`, decision strings/`assess()`, `why()`, and structured `trace()`. Session-isolated factory, conservative memory policy, and `ConversationService` wiring. |
+| Phase 3 — Context construction engine | Scaffold present | Existing builder is a dependency-free first pass used by the service; budget/conflict/relevance/recency work remains. |
+| Phase 4 — Chat web UI | Pending | UI surfaces exist, but callbacks are not wired to `ConversationService`. |
 | Phases 5–20 | Pending | Persistence, baselines, benchmark, evaluation, security hardening, deployment, and research release follow the plan. |
 
 Detailed logs are available in
-[`docs/phase-0-research-baseline.md`](docs/phase-0-research-baseline.md) and
-[`docs/phase-1-provider-abstraction.md`](docs/phase-1-provider-abstraction.md).
+[`docs/phase-0-research-baseline.md`](docs/phase-0-research-baseline.md),
+[`docs/phase-1-provider-abstraction.md`](docs/phase-1-provider-abstraction.md),
+and [`docs/phase-2-brainos-adapter.md`](docs/phase-2-brainos-adapter.md).
 
-## Phase 1 implementation contract
+## Phase 2 implementation contract
 
-The stable application-facing provider contract is in
-[`src/providers/base.py`](src/providers/base.py):
+The application-facing BrainOS contract remains in
+[`src/brain/adapter.py`](src/brain/adapter.py):
 
 ```python
-class LLMProvider:
-    def list_models(self) -> list[str]: ...
-    def validate_credentials(self) -> bool: ...
-    def generate(self, messages, **kwargs) -> ProviderResponse: ...
+class BrainMemoryAdapter:
+    def observe(self, text, *, metadata=None) -> None: ...
+    def recall(self, query, *, limit=8) -> list[MemoryRecord]: ...
+    def decide(self, query) -> Decision: ...
+    def explain(self, query) -> dict: ...
+    def trace(self) -> list[TraceEvent]: ...
 ```
 
-`ProviderConfig` contains the provider name, model, session-only API key,
-optional compatible endpoint, temperature, output-token limit, and timeout.
-`ProviderResponse` contains normalized text, model, token usage, and sanitized
-optional raw metadata. SDK objects and SDK exception types do not cross the
-boundary.
+The adapter translates that contract onto the pinned BrainOS facade:
 
-The factory in `providers.create_provider` currently recognizes:
+| Application | Pinned BrainOS runtime |
+| --- | --- |
+| `observe(text, metadata={source, role, event_type, ...})` | `observe(text, source=..., event_type=...)` — never `metadata=` |
+| `recall(query, limit=8)` / `top_k=` | `recall(query, top_k=...)` returning `list[str]`, enriched with IDs from `active_memories()` / `memories()` |
+| `decide(query)` | prefers `assess(query)` and falls back to `decide()` strings `act/retrieve/search/ask/clarify`; only `act` is `Decision.sufficient=True` |
+| `explain(query)` | sanitized `why(query)` |
+| `trace()` | mapped structured `{session_id, cycles, records, state}` plus adapter-local events |
 
-- `openai` → `OpenAIProvider`;
-- `openai-compatible`, `openai_compatible`, or `compatible` →
-  `OpenAICompatibleProvider`.
+`create_brain_adapter(session_id=..., actor_id=...)` constructs **one runtime
+per application session** with `prefer_generated=False`. Runtimes and storage
+backends must not be shared across sessions.
 
-Both adapters use the official OpenAI Python client lazily. Tests inject a
-fake client, so provider behavior is testable without credentials, network
-access, or the optional SDK.
+`ConversationService` in [`src/app/service.py`](src/app/service.py) is the
+application service layer: memory-policy extraction, BrainOS observe/recall,
+the existing context builder, and `providers.create_provider`. Credentials
+stay in session memory and are omitted from diagnostics.
 
 ## Security decisions carried forward
 
-- API keys are excluded from `ProviderConfig` representations and
+- API keys remain excluded from `ProviderConfig` representations and
   `safe_dict()` diagnostics.
 - Provider error messages are redacted using the active key and common bearer,
   API-key, token, and OpenAI-key patterns.
-- Credential overrides (`api_key`, `authorization`, and `headers`) are rejected
-  from per-request generation kwargs.
-- Normalized response metadata drops secret-named fields and scrubs configured
-  secret values.
+- BrainOS explanations and traces drop secret-named fields and scrub
+  credential-shaped strings. Trace mapping records counts, not retrieved
+  memory text.
 - Session cleanup replaces the shared frozen provider configuration with a
-  credential-free copy; keys remain process-local and are not persisted.
+  credential-free copy and drops the session BrainOS adapter.
+- Retrieved memory is still wrapped as data, not instructions, by the context
+  builder.
 - The provider endpoint is supplied by the active session. Never expose the
   session key in browser diagnostics, evaluation artifacts, or traces.
 
@@ -101,28 +87,31 @@ From the repository root:
 
 ```bash
 .venv/bin/pytest -q
-# 18 passed
+# 37 passed
 
-.venv/bin/ruff check src/providers src/app/state.py tests/unit/test_providers.py
+.venv/bin/ruff check src/brain/adapter.py src/brain/trace.py \
+  src/brain/memory_policy.py src/app/service.py src/app/state.py \
+  src/app/session.py tests/fakes.py tests/unit/test_adapter.py \
+  tests/unit/test_service.py tests/unit/test_trace.py \
+  tests/integration tests/security
 # All checks passed
 ```
 
-Phase 0 upstream evidence is recorded separately: the pinned BrainOS checkout
-passed `316` upstream tests, its offline evaluation and 200-event long-run
-benchmark passed, and a clean temporary environment installed
-`.[integration]` and imported `brainos_runtime.BrainOS`.
+Live adapter tests in `tests/integration/test_brainos_runtime.py` require the
+optional integration extra and ran successfully in this environment against
+the pinned BrainOS revision. They skip when `brainos_runtime` is not
+installed. No provider API key was used.
 
-The `.venv` directory is ignored and is only a local test environment. The
-provider tests use deterministic injected clients and do not make network
-requests. A full-repository lint run still reports pre-existing scaffold lint
-findings outside the Phase 1 files; those are not silently presented as Phase 1
-failures and should be handled in the relevant later cleanup.
+The `.venv` directory is ignored and is only a local test environment. A
+full-repository lint run still reports pre-existing scaffold lint findings
+outside the Phase 2 files; those are not silently presented as Phase 2
+failures.
 
 ## Next safe step
 
-Implement Phase 2's explicit BrainOS adapter mapping against the pinned
-revision. Replace the injected `FakeRuntime` assumptions only with tested
-translations for `observe(source/event_type)`, `recall(top_k)`, decision
-strings, `why()`, and structured `trace()`. Then wire the provider factory and
-BrainOS adapter into an application service without moving credentials into
-persistent storage or browser-visible diagnostics.
+Implement Phase 3's context construction engine on top of the now-mapped
+adapter. Keep the existing delimited-memory builder, then add relevance
+filtering, conflict checks, recency weighting, and stricter token-budget
+accounting. Do not wire Gradio callbacks until that context contract is
+stable; the service already produces `BuiltContext` for the UI phase to
+consume.
