@@ -184,11 +184,19 @@ memories after 60 turns  15 →   6   (11 were duplicate small talk)
 
 ### 8. Tests
 
-37 → **148 tests**. New: `tests/unit/test_retrieval_policy.py` (34),
-`tests/unit/test_tokenizers.py` (13), `tests/unit/test_adapter_signals.py` (17),
-`tests/integration/test_context_pipeline.py` (12, two against the live pinned
-runtime), 29 context-builder cases, and 5 security cases covering delimiter
-escape, role smuggling, suspicious-memory exclusion, and credential redaction.
+37 → **154 tests**.
+
+New files: `tests/unit/test_retrieval_policy.py` (38),
+`tests/unit/test_tokenizers.py` (12), `tests/unit/test_adapter_signals.py` (17),
+and `tests/integration/test_context_pipeline.py` (12, two of them against the
+live pinned runtime).
+
+Extended: `tests/unit/test_context_builder.py` (29 cases, 2 retained from the
+scaffold), `tests/security/test_secrets.py` (+5: delimiter escape, role
+smuggling, suspicious-memory exclusion, credential redaction), and
+`tests/unit/test_memory_policy.py` (+6 regression cases for the classifier
+repair).
+
 `tests/fakes.py` gained `LooseFakeRuntime` (imprecise recall, honest `why()`)
 plus `contradictions()` / `stale_memories()` support.
 
@@ -202,7 +210,7 @@ clean across the whole repository rather than only across touched files.
 
 ```text
 .venv/bin/pytest -q
-148 passed in 0.31s          (includes 2 live pinned-BrainOS pipeline tests)
+154 passed in 0.30s          (includes 4 live pinned-BrainOS tests)
 
 .venv/bin/ruff check .
 All checks passed!
