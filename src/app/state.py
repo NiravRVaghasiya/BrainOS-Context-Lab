@@ -2,31 +2,17 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 from uuid import uuid4
+
+from providers.base import ProviderConfig
 
 
 def new_id() -> str:
     """Return a non-secret identifier for a session or conversation."""
 
     return str(uuid4())
-
-
-@dataclass
-class ProviderConfig:
-    """Configuration for one active provider session.
-
-    ``api_key`` is deliberately held only in process memory. Its repr is
-    suppressed so accidental diagnostic output cannot expose it.
-    """
-
-    provider: str = "openai"
-    model: str = ""
-    api_key: str = field(default="", repr=False)
-    base_url: str | None = None
-    temperature: float = 0.2
-    max_tokens: int | None = None
 
 
 @dataclass
@@ -64,4 +50,4 @@ class SessionState:
     def clear_credentials(self) -> None:
         """Remove the active provider key from process memory."""
 
-        self.provider.api_key = ""
+        self.provider = replace(self.provider, api_key="")

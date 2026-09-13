@@ -29,9 +29,10 @@ dev = [
   "pytest>=8.0",
   "ruff>=0.6"
 ]
-# Enable this extra only after the upstream BrainOS revision has been validated.
+# Pinned after the Phase 0 upstream validation. The distribution is named
+# ``brainos-cli`` even though the runtime import package is brainos_runtime.
 integration = [
-  "brainos @ git+https://github.com/NiravRVaghasiya/BrainOS.git"
+  "brainos-cli @ git+https://github.com/NiravRVaghasiya/BrainOS.git@1d9eb7a0ca537e7278e29809cda4f4c5da6c1dcc"
 ]
 
 [project.scripts]
