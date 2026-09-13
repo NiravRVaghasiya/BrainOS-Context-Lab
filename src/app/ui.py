@@ -46,6 +46,10 @@ and what it would have cost to send everything.
 
 **Your provider account is responsible for API usage and cost.** Keys are held
 in server memory for the active session only and are never written to disk.
+Transcript messages and BrainOS memories *are* persisted to a server-side
+SQLite database, with credentials redacted before writing; **Clear
+conversation**, **Clear memory**, and **End session** delete the matching
+rows.
 """
 
 EVALUATION_MARKDOWN = """### Evaluation
@@ -147,6 +151,12 @@ def create_app(controller: UIController | None = None) -> Any:
 
     Gradio is an optional dependency so the non-UI package, the CLI, and the
     unit tests can be used without installing a web framework.
+
+    Phase 5: when no controller is injected, the default one is constructed
+    with the server-wide SQLite backends (path overridable via
+    ``BRAINOS_LAB_DB``), so the shipped app persists conversations and memory
+    mirrors. An injected controller keeps exactly the stores its caller gave
+    it — tests pass fakes and never touch the real database.
     """
 
     try:
@@ -156,7 +166,18 @@ def create_app(controller: UIController | None = None) -> Any:
             "The UI requires Gradio. Install it with `pip install -e \".[ui]\"`."
         ) from exc
 
-    controller = controller or UIController()
+    if controller is None:
+        from storage.sqlite import (
+            SqliteConversationStore,
+            SqliteEvaluationStore,
+            SqliteMemoryStore,
+        )
+
+        controller = UIController(
+            conversation_store=SqliteConversationStore(),
+            memory_store=SqliteMemoryStore(),
+            evaluation_store=SqliteEvaluationStore(),
+        )
 
     with gr.Blocks(title=TITLE) as demo:
         gr.Markdown(HEADER_MARKDOWN)

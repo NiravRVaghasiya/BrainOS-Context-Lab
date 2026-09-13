@@ -15,8 +15,10 @@ authors = [
 dependencies = []
 
 [project.optional-dependencies]
+# Gradio 5 is the floor for the messages-format Chatbot used by the Phase 4
+# UI; src/app/ui.py also tolerates Gradio 6, which removed the type parameter.
 ui = [
-  "gradio>=4.0"
+  "gradio>=6.0"
 ]
 providers = [
   "openai>=1.0"

@@ -87,7 +87,17 @@ otherwise "BrainOS mode" is indistinguishable from full context plus overhead.
 
 ### Storage
 
-The initial target is session-local persistence with SQLite behind interfaces. API keys are never part of persisted state. Every record must carry sufficient session/conversation identity to prevent cross-session leakage.
+Session-local persistence is implemented with SQLite behind the
+`ConversationStore` / `MemoryStore` / `EvaluationStore` protocols
+(`src/storage/`); the backend is chosen at deployment wiring
+(`app.ui.create_app`), and the database location is configurable via
+`BRAINOS_LAB_DB` (default `data/brainos_lab.sqlite3`, Git-ignored). API keys
+are never part of persisted state: the active session key is redacted from
+message and memory text before writing, and secret-named metadata fields are
+stripped recursively at the store level. Every record carries exact
+session/conversation identity, and all reads and deletes filter on it to
+prevent cross-session leakage. The memory table is a mirror for inspection
+and export — the BrainOS runtime remains authoritative for recall.
 
 ## Baseline modes
 

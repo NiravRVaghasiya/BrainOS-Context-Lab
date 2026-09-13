@@ -9,7 +9,10 @@ This repository integrates BrainOS as an upstream dependency. It does **not** mo
 ## Current status
 
 Phase 4, the chat web UI, is complete and validated against the pinned BrainOS
-runtime.
+runtime, and Phase 5, conversation persistence, is complete: transcripts and
+memory mirrors persist to SQLite with hard session isolation, and the UI offers
+the full data-control set (clear conversation, clear memory, export session,
+end/delete session).
 
 - **Phase 1** maps the provider abstraction (OpenAI and OpenAI-compatible)
   behind `LLMProvider`, with secret-safe errors and diagnostics.
@@ -23,16 +26,20 @@ runtime.
 - **Phase 4** wires the Gradio UI to a web-framework-free `UIController`:
   bring-your-own-key provider connection, one chat turn, and the Memory,
   Context, Cognitive Trace, and Evaluation tabs.
+- **Phase 5** persists conversations and memory mirrors to SQLite behind the
+  `ConversationStore` / `MemoryStore` / `EvaluationStore` protocols:
+  best-effort writes that never break a turn, session-key redaction at the
+  write site, row-level session isolation, and export/delete controls.
 
 A session-scoped `ConversationService` combines the adapter, the retrieval
 policy, the context builder, and the provider factory. Deterministic fakes cover
 the whole pipeline without BrainOS installed; optional live tests exercise the
-pinned runtime. 216 tests pass and `ruff check .` is clean repository-wide.
+pinned runtime. 249 tests pass and `ruff check .` is clean repository-wide.
 
 Chat is usable without an API key: BrainOS still observes and retrieves memory,
 and the panels show exactly what the model *would* have been sent. See
 [`CONTEXT.md`](CONTEXT.md) for the living implementation state and the Phase
-0–4 logs in `docs/`.
+0–5 logs in `docs/`.
 
 ### Measured behaviour so far
 
@@ -147,7 +154,9 @@ At scaffolding stage these commands provide interfaces and validation errors; be
 - The API key box is cleared on every connect attempt; the key is never rendered
   back to the browser, not even masked, and every panel value is redacted
   against it.
-- Conversation and memory data are isolated by session.
+- Conversation and memory data are isolated by session, persisted only with
+  credentials redacted at the write site, and deleted from disk by the clear
+  and end-session controls.
 - Retrieved memory is data, not a higher-priority instruction: it is delimited,
   stripped of delimiter breakouts and role prefixes, and flagged when it matches
   an instruction-override pattern.

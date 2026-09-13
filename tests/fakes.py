@@ -231,3 +231,90 @@ class LooseFakeRuntime(FakeRuntime):
                 }
             )
         return {"query": query, "selected": selected, "decision": "retrieve", "confidence": 0.5}
+
+
+class InMemoryConversationStore:
+    """Dict-backed ``ConversationStore`` double for persistence unit tests."""
+
+    def __init__(self) -> None:
+        self.rows: list[Any] = []
+        self.append_calls = 0
+
+    def append(self, message: Any) -> None:
+        self.append_calls += 1
+        self.rows.append(message)
+
+    def list_messages(self, session_id: str, conversation_id: str) -> list[Any]:
+        return [
+            row
+            for row in self.rows
+            if row.session_id == session_id and row.conversation_id == conversation_id
+        ]
+
+    def clear(self, session_id: str, conversation_id: str) -> None:
+        self.rows = [
+            row
+            for row in self.rows
+            if not (row.session_id == session_id and row.conversation_id == conversation_id)
+        ]
+
+    def list_conversations(self, session_id: str) -> list[str]:
+        return sorted(
+            {row.conversation_id for row in self.rows if row.session_id == session_id}
+        )
+
+    def delete_session(self, session_id: str) -> None:
+        self.rows = [row for row in self.rows if row.session_id != session_id]
+
+
+class InMemoryMemoryStore:
+    """Dict-backed ``MemoryStore`` double; upserts by ``memory_id``."""
+
+    def __init__(self) -> None:
+        self.rows: dict[str, dict[str, Any]] = {}
+
+    def save_memories(self, session_id: str, memories: list[dict[str, Any]]) -> None:
+        for record in memories:
+            key = f"{session_id}:{record.get('memory_id', '')}"
+            self.rows[key] = dict(record)
+
+    def list_memories(self, session_id: str) -> list[dict[str, Any]]:
+        prefix = f"{session_id}:"
+        return [dict(row) for key, row in self.rows.items() if key.startswith(prefix)]
+
+    def clear(self, session_id: str) -> None:
+        prefix = f"{session_id}:"
+        self.rows = {key: row for key, row in self.rows.items() if not key.startswith(prefix)}
+
+
+class InMemoryEvaluationStore:
+    """Dict-backed ``EvaluationStore`` double."""
+
+    def __init__(self) -> None:
+        self.runs: dict[str, dict[str, Any]] = {}
+
+    def save_run(self, run_id: str, metadata: dict[str, Any], metrics: dict[str, Any]) -> None:
+        self.runs[run_id] = {
+            "run_id": run_id,
+            "session_id": metadata.get("session_id", ""),
+            "metadata": dict(metadata),
+            "metrics": dict(metrics),
+        }
+
+    def get_run(self, run_id: str) -> dict[str, Any] | None:
+        return self.runs.get(run_id)
+
+    def delete_session_data(self, session_id: str) -> None:
+        self.runs = {
+            key: run for key, run in self.runs.items() if run["session_id"] != session_id
+        }
+
+
+class RaisingStore:
+    """Store double whose every operation fails, for resilience tests."""
+
+    def __getattr__(self, name: str) -> Any:
+        def fail(*args: Any, **kwargs: Any) -> Any:
+            raise RuntimeError(f"storage backend unavailable ({name})")
+
+        return fail

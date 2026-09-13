@@ -10,6 +10,11 @@ framework:
 * rendering of the Memory, Context, and Cognitive Trace panels,
 * session export.
 
+Phase 5 makes these actions durable: the controller owns optional storage
+backends (``create_app`` injects the SQLite ones), forwards them to each
+session's service, deletes every persisted row when a session ends, and the
+export snapshot includes what the stores hold.
+
 Two constraints shape the module:
 
 1. **No credential leaves the process.** The controller accepts a key from the
@@ -33,7 +38,7 @@ from providers import ProviderError, create_provider
 from providers.base import ProviderConfig, ProviderConfigurationError
 
 from . import panels
-from .service import ConversationService
+from .service import ConversationService, _warn_storage
 from .session import SessionManager
 from .state import ContextSettings, SessionState
 
@@ -115,11 +120,28 @@ class UIController:
         provider_factory: Callable[[ProviderConfig], Any] | None = None,
         adapter_factory: Callable[..., BrainOSAdapter] | None = None,
         limits: UILimits | None = None,
+        conversation_store: Any | None = None,
+        memory_store: Any | None = None,
+        evaluation_store: Any | None = None,
     ) -> None:
+        """Create a controller.
+
+        The three ``*_store`` parameters are the Phase 5 persistence seam
+        (structural protocols from :mod:`storage.conversations` and
+        :mod:`storage.evaluations`). They default to ``None`` — a purely
+        in-memory controller — and ``create_app`` injects the SQLite backends.
+        The controller forwards them to each session's
+        :class:`ConversationService` and uses them for session-level deletion
+        and export; it never lets a storage failure break a UI action.
+        """
+
         self.sessions = sessions or SessionManager()
         self.limits = limits or UILimits()
         self._provider_factory = provider_factory or create_provider
         self._adapter_factory = adapter_factory
+        self._conversation_store = conversation_store
+        self._memory_store = memory_store
+        self._evaluation_store = evaluation_store
         self._services: dict[str, ConversationService] = {}
         self._last_turn: dict[str, Any] = {}
 
@@ -152,6 +174,8 @@ class UIController:
                 state,
                 adapter_factory=self._adapter_factory,
                 provider_factory=self._provider_factory,
+                conversation_store=self._conversation_store,
+                memory_store=self._memory_store,
             )
             self._services[state.session_id] = service
         return service
@@ -416,7 +440,12 @@ class UIController:
         else:
             service.clear_conversation()
         self._last_turn.pop(state.session_id, None)
-        return self._view(state, notice="Conversation and memory cleared.")
+        return self._view(
+            state,
+            notice=(
+                "Conversation and memory cleared — persisted rows deleted too."
+            ),
+        )
 
     def clear_memory(self, session_id: str | None) -> TurnView:
         """Drop BrainOS memory while keeping the visible transcript."""
@@ -428,7 +457,12 @@ class UIController:
         else:
             service.reset_memory()
         self._last_turn.pop(state.session_id, None)
-        return self._view(state, notice="BrainOS memory cleared; transcript kept.")
+        return self._view(
+            state,
+            notice=(
+                "BrainOS memory cleared (persisted mirror too); transcript kept."
+            ),
+        )
 
     def end_session(self, session_id: str | None) -> SessionView:
         """End a session: drop memory, transcript, and the provider key."""
@@ -437,11 +471,13 @@ class UIController:
             return SessionView(status="No active session.", session_id="")
         self._services.pop(session_id, None)
         self._last_turn.pop(session_id, None)
+        self._delete_persisted_session(session_id)
         ended = self.sessions.end(session_id)
         state = self.sessions.start()
         return SessionView(
             status=(
-                "Session ended — key, transcript, and memory dropped."
+                "Session ended — key, transcript, memory, and all persisted "
+                "session rows dropped."
                 if ended
                 else "No active session."
             ),
@@ -479,6 +515,7 @@ class UIController:
                 }
                 for record in memories
             ],
+            "persistence": self._persistence_payload(state.session_id),
         }
         return self._redact(payload, self._secrets(state))
 
@@ -611,6 +648,77 @@ class UIController:
             return service.stored_memories()
         except Exception:  # noqa: BLE001 - panel is best-effort
             return []
+
+    def _persistence_payload(self, session_id: str) -> dict[str, Any]:
+        """The persisted view of a session for the export snapshot.
+
+        ``messages`` (top level) is the live transcript; ``persistence`` shows
+        what the durable stores hold for this session — every conversation
+        with rows still in the database plus the memory mirror. Conversations
+        cleared through the UI are absent because clearing deletes their rows.
+        Reads are best-effort: a failing backend downgrades the export instead
+        of failing it.
+        """
+
+        payload: dict[str, Any] = {
+            "enabled": self._conversation_store is not None
+            or self._memory_store is not None,
+            "conversations": [],
+            "memories": [],
+        }
+        if self._conversation_store is not None:
+            try:
+                for conversation_id in self._conversation_store.list_conversations(
+                    session_id
+                ):
+                    messages = self._conversation_store.list_messages(
+                        session_id, conversation_id
+                    )
+                    payload["conversations"].append(
+                        {
+                            "conversation_id": conversation_id,
+                            "messages": [
+                                {
+                                    "role": message.role,
+                                    "content": message.content,
+                                    "created_at": message.created_at,
+                                }
+                                for message in messages
+                            ],
+                        }
+                    )
+            except Exception as exc:  # noqa: BLE001 - export is best-effort
+                _warn_storage("export transcript read failed", exc)
+        if self._memory_store is not None:
+            try:
+                payload["memories"] = self._memory_store.list_memories(session_id)
+            except Exception as exc:  # noqa: BLE001 - export is best-effort
+                _warn_storage("export memory read failed", exc)
+        return payload
+
+    def _delete_persisted_session(self, session_id: str) -> None:
+        """Forget everything a session persisted (plan §19 user-data deletion).
+
+        Best-effort per backend: a failing store logs the exception type and
+        the remaining stores are still cleared, so one broken table cannot
+        retain rows the user asked to delete.
+        """
+
+        if self._conversation_store is not None:
+            try:
+                self._conversation_store.delete_session(session_id)
+            except Exception as exc:  # noqa: BLE001 - best-effort deletion
+                _warn_storage("conversation deletion failed", exc)
+        if self._memory_store is not None:
+            try:
+                self._memory_store.clear(session_id)
+            except Exception as exc:  # noqa: BLE001 - best-effort deletion
+                _warn_storage("memory deletion failed", exc)
+        if self._evaluation_store is not None:
+            try:
+                self._evaluation_store.delete_session_data(session_id)
+            except Exception as exc:  # noqa: BLE001 - best-effort deletion
+                _warn_storage("evaluation deletion failed", exc)
 
     def _secrets(self, state: SessionState) -> tuple[str, ...]:
         key = state.provider.api_key
