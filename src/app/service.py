@@ -19,6 +19,7 @@ from collections.abc import Callable
 from dataclasses import asdict, dataclass, field, replace
 from typing import Any
 
+from baselines.rag import HistoryChunk, chunk_history, retrieve_chunks
 from brain.adapter import (
     BrainOSAdapter,
     Decision,
@@ -59,6 +60,9 @@ class ConversationTurn:
     user_message: str
     reply: str | None
     retrieved_memories: tuple[MemoryRecord, ...] = ()
+    #: Transcript chunks the non-BrainOS retriever put in the prompt (Phase 6,
+    #: baseline Modes C/E). Empty for Modes A, B, and D.
+    retrieved_chunks: tuple[HistoryChunk, ...] = ()
     stored_memories: tuple[MemoryRecord, ...] = ()
     decision: Decision | None = None
     explanation: dict[str, Any] = field(default_factory=dict)
@@ -206,6 +210,7 @@ class ConversationService:
             user_message=user_text,
             reply=reply,
             retrieved_memories=tuple(retrieved),
+            retrieved_chunks=tuple(built.selected_chunks),
             stored_memories=tuple(stored),
             decision=decision,
             explanation=explanation,
@@ -219,6 +224,29 @@ class ConversationService:
         )
         self.state.diagnostics = self._diagnostics(turn)
         return turn
+
+    def record_assistant_message(self, text: str) -> list[MemoryRecord]:
+        """Add a scripted assistant turn to the transcript and observe it.
+
+        The evaluation replay path (Phase 6) needs this: a benchmark dataset
+        fixes the assistant side of the conversation instead of generating it,
+        but the transcript and BrainOS memory must still see those turns. If
+        they did not, the history window and the retrieval candidates would be
+        smaller than a live conversation of the same length, and the modes
+        would be compared on a conversation that never existed.
+
+        No provider is called and no turn accounting is produced; this only
+        extends the transcript the next turn will be built from.
+        """
+
+        content = str(text or "").strip()
+        if not content:
+            return []
+        self.state.messages.append({"role": "assistant", "content": content})
+        self._persist_message("assistant", content)
+        stored = self.observe_text(content, role="assistant")
+        self._persist_memories()
+        return stored
 
     def stored_memories(self) -> list[MemoryRecord]:
         """Return the memories BrainOS currently holds for this session.
@@ -353,12 +381,50 @@ class ConversationService:
             return []
         return self._guard_memories(self.adapter.recall(user_text))
 
+    def _retrieve_chunks(
+        self, user_text: str, history: list[dict[str, Any]]
+    ) -> list[HistoryChunk]:
+        """Lexically retrieve transcript chunks for the modes that use them.
+
+        Phase 6's Mode C/E evidence source. It runs on the same transcript the
+        history window sees, and the text goes through the same session-key
+        guard as recalled memory: a credential pasted into an early turn must
+        not be replayed into a later prompt by the retriever either.
+
+        Chunk text is *not* neutralized here — the retriever guards it at
+        selection time, so the accounting, the panels, and the prompt all
+        describe the same bytes.
+        """
+
+        settings = self.state.context
+        if not settings.uses_rag():
+            return []
+        candidates = chunk_history(history)
+        if not candidates:
+            return []
+        secrets = self._secrets()
+        if secrets:
+            guarded: list[HistoryChunk] = []
+            for chunk in candidates:
+                text = chunk.text
+                for secret in secrets:
+                    if secret in text:
+                        text = text.replace(secret, "[redacted]")
+                guarded.append(replace(chunk, text=text) if text != chunk.text else chunk)
+            candidates = guarded
+        return retrieve_chunks(user_text, candidates, top_k=settings.rag_top_k)
+
     def _build_context(self, user_text: str, memories: list[MemoryRecord]) -> BuiltContext:
         """Assemble the model-ready prompt for one turn.
 
         BrainOS stays authoritative: the runtime's own contradictions and stale
         reports are handed to the builder, which applies the application-level
         heuristic only for pairs the runtime did not classify.
+
+        Which evidence reaches the prompt is decided by the session's baseline
+        mode (Phase 6). The system instructions and the accounting are identical
+        in every mode, so a cross-mode difference is attributable to context
+        selection alone.
         """
 
         settings = self.state.context
@@ -368,6 +434,7 @@ class ConversationService:
             current_user_message=user_text,
             recent_conversation=history,
             memories=memories,
+            retrieved_chunks=self._retrieve_chunks(user_text, history),
             budget=settings.context_budget(),
             policy=settings.retrieval_policy(),
             conflicts=self._safe_conflicts(),
@@ -480,6 +547,10 @@ class ConversationService:
                     }
                     for record in turn.retrieved_memories
                 ],
+                "mode_label": self.state.context.mode_profile().label,
+                "uses_rag": self.state.context.uses_rag(),
+                "retrieved_chunk_count": len(turn.retrieved_chunks),
+                "retrieved_chunks": [chunk.to_dict() for chunk in turn.retrieved_chunks],
                 "decision": {
                     "sufficient": turn.decision.sufficient if turn.decision else None,
                     "reason": turn.decision.reason if turn.decision else "",

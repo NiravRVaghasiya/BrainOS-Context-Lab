@@ -32,6 +32,8 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any
 
+from baselines.modes import mode_choices, mode_label, resolve_mode
+from baselines.rag import HistoryChunk
 from brain.adapter import BrainOSAdapter, BrainOSNotConfiguredError, MemoryRecord
 from brain.trace import sanitize_value
 from providers import ProviderError, create_provider
@@ -46,6 +48,8 @@ PROVIDER_LABELS: tuple[tuple[str, str], ...] = (
     ("OpenAI", "openai"),
     ("OpenAI-compatible", "openai-compatible"),
 )
+#: ``(label, value)`` pairs for the baseline-mode selector, in plan order.
+MODE_CHOICES: tuple[tuple[str, str], ...] = mode_choices()
 DEFAULT_MODEL_PLACEHOLDER = "gpt-4o-mini"
 
 _BRAINOS_INSTALL_HINT = (
@@ -93,6 +97,7 @@ class TurnView:
     status: str = ""
     stored_rows: list[list[Any]] = field(default_factory=list)
     retrieved_rows: list[list[Any]] = field(default_factory=list)
+    chunk_rows: list[list[Any]] = field(default_factory=list)
     dropped_rows: list[list[Any]] = field(default_factory=list)
     conflict_rows: list[list[Any]] = field(default_factory=list)
     stats: dict[str, Any] = field(default_factory=dict)
@@ -333,6 +338,14 @@ class UIController:
 
         Unknown fields are rejected rather than ignored: a typo in a slider name
         would otherwise leave the user looking at settings that do nothing.
+
+        A mode change (Phase 6) rewrites the budgets that mode defines, and the
+        mode's values win over any budget submitted in the same call. That
+        ordering is what keeps the baseline comparison honest: the sidebar
+        submits every slider together with the mode, so letting the sliders win
+        would silently carry the previous mode's history window into the new one
+        — and Phase 3 measured that two modes sharing a window larger than the
+        conversation are indistinguishable.
         """
 
         state = self.ensure_session(session_id)
@@ -341,18 +354,46 @@ class UIController:
         if unknown:
             return f"⚠️ Unknown context setting(s): {', '.join(unknown)}"
         settings = replace(state.context, **fields)
+        requested = fields.get("mode")
+        if requested is not None:
+            try:
+                resolved = resolve_mode(requested)
+            except ValueError as exc:
+                return f"⚠️ {exc}"
+            if resolved != state.context.mode:
+                settings = settings.with_mode_defaults(resolved)
         try:
+            settings.mode_profile()
             settings.context_budget()
             settings.retrieval_policy()
         except (TypeError, ValueError) as exc:
             return f"⚠️ {exc}"
         state.context = settings
-        return (
-            f"Context updated · max {settings.max_tokens} tokens · "
-            f"history window {settings.recent_turn_budget} · "
-            f"memory budget {settings.memory_budget} · "
-            f"max {settings.max_memories} memories · mode `{settings.mode}`"
+        profile = settings.mode_profile()
+        window = (
+            f"last {settings.max_recent_turns} turns"
+            if settings.max_recent_turns is not None
+            else "whole conversation"
         )
+        return (
+            f"Context updated · {profile.label} · max {settings.max_tokens} tokens · "
+            f"history {window} / {settings.recent_turn_budget} tokens · "
+            f"memory budget {settings.memory_budget} · "
+            f"chunk budget {settings.chunk_budget} · "
+            f"max {settings.max_memories} memories"
+        )
+
+    def apply_mode(self, session_id: str | None, mode: Any) -> tuple[str, ContextSettings]:
+        """Switch baseline mode and return the settings that mode applied.
+
+        The UI calls this from the mode selector so the sidebar can show the
+        budgets that will actually run. Returning the resolved settings (rather
+        than just a status string) is what makes the two impossible to desync.
+        """
+
+        state = self.ensure_session(session_id)
+        status = self.update_context(state.session_id, mode=mode)
+        return status, state.context
 
     def context_payload(self, session_id: str | None) -> dict[str, Any]:
         """Return the current context settings for diagnostics and export."""
@@ -361,9 +402,13 @@ class UIController:
         settings = state.context
         payload = {
             "mode": settings.mode,
+            "mode_label": settings.mode_profile().label,
+            "mode_profile": settings.mode_profile().to_dict(),
             "uses_memory": settings.uses_memory(),
+            "uses_rag": settings.uses_rag(),
             "budget": settings.context_budget().__dict__,
             "policy": settings.retrieval_policy().__dict__,
+            "rag_top_k": settings.rag_top_k,
         }
         return self._redact(payload, self._secrets(state))
 
@@ -543,6 +588,7 @@ class UIController:
         memories = self._stored_memories_safe(service)
 
         retrieved: list[MemoryRecord] = []
+        chunks: list[HistoryChunk] = []
         ranking: list[Mapping[str, Any]] = []
         stats: Mapping[str, Any] = {}
         report: Mapping[str, Any] = {}
@@ -550,6 +596,7 @@ class UIController:
         generated = False
         if turn is not None:
             retrieved = list(turn.retrieved_memories)
+            chunks = list(turn.retrieved_chunks)
             ranking = [dict(item) for item in turn.memory_ranking]
             stats = dict(turn.context_stats)
             report = dict(turn.context_report)
@@ -591,6 +638,7 @@ class UIController:
             retrieved_rows=self._redact(
                 panels.retrieved_rows(retrieved, ranking), secrets
             ),
+            chunk_rows=self._redact(panels.chunk_rows(chunks), secrets),
             dropped_rows=panels.dropped_rows(self._redact(report, secrets)),
             conflict_rows=panels.conflict_rows(self._redact(report, secrets)),
             stats=self._redact(dict(stats), secrets),
@@ -598,7 +646,7 @@ class UIController:
                 panels.context_summary(
                     self._redact(stats, secrets),
                     report=self._redact(report, secrets),
-                    mode=state.context.mode,
+                    mode=mode_label(state.context.mode),
                     turn=len(state.messages),
                 ),
                 secrets,
@@ -748,6 +796,7 @@ class UIController:
 
 __all__ = [
     "DEFAULT_MODEL_PLACEHOLDER",
+    "MODE_CHOICES",
     "PROVIDER_LABELS",
     "ConnectionView",
     "SessionView",

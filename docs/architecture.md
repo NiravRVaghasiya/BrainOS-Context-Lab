@@ -101,12 +101,40 @@ and export — the BrainOS runtime remains authoritative for recall.
 
 ## Baseline modes
 
-The evaluation layer must support the same provider and task protocol for:
+The evaluation layer supports the same provider and task protocol for all five
+of the plan's strategies (Phase 6), selected by `ContextSettings.mode` and
+registered in `src/baselines/modes.py`:
 
-- Full Context,
-- Sliding Window,
-- Conventional RAG,
-- BrainOS, and optionally
-- BrainOS + RAG.
+| Mode | Selector | Evidence | History window |
+| --- | --- | --- | --- |
+| A | `full_context` | none | unlimited (whole `max_tokens` ceiling) |
+| B | `sliding_window` | none | last 8 turns |
+| C | `rag` | lexical top-k transcript chunks | last 2 turns / 256 tokens |
+| D | `brainos` | BrainOS recall | last 2 turns / 256 tokens |
+| E | `brainos_rag` | BrainOS recall + lexical chunks | last 2 turns / 256 tokens |
 
-Only the context-management strategy should change in a controlled comparison.
+Only the context-management strategy changes in a controlled comparison. Two
+rules keep the comparison meaningful, both derived from the Phase 3 measurement
+that reduction is driven by the history window rather than by memory selection:
+
+1. **Each mode fixes its own history window.** Switching modes rewrites
+   `recent_turn_budget`, `max_recent_turns`, and the evidence budgets through
+   `ContextSettings.with_mode_defaults()`, so Mode A and Mode D can never
+   accidentally share a window larger than the conversation.
+2. **Modes C, D, and E share one evidence allowance** (`EVIDENCE_BUDGET =
+   1024` tokens; Mode E splits it between its two sources). They differ in
+   *what selects* the evidence, so volume is held constant.
+
+Mode C's retriever (`src/baselines/rag.py`) is deliberately BrainOS-free and
+embedding-free: it chunks the transcript at sentence boundaries and ranks chunks
+by IDF-weighted lexical overlap, reusing the same lexical machinery as memory
+retrieval. `src/baselines/` never imports the BrainOS runtime — asserted in
+`tests/security/test_mode_secrets.py` — because Mode C is only a baseline if it
+does not use the system under test.
+
+BrainOS still observes in every mode; only *injection* is mode-dependent, so a
+user can switch strategies mid-conversation without losing memory.
+
+`evaluation/modes.py` replays a benchmark task through any mode using the same
+service and builder the chat path uses, which is the seam the Phase 17 pipeline
+plugs into.

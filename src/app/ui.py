@@ -22,18 +22,26 @@ import tempfile
 from dataclasses import dataclass, field
 from typing import Any
 
+from baselines.modes import (
+    DEFAULT_MODE,
+    EVIDENCE_ITEMS,
+    RECENT_WINDOW_BUDGET,
+    RECENT_WINDOW_TURNS,
+)
+
 from .controller import (
     DEFAULT_MODEL_PLACEHOLDER,
+    MODE_CHOICES,
     PROVIDER_LABELS,
     UIController,
 )
 from .panels import (
+    CHUNK_COLUMNS,
     CONFLICT_COLUMNS,
     DROPPED_MEMORY_COLUMNS,
     RETRIEVED_MEMORY_COLUMNS,
     STORED_MEMORY_COLUMNS,
 )
-from .state import BRAINOS_MODE, NO_MEMORY_MODE
 
 TITLE = "BrainOS Context Lab"
 
@@ -57,19 +65,23 @@ EVALUATION_MARKDOWN = """### Evaluation
 Benchmark runs are **not available yet** (plan Phase 17).
 
 The chat above already produces the raw material for them: every turn records
-raw history tokens, selected history tokens, retrieved memory tokens, system
-tokens, final context tokens, and a per-memory audit trail of everything the
-retrieval policy removed.
+raw history tokens, selected history tokens, retrieved memory tokens, retrieved
+chunk tokens, system tokens, final context tokens, and a per-item audit trail of
+everything the retrieval policy removed.
 
-Baseline modes (Full Context, Sliding Window, RAG, BrainOS+RAG) land in Phase 6,
-and the context-rot benchmark in Phase 7. Until then, use **Export session** to
-take a machine-readable snapshot of a conversation.
+Baseline modes (Phase 6) are live — pick one in the sidebar under **Context** to
+run the same conversation through Full Context, Sliding Window, Lexical RAG,
+BrainOS, or BrainOS + RAG. Each mode reports the identical accounting fields, so
+the Context tab is a one-conversation version of the comparison the benchmark
+will run at scale. The context-rot benchmark itself lands in Phase 7; until
+then, use **Export session** to take a machine-readable snapshot.
 """
 
 FOOTER_MARKDOWN = (
-    "Memory is retrieved data, not instructions: every prompt renders it inside "
-    "`<retrieved_memory>` delimiters and tells the model to ignore instructions "
-    "found inside them."
+    "Retrieved evidence is data, not instructions: BrainOS memory renders inside "
+    "`<retrieved_memory>` delimiters and retrieved transcript chunks inside "
+    "`<retrieved_history>` delimiters, each introduced as untrusted text the "
+    "model must not treat as instructions."
 )
 
 
@@ -87,9 +99,12 @@ class SidebarComponents:
     disconnect_btn: Any
     connection_status: Any
     mode: Any
+    mode_info: Any
     max_tokens: Any
+    max_recent_turns: Any
     recent_turn_budget: Any
     memory_budget: Any
+    chunk_budget: Any
     max_memories: Any
     relevance_floor: Any
     recency_half_life_turns: Any
@@ -125,6 +140,7 @@ class PanelComponents:
     conflicts: Any
     summary: Any
     stats: Any
+    chunks: Any
     prompt: Any
     trace: Any
     trace_events: Any
@@ -136,6 +152,7 @@ class PanelComponents:
             "conflicts",
             "summary",
             "stats",
+            "chunks",
             "prompt",
             "trace",
             "trace_events",
@@ -196,7 +213,11 @@ def create_app(controller: UIController | None = None) -> Any:
         _wire(gr, controller, session_state, sidebar, chat, panels)
         # A fresh browser tab gets a fresh session. The controller also
         # self-heals if this never fires (API clients, restored pages).
-        demo.load(_start_session(controller), inputs=None, outputs=[session_state])
+        demo.load(
+            _start_session(controller),
+            inputs=None,
+            outputs=[session_state, sidebar.mode_info],
+        )
 
     return demo
 
@@ -242,25 +263,40 @@ def _build_sidebar(gr: Any) -> SidebarComponents:
     connection_status = gr.Markdown("Not connected.")
 
     gr.Markdown("### Context")
-    mode = gr.Radio(
-        choices=[
-            ("BrainOS memory", BRAINOS_MODE),
-            ("No memory (control)", NO_MEMORY_MODE),
-        ],
-        value=BRAINOS_MODE,
-        label="Memory mode",
+    mode = gr.Dropdown(
+        choices=[list(pair) for pair in MODE_CHOICES],
+        value=DEFAULT_MODE,
+        label="Baseline mode",
+        info="Switching modes rewrites the budgets below to that mode's defaults.",
     )
+    mode_info = gr.Markdown("")
     max_tokens = gr.Slider(512, 32768, value=4096, step=256, label="Max context tokens")
+    max_recent_turns = gr.Number(
+        value=RECENT_WINDOW_TURNS,
+        label="Recent turns kept (blank = whole conversation)",
+        precision=0,
+        info="Mode A leaves this blank; Mode B sets it to a window.",
+    )
     recent_turn_budget = gr.Slider(
         0,
         8192,
-        value=512,
+        value=RECENT_WINDOW_BUDGET,
         step=64,
         label="Recent-history budget (tokens)",
-        info="A smaller window forces the prompt to lean on memory.",
+        info="A smaller window forces the prompt to lean on retrieved evidence.",
     )
     memory_budget = gr.Slider(0, 4096, value=1024, step=64, label="Memory budget (tokens)")
-    max_memories = gr.Slider(1, 20, value=8, step=1, label="Max memories in prompt")
+    chunk_budget = gr.Slider(
+        0,
+        4096,
+        value=0,
+        step=64,
+        label="Retrieved-chunk budget (tokens)",
+        info="Only Modes C and E spend this; it is the lexical-RAG evidence slot.",
+    )
+    max_memories = gr.Slider(
+        1, 20, value=EVIDENCE_ITEMS, step=1, label="Max memories in prompt"
+    )
     with gr.Accordion("Retrieval policy", open=False):
         relevance_floor = gr.Slider(0.0, 1.0, value=0.12, step=0.01, label="Relevance floor")
         recency_half_life_turns = gr.Slider(
@@ -285,9 +321,12 @@ def _build_sidebar(gr: Any) -> SidebarComponents:
         disconnect_btn=disconnect_btn,
         connection_status=connection_status,
         mode=mode,
+        mode_info=mode_info,
         max_tokens=max_tokens,
+        max_recent_turns=max_recent_turns,
         recent_turn_budget=recent_turn_budget,
         memory_budget=memory_budget,
+        chunk_budget=chunk_budget,
         max_memories=max_memories,
         relevance_floor=relevance_floor,
         recency_half_life_turns=recency_half_life_turns,
@@ -370,6 +409,13 @@ def _build_inspection(gr: Any) -> PanelComponents:
     with gr.Tab("Context"):
         summary = gr.Markdown("")
         stats = gr.JSON(label="Context statistics", value={})
+        chunks = gr.Dataframe(
+            headers=list(CHUNK_COLUMNS),
+            label="Retrieved transcript chunks (Modes C/E)",
+            value=[],
+            interactive=False,
+            wrap=True,
+        )
         prompt = gr.Textbox(
             label="Final prompt sent to the model",
             lines=16,
@@ -388,6 +434,7 @@ def _build_inspection(gr: Any) -> PanelComponents:
         conflicts=conflicts,
         summary=summary,
         stats=stats,
+        chunks=chunks,
         prompt=prompt,
         trace=trace,
         trace_events=trace_events,
@@ -450,8 +497,10 @@ def _wire(
         inputs=[
             sidebar.mode,
             sidebar.max_tokens,
+            sidebar.max_recent_turns,
             sidebar.recent_turn_budget,
             sidebar.memory_budget,
+            sidebar.chunk_budget,
             sidebar.max_memories,
             sidebar.relevance_floor,
             sidebar.recency_half_life_turns,
@@ -461,6 +510,25 @@ def _wire(
             session_state,
         ],
         outputs=[sidebar.context_status, session_state],
+    )
+    # Phase 6: switching baseline mode is its own action, not a field of the
+    # "apply" form. It writes the mode's budgets server-side and pushes them
+    # back into the sliders, so what the sidebar displays is always what the
+    # next turn will actually run.
+    sidebar.mode.change(
+        _apply_mode(controller),
+        inputs=[sidebar.mode, session_state],
+        outputs=[
+            sidebar.context_status,
+            sidebar.mode_info,
+            sidebar.max_tokens,
+            sidebar.max_recent_turns,
+            sidebar.recent_turn_budget,
+            sidebar.memory_budget,
+            sidebar.chunk_budget,
+            sidebar.max_memories,
+            session_state,
+        ],
     )
 
     chat.send_btn.click(
@@ -504,8 +572,12 @@ def _wire(
 
 
 def _start_session(controller: UIController) -> Any:
-    def start_session() -> str:
-        return controller.ensure_session(None).session_id
+    def start_session() -> tuple[str, str]:
+        """Start a session and describe the baseline mode it begins in."""
+
+        state = controller.ensure_session(None)
+        profile = state.context.mode_profile()
+        return state.session_id, f"**{profile.label}** — {profile.description}"
 
     return start_session
 
@@ -563,8 +635,10 @@ def _update_context(controller: UIController) -> Any:
     def update_context(
         mode: str,
         max_tokens: float,
+        max_recent_turns: Any,
         recent_turn_budget: float,
         memory_budget: float,
+        chunk_budget: float,
         max_memories: float,
         relevance_floor: float,
         recency_half_life_turns: float,
@@ -580,8 +654,10 @@ def _update_context(controller: UIController) -> Any:
             session_id,
             mode=mode,
             max_tokens=int(max_tokens),
+            max_recent_turns=_optional_turns(max_recent_turns),
             recent_turn_budget=int(recent_turn_budget),
             memory_budget=int(memory_budget),
+            chunk_budget=int(chunk_budget),
             max_memories=int(max_memories),
             relevance_floor=float(relevance_floor),
             recency_half_life_turns=float(recency_half_life_turns),
@@ -592,6 +668,50 @@ def _update_context(controller: UIController) -> Any:
         return status, controller.ensure_session(session_id).session_id
 
     return update_context
+
+
+def _apply_mode(controller: UIController) -> Any:
+    """Callback for the baseline-mode selector (Phase 6)."""
+
+    def apply_mode(mode: str, session_id: str | None) -> tuple[Any, ...]:
+        import gradio as gr
+
+        # Resolve the session *before* acting. Passing the raw input back into
+        # ``ensure_session`` afterwards would mint a second session and hand the
+        # browser an id whose mode was never changed.
+        session_id = controller.ensure_session(session_id).session_id
+        status, settings = controller.apply_mode(session_id, mode)
+        profile = settings.mode_profile()
+        return (
+            status,
+            f"**{profile.label}** — {profile.description}",
+            gr.update(value=settings.max_tokens),
+            gr.update(value=settings.max_recent_turns),
+            gr.update(value=settings.recent_turn_budget),
+            gr.update(value=settings.memory_budget),
+            gr.update(value=settings.chunk_budget),
+            gr.update(value=settings.max_memories),
+            session_id,
+        )
+
+    return apply_mode
+
+
+def _optional_turns(value: Any) -> int | None:
+    """Map the "recent turns kept" box onto ``max_recent_turns``.
+
+    A blank box means "no turn limit" (Mode A), which is ``None`` rather than
+    ``0``: zero turns would send no raw history at all, a different and much
+    more aggressive setting that belongs in a mode, not in an empty field.
+    """
+
+    if value is None or value == "":
+        return None
+    try:
+        turns = int(value)
+    except (TypeError, ValueError):
+        return None
+    return max(0, turns)
 
 
 def _chat(controller: UIController) -> Any:
@@ -668,6 +788,7 @@ def _panel_values(view: Any) -> tuple[Any, ...]:
         view.conflict_rows,
         view.summary,
         view.stats,
+        view.chunk_rows,
         view.prompt,
         view.trace,
         view.trace_events,

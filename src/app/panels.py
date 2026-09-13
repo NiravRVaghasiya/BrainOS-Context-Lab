@@ -51,6 +51,11 @@ RETRIEVED_MEMORY_COLUMNS: tuple[str, ...] = (
     "Flags",
 )
 DROPPED_MEMORY_COLUMNS: tuple[str, ...] = ("Reason", "Memory", "Score", "Detail")
+#: Phase 6: the transcript chunks a non-BrainOS retriever put in the prompt
+#: (baseline Modes C/E). Shown separately from memory because they are a
+#: different kind of evidence — verbatim conversation, no supersession
+#: resolution — and the comparison is the point of the panel.
+CHUNK_COLUMNS: tuple[str, ...] = ("Rank", "Chunk", "Said by", "Turn", "Score", "Flags")
 
 _MAX_CELL_CHARS = 240
 _MAX_PROMPT_CHARS = 20000
@@ -175,6 +180,31 @@ def retrieved_rows(
     return rows
 
 
+def chunk_rows(chunks: Sequence[Any]) -> list[list[Any]]:
+    """Rows for the retrieved-transcript table (baseline Modes C/E).
+
+    ``Said by`` is not decoration: a chunk the assistant produced is the model's
+    own earlier claim, while one the user produced is user-asserted evidence.
+    Presenting them alike would let the panel imply a provenance the prompt does
+    not carry.
+    """
+
+    rows: list[list[Any]] = []
+    for index, chunk in enumerate(chunks, start=1):
+        flags = ["suspicious"] if getattr(chunk, "suspicious", False) else []
+        rows.append(
+            [
+                index,
+                clip(getattr(chunk, "text", "")),
+                str(getattr(chunk, "role", "") or "user"),
+                format_int(getattr(chunk, "turn", 0)),
+                round_value(getattr(chunk, "score", None)),
+                ", ".join(flags),
+            ]
+        )
+    return rows
+
+
 def dropped_rows(report: Mapping[str, Any]) -> list[list[Any]]:
     """Rows for the per-memory audit trail of the retrieval pipeline.
 
@@ -238,11 +268,18 @@ def render_prompt(messages: Sequence[Mapping[str, str]]) -> str:
 
 
 def token_breakdown(stats: Mapping[str, Any]) -> str:
-    """One-line decomposition of the final context cost."""
+    """One-line decomposition of the final context cost.
+
+    ``memory`` and ``chunks`` are the two retrieved-evidence sources (Phase 6).
+    Both are always shown, including as zeros, so a reader comparing modes sees
+    which source a mode actually spent its evidence budget on instead of having
+    to notice an absent column.
+    """
 
     parts = (
         ("system", stats.get("system_tokens")),
         ("memory", stats.get("memory_block_tokens")),
+        ("chunks", stats.get("chunk_block_tokens")),
         ("history", stats.get("recent_history_tokens")),
         ("question", stats.get("current_message_tokens")),
         ("overhead", stats.get("overhead_tokens")),
@@ -301,6 +338,22 @@ def context_summary(
         f"- memories: **{memory_count}** of {candidates} candidates selected"
         + (f", {memory_dropped} dropped for budget" if memory_dropped else "")
     )
+
+    chunk_candidates = format_int(stats.get("candidate_chunk_count"))
+    chunk_count = format_int(stats.get("selected_chunk_count"))
+    chunk_dropped = format_int(stats.get("dropped_chunks_for_budget"))
+    lines.append(
+        f"- retrieved chunks: **{chunk_count}** of {chunk_candidates} candidates selected"
+        + (f", {chunk_dropped} dropped" if chunk_dropped else "")
+    )
+
+    evidence = format_int(stats.get("evidence_tokens"))
+    if evidence or chunk_count or memory_count:
+        lines.append(
+            f"- retrieved evidence: {evidence} tokens "
+            f"(memory {format_int(stats.get('memory_block_tokens'))} + "
+            f"chunks {format_int(stats.get('chunk_block_tokens'))})"
+        )
 
     if isinstance(report, Mapping):
         counts = _reason_counts(report)
@@ -469,10 +522,12 @@ def _reason_counts(report: Mapping[str, Any]) -> list[tuple[str, int]]:
 
 
 __all__ = [
+    "CHUNK_COLUMNS",
     "CONFLICT_COLUMNS",
     "DROPPED_MEMORY_COLUMNS",
     "RETRIEVED_MEMORY_COLUMNS",
     "STORED_MEMORY_COLUMNS",
+    "chunk_rows",
     "clip",
     "conflict_rows",
     "context_summary",

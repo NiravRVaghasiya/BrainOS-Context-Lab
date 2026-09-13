@@ -65,11 +65,21 @@ candidate_memory_count        dropped_history_for_budget dropped_memories_for_bu
 system_truncated              exceeds_max_tokens
 ```
 
+Phase 6 added the retrieved-transcript fields, so a mode's evidence spend can be
+attributed to its source. Every mode reports the same set; a mode that uses no
+chunks reports zeros, so a cross-mode table needs no special cases:
+
+```text
+selected_chunk_count          retrieved_chunk_tokens     chunk_block_tokens
+candidate_chunk_count         candidate_chunk_tokens     dropped_chunks_for_budget
+evidence_tokens               (= memory_block_tokens + chunk_block_tokens)
+```
+
 `full_context_reference_tokens` prices the Mode A baseline for the *same* system
-prompt and question (every history message replayed), so
-`context_reduction_vs_full_context` isolates the context-management strategy.
-`token_counter` names the counter that produced the numbers: a run is only
-comparable to runs that used the same counter.
+prompt and question (every history message replayed, no evidence blocks — Mode A
+has none), so `context_reduction_vs_full_context` isolates the
+context-management strategy. `token_counter` names the counter that produced the
+numbers: a run is only comparable to runs that used the same counter.
 
 Retrieval quality is reconstructable from `RetrievalReport` without re-running
 retrieval. It records `candidate_count`, `selected_ids`, the per-memory ranking
@@ -84,14 +94,21 @@ a reason for every dropped memory. Reasons map onto the error taxonomy:
 | `memory_budget`, `budget`, `cap` | `over_compression` |
 | `duplicate`, `empty` | noise removed, not a failure |
 | `suspicious` | injection guard (Phase 13) |
+| `chunk_budget`, `chunk_ceiling` | `over_compression`, retrieved-chunk source only |
+| `duplicate_history` | noise removed — the chunk was already in the history window |
+
+Chunk reasons are namespaced so a Precision@K computation over `dropped` can
+still isolate *memory* drops. Do not fold them into the memory counts.
 
 Two measurement cautions established during Phase 3 validation:
 
 1. **Reduction depends on the history window.** With `recent_turn_budget` larger
    than the conversation, BrainOS mode costs *more* than full context (observed:
    1486 vs 1391 tokens, 0.0% reduction). Memory-first settings on the same
-   conversation reached 72–78% reduction. Baseline modes must therefore fix
-   `recent_turn_budget` per mode and report it.
+   conversation reached 72–78% reduction. Phase 6 acted on this: every
+   baseline mode now fixes its own `recent_turn_budget` and `max_recent_turns`,
+   switching modes rewrites them, and the active window is reported in
+   `context_payload()` and the UI.
 2. **Token estimates are not provider tokens.** Validation used the
    dependency-free estimator (~4 chars/token). Research runs should use an exact
    counter and report which one.

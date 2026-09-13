@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 
 from .datasets import load_jsonl
+from .modes import task_evaluator
 from .runner import EvaluationConfig, EvaluationRunner
 
 
@@ -37,7 +38,10 @@ def main(argv: list[str] | None = None) -> int:
         benchmark=args.benchmark,
     )
     try:
-        run = EvaluationRunner(config).run(tasks)
+        # Phase 6 wired the baseline-mode strategies, so the runner can execute
+        # a task through any of the five modes without a model: the replay
+        # records what each strategy put in the prompt and what it cost.
+        run = EvaluationRunner(config).run(tasks, evaluator=task_evaluator())
     except NotImplementedError as exc:
         raise SystemExit(f"Evaluation scaffold: {exc}") from exc
     args.output.parent.mkdir(parents=True, exist_ok=True)

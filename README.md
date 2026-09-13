@@ -8,11 +8,11 @@ This repository integrates BrainOS as an upstream dependency. It does **not** mo
 
 ## Current status
 
-Phase 4, the chat web UI, is complete and validated against the pinned BrainOS
-runtime, and Phase 5, conversation persistence, is complete: transcripts and
-memory mirrors persist to SQLite with hard session isolation, and the UI offers
-the full data-control set (clear conversation, clear memory, export session,
-end/delete session).
+Phases 1–6 are complete and validated against the pinned BrainOS runtime. The
+app persists conversations and memory mirrors to SQLite with hard session
+isolation, offers the full data-control set (clear conversation, clear memory,
+export session, end/delete session), and can now run the same conversation
+through all five of the plan's baseline context-management modes.
 
 - **Phase 1** maps the provider abstraction (OpenAI and OpenAI-compatible)
   behind `LLMProvider`, with secret-safe errors and diagnostics.
@@ -30,16 +30,21 @@ end/delete session).
   `ConversationStore` / `MemoryStore` / `EvaluationStore` protocols:
   best-effort writes that never break a turn, session-key redaction at the
   write site, row-level session isolation, and export/delete controls.
+- **Phase 6** implements the plan's five baseline modes — A full context,
+  B sliding window, C lexical RAG, D BrainOS, E BrainOS + RAG — each fixing its
+  own history window, with a BrainOS-free lexical chunk retriever, a second
+  delimited evidence block, and the evaluation-runner seam that makes
+  `python -m evaluation.run --mode …` execute.
 
 A session-scoped `ConversationService` combines the adapter, the retrieval
 policy, the context builder, and the provider factory. Deterministic fakes cover
 the whole pipeline without BrainOS installed; optional live tests exercise the
-pinned runtime. 249 tests pass and `ruff check .` is clean repository-wide.
+pinned runtime. 379 tests pass and `ruff check .` is clean repository-wide.
 
 Chat is usable without an API key: BrainOS still observes and retrieves memory,
 and the panels show exactly what the model *would* have been sent. See
 [`CONTEXT.md`](CONTEXT.md) for the living implementation state and the Phase
-0–5 logs in `docs/`.
+0–6 logs in `docs/`.
 
 ### Measured behaviour so far
 
@@ -54,10 +59,26 @@ counter:
 | memory-first, tight | 308 | 1391 | **77.8%** |
 
 6/6 probe questions received exactly the evidence they needed, and the corrected
-fact never re-entered a prompt. These are integration-validation observations,
-**not** research results: no model was in the loop, the benchmark dataset and
-baseline modes (Phases 6–8) do not exist yet, and the reduction is driven mainly
-by the history-window setting rather than by memory selection.
+fact never re-entered a prompt. The reduction is driven mainly by the
+history-window setting rather than by memory selection — which is exactly why
+Phase 6 gives every baseline mode its own window.
+
+Phase 6 then ran one 28-message conversation through all five modes with the
+live pinned runtime:
+
+| Mode | tokens sent | full-context baseline | reduction | fact still in prompt |
+| --- | --- | --- | --- | --- |
+| A full context | 510 | 510 | 0.0% | yes |
+| B sliding window | 189 | 510 | 62.9% | **no** |
+| C lexical RAG | 256 | 510 | 49.8% | yes |
+| D BrainOS | 182 | 510 | **64.3%** | yes |
+| E BrainOS + RAG | 345 | 510 | 32.4% | yes |
+
+Mode D cost fewer tokens than the sliding window *and* still carried the fact
+the window had dropped. These are integration-validation observations, **not**
+research results: one synthetic conversation, an estimated token counter, no
+model in the loop, single trial, and the benchmark dataset (Phase 7) and scoring
+(Phase 8) do not exist yet.
 
 ## Repository layout
 
@@ -66,11 +87,13 @@ app.py                         # Local/Hugging Face Space entry point
 pyproject.toml                 # Package metadata and optional dependencies
 src/
   app/                         # UI, controller, session lifecycle, service, and state
+  baselines/                   # Phase 6 baseline modes A-E and the BrainOS-free
+                               #   lexical retriever Mode C/E use
   brain/                       # BrainOS adapter, retrieval policy, context
                                #   builder, memory policy, tokenizers, traces
   providers/                   # LLM provider interfaces and adapters
   storage/                     # Conversation and evaluation persistence
-  evaluation/                  # Benchmark runners, metrics, and reports
+  evaluation/                  # Benchmark runners, mode strategies, metrics, reports
 benchmarks/
   context_rot/                 # Long-conversation benchmark definition
   fixtures/                    # Small deterministic test fixtures
