@@ -66,11 +66,30 @@ class ModeReplay:
     history_messages_selected: int
     retrieved_memory_ids: tuple[str, ...] = ()
     retrieved_chunk_ids: tuple[str, ...] = ()
+    #: Phase 7: the *text* the retriever selected, kept because the benchmark's
+    #: ledger refers to facts by marker, not by runtime id. Scoring needs to see
+    #: what was selected, and a memory id alone cannot be matched to a fact.
+    retrieved_memory_texts: tuple[str, ...] = ()
+    retrieved_chunk_texts: tuple[str, ...] = ()
+    #: How many memories BrainOS held at the end of the replay. Non-zero proves
+    #: the runtime actually observed the scripted facts, which is what separates
+    #: "the retriever chose badly" from "nothing was ever stored".
+    stored_memory_count: int = 0
+    #: Transcript sessions the replay used. ``1`` unless session isolation was
+    #: requested on a multi-session task.
+    sessions_used: int = 1
     #: Evidence-availability proxy only: the expected answer string appears in
     #: the prompt. Not accuracy — see the module docstring.
     expected_answer_in_prompt: bool = False
     prompt_messages: tuple[dict[str, str], ...] = ()
     stats: dict[str, Any] = field(default_factory=dict)
+
+    def prompt_text(self) -> str:
+        """Return the prompt as one string, in message order."""
+
+        return "\n".join(
+            str(message.get("content", "")) for message in self.prompt_messages
+        )
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-ready record for the runner and the evaluation store."""
@@ -92,6 +111,10 @@ class ModeReplay:
             "history_messages_selected": self.history_messages_selected,
             "retrieved_memory_ids": list(self.retrieved_memory_ids),
             "retrieved_chunk_ids": list(self.retrieved_chunk_ids),
+            "retrieved_memory_texts": list(self.retrieved_memory_texts),
+            "retrieved_chunk_texts": list(self.retrieved_chunk_texts),
+            "stored_memory_count": self.stored_memory_count,
+            "sessions_used": self.sessions_used,
             "expected_answer_in_prompt": self.expected_answer_in_prompt,
             "prompt_messages": [dict(message) for message in self.prompt_messages],
             "stats": dict(self.stats),
@@ -114,6 +137,7 @@ def replay_task(
     mode: str,
     *,
     service_factory: ServiceFactory | None = None,
+    session_isolation: bool = False,
 ) -> ModeReplay:
     """Run one benchmark task's conversation through one baseline mode.
 
@@ -122,13 +146,28 @@ def replay_task(
     :meth:`~app.service.ConversationService.record_assistant_message` — and then
     the task's question is asked. The returned record describes the prompt that
     question produced.
+
+    A transcript may mark session boundaries with a per-message ``session`` index
+    (Phase 7's cross-session category). By default the whole transcript is
+    replayed as **one** session, which is the long-range-memory case: the fact is
+    far away, and only a memory layer can still reach it. With
+    ``session_isolation=True`` a fresh session starts at each boundary, which is
+    how the product's session-isolation invariant is measured — the fact is then
+    provably unreachable, and declining to answer is the correct behaviour.
     """
 
     factory = service_factory or default_service_factory
     service = factory(resolve_mode(mode))
+    sessions_used = 1
+    current_session = _message_session(task.conversation[0]) if task.conversation else 0
     for message in task.conversation:
         if not isinstance(message, Mapping):
             continue
+        session_index = _message_session(message)
+        if session_isolation and session_index != current_session:
+            service = factory(resolve_mode(mode))
+            sessions_used += 1
+            current_session = session_index
         role = str(message.get("role", "user")).strip().lower()
         content = message.get("content", "")
         text = "" if content is None else str(content)
@@ -167,6 +206,12 @@ def replay_task(
             record.memory_id for record in turn.retrieved_memories
         ),
         retrieved_chunk_ids=tuple(chunk.chunk_id for chunk in turn.retrieved_chunks),
+        retrieved_memory_texts=tuple(
+            record.text for record in turn.retrieved_memories
+        ),
+        retrieved_chunk_texts=tuple(chunk.text for chunk in turn.retrieved_chunks),
+        stored_memory_count=len(service.stored_memories()),
+        sessions_used=sessions_used,
         expected_answer_in_prompt=bool(expected) and expected in prompt,
         prompt_messages=tuple(dict(message) for message in turn.context_messages),
         stats=stats,
@@ -178,6 +223,7 @@ def compare_modes(
     modes: Sequence[str] = MODE_ORDER,
     *,
     service_factory: ServiceFactory | None = None,
+    session_isolation: bool = False,
 ) -> list[ModeReplay]:
     """Replay one task through every requested mode, in plan order.
 
@@ -186,12 +232,20 @@ def compare_modes(
     """
 
     return [
-        replay_task(task, mode, service_factory=service_factory) for mode in modes
+        replay_task(
+            task,
+            mode,
+            service_factory=service_factory,
+            session_isolation=session_isolation,
+        )
+        for mode in modes
     ]
 
 
 def task_evaluator(
     service_factory: ServiceFactory | None = None,
+    *,
+    session_isolation: bool = False,
 ) -> Callable[[BenchmarkTask, str], dict[str, Any]]:
     """Return the evaluator callable :meth:`EvaluationRunner.run` expects.
 
@@ -200,9 +254,23 @@ def task_evaluator(
     """
 
     def evaluate(task: BenchmarkTask, mode: str) -> dict[str, Any]:
-        return replay_task(task, mode, service_factory=service_factory).to_dict()
+        return replay_task(
+            task,
+            mode,
+            service_factory=service_factory,
+            session_isolation=session_isolation,
+        ).to_dict()
 
     return evaluate
+
+
+def _message_session(message: Mapping[str, Any]) -> int:
+    """Return the transcript session index a message belongs to (default 0)."""
+
+    try:
+        return int(message.get("session", 0) or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 __all__ = [

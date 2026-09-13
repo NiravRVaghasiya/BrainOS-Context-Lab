@@ -8,11 +8,12 @@ This repository integrates BrainOS as an upstream dependency. It does **not** mo
 
 ## Current status
 
-Phases 1–6 are complete and validated against the pinned BrainOS runtime. The
+Phases 1–7 are complete and validated against the pinned BrainOS runtime. The
 app persists conversations and memory mirrors to SQLite with hard session
 isolation, offers the full data-control set (clear conversation, clear memory,
-export session, end/delete session), and can now run the same conversation
-through all five of the plan's baseline context-management modes.
+export session, end/delete session), can run the same conversation through all
+five of the plan's baseline context-management modes, and now ships a generated
+context-rot benchmark with scoring.
 
 - **Phase 1** maps the provider abstraction (OpenAI and OpenAI-compatible)
   behind `LLMProvider`, with secret-safe errors and diagnostics.
@@ -35,11 +36,18 @@ through all five of the plan's baseline context-management modes.
   own history window, with a BrainOS-free lexical chunk retriever, a second
   delimited evidence block, and the evaluation-runner seam that makes
   `python -m evaluation.run --mode …` execute.
+- **Phase 7** turns the benchmark into an instrument: a deterministic generator
+  for the plan's seven categories (single-hop, multi-hop, temporal, conflict,
+  distractor, cross-session, abstention) across a 800-token smoke tier up to the
+  plan's 5k–120k ladder, a fact ledger with a required/supporting/forbidden
+  evidence contract, model-free retrieval scoring (Recall@K, precision,
+  evidence-in-prompt), answer verdicts with an error taxonomy, and a runner that
+  reports aggregates and records the dataset hash.
 
 A session-scoped `ConversationService` combines the adapter, the retrieval
 policy, the context builder, and the provider factory. Deterministic fakes cover
 the whole pipeline without BrainOS installed; optional live tests exercise the
-pinned runtime. 379 tests pass and `ruff check .` is clean repository-wide.
+pinned runtime. 494 tests pass and `ruff check .` is clean repository-wide.
 
 Chat is usable without an API key: BrainOS still observes and retrieves memory,
 and the panels show exactly what the model *would* have been sent. See
@@ -75,10 +83,29 @@ live pinned runtime:
 | E BrainOS + RAG | 345 | 510 | 32.4% | yes |
 
 Mode D cost fewer tokens than the sliding window *and* still carried the fact
-the window had dropped. These are integration-validation observations, **not**
-research results: one synthetic conversation, an estimated token counter, no
-model in the loop, single trial, and the benchmark dataset (Phase 7) and scoring
-(Phase 8) do not exist yet.
+the window had dropped.
+
+Phase 7 then ran the committed benchmark (7 tasks, one per category, 800-token
+tier) through all five modes with the live pinned runtime and no provider:
+
+| Mode | mean tokens sent | full-context reference | reduction | Recall@K | evidence in prompt |
+| --- | --- | --- | --- | --- | --- |
+| A full context | 1152.7 | 1152.7 | 0.0% | 0.00 | 100% |
+| B sliding window | 189.4 | 1152.7 | 83.5% | 0.00 | **0%** |
+| C lexical RAG | 270.6 | 1152.7 | 76.5% | 1.00 | 100% |
+| D BrainOS | 193.6 | 1152.7 | **83.2%** | 1.00 | 83.3% |
+| E BrainOS + RAG | 367.1 | 1152.7 | 68.1% | 1.00 | 100% |
+
+Mode D again cost about what the sliding window cost and carried evidence the
+window lost — 5 of 6 answerable tasks against 0 of 6. It also **failed the
+multi-hop category**: BrainOS recalled both required facts, but the retrieval
+policy's relevance filtering delivered only one to the prompt. That is a
+measurement, not a failure of the harness, and it is the first concrete target
+for the Phase 11 ablation.
+
+**Integration-validation observations, not research results**: one seed, one
+length tier, an estimated token counter, and no model in the loop — answer
+accuracy is only measurable once real generations are graded.
 
 ## Repository layout
 
@@ -95,7 +122,7 @@ src/
   storage/                     # Conversation and evaluation persistence
   evaluation/                  # Benchmark runners, mode strategies, metrics, reports
 benchmarks/
-  context_rot/                 # Long-conversation benchmark definition
+  context_rot/                 # Phase 7 generator, spec, scored dataset, manifest
   fixtures/                    # Small deterministic test fixtures
 docs/                          # Architecture, integration, evaluation, and security notes
 tests/                         # Unit, integration, security, and evaluation tests
@@ -162,14 +189,29 @@ examples. Generic OpenAI-compatible endpoints use
 
 ## Evaluation commands
 
-The planned command-line entry points are already reserved:
-
 ```bash
-python -m evaluation.run --mode brainos --benchmark context_rot --output results/run.json
-python -m evaluation.compare results/full_context.json results/rag.json results/brainos.json
+# regenerate the committed benchmark (byte-identical, SHA-256 pinned)
+python benchmarks/context_rot/generation.py
+
+# a research-scale tier, written outside the tracked tree
+python benchmarks/context_rot/generation.py --tier standard --variants 2 \
+  --output benchmarks/context_rot/generated/standard.jsonl
+
+# replay a dataset through one mode; retrieval metrics need no API key
+python -m evaluation.run --mode brainos --output results/run.json
+
+# grade supplied answers (JSONL: {task_id, mode?, answer}) and aggregate
+python -m evaluation.run --mode brainos --answers results/model_answers.jsonl \
+  --output results/brainos.json
+
+# compare runs
+python -m evaluation.compare results/full_context.json results/brainos.json
 ```
 
-At scaffolding stage these commands provide interfaces and validation errors; benchmark execution will be added in the evaluation phases.
+`--session-isolation` replays each transcript session separately, which is how
+the cross-session category measures the product's "memory never crosses a
+session" invariant instead of assuming it. `--limit N` caps the number of tasks
+as a first cost control; the full Phase 15 budgets are still to come.
 
 ## Security principles
 

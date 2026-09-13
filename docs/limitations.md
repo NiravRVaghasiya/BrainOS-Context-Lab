@@ -33,7 +33,26 @@ This project is an experimental evaluation platform, not a claim that BrainOS pr
 - Token estimates may begin as approximate counts until provider/model-specific
   tokenizers are integrated. `ContextStats.token_counter` records which counter
   produced a figure; runs using different counters are not comparable.
-- Synthetic context-rot tasks may not represent real user conversations.
+- Synthetic context-rot tasks may not represent real user conversations. Phase 7's
+  filler is template-generated, so the benchmark measures context management, not
+  conversational realism; the fact vocabulary is synthetic, which is what keeps
+  answers grounded in the supplied context but also means the benchmark says
+  nothing about world knowledge.
+- The benchmark is only as valid as its two enforced properties: every planted
+  fact is storable by the application's memory policy, and no filler turn is. The
+  tests assert both, but a change to the memory policy can invalidate a generated
+  dataset without failing anything else — regenerate and re-run the validity
+  tests when the policy changes.
+- Retrieval and answer scoring are lexical, not semantic: marker co-occurrence and
+  string-normalized answer matching. A correct answer phrased with an unlisted
+  synonym is graded incorrect, and a fact restated with different words is not
+  detected as evidence. Every number the benchmark reports inherits that limit.
+- The committed dataset is a smoke tier (7 tasks, one length, one seed). It
+  validates plumbing; it cannot support a claim. Robustness curves need the
+  `standard`/`research` tiers, multiple variants, and a model in the loop.
+- Measured benchmark numbers came from the dependency-free token estimator
+  (`estimate_tokens`); runs using a different counter are not comparable, and
+  `stats.token_counter` is what records which one produced a figure.
 - Provider behavior, model changes, and stochastic generation can affect results.
 - Session-local persistence is not a multi-user account system.
 - Evaluation results are only meaningful when baselines use the same models, prompts, and scoring rules.

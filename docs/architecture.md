@@ -137,4 +137,14 @@ user can switch strategies mid-conversation without losing memory.
 
 `evaluation/modes.py` replays a benchmark task through any mode using the same
 service and builder the chat path uses, which is the seam the Phase 17 pipeline
-plugs into.
+plugs into. Phase 7 added the two halves on either side of that seam:
+
+- `benchmarks/context_rot/` generates the conversations (`spec.py` for content,
+  `generation.py` for structure) and pins the committed dataset with a manifest;
+- `evaluation/datasets.py` carries the fact ledger and evidence contract, and
+  `evaluation/scoring.py` turns a replay into `retrieval` + `answer` verdicts,
+  which `evaluation/runner.py` aggregates into a run's metrics.
+
+The dependency direction is one-way: `benchmarks` imports `evaluation.datasets`
+(the schema), never the other way round, and nothing under `src/` imports the
+benchmark package. A benchmark is data; the application does not know it exists.
