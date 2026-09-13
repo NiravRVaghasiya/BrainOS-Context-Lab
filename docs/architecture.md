@@ -43,15 +43,47 @@ The provider interface normalizes model listing, credential validation, and gene
 
 ### Context builder
 
-The context builder returns model-ready messages and explicit accounting fields:
+`brain/retrieval_policy.py` and `brain/context_builder.py` together form the
+context construction engine (Phase 3). The policy runs the retrieval pipeline;
+the builder allocates the token budget and renders provider-neutral messages.
+
+```text
+BrainOS recall
+  → deduplicate (exact + near-duplicate Jaccard)
+  → relevance filter (IDF-weighted lexical + runtime signals; absolute and
+    relative floors — recency ranks but never rescues an off-topic memory)
+  → conflict check (runtime contradictions()/stale_memories() first, then a
+    conservative subject→value heuristic; unresolved pairs are kept "contested")
+  → recency weighting (timestamp → conversation turn → recall position)
+  → token budget (memory_budget in rank order, then the max_tokens ceiling)
+  → delimited message list + accounting + audit report
+```
+
+BrainOS stays authoritative: the engine consumes the runtime's own retrieval
+signals, lifecycle status, supersession links, and contradiction reports, and
+only falls back to application heuristics when the runtime reports nothing.
+
+The builder returns model-ready messages and explicit accounting fields:
 
 - raw history tokens,
 - selected recent-history tokens,
 - retrieved-memory tokens,
-- system tokens, and
-- final context tokens.
+- system tokens,
+- final context tokens,
+- the full-context (Mode A) reference price for the same prompt, and
+- per-stage drop counts with a reason for every dropped memory.
 
-Retrieved memory is delimited and explicitly described as data rather than instructions.
+`max_tokens` is a hard ceiling with a documented eviction order: the current
+user message is never dropped or truncated, then oldest history, then
+lowest-ranked memories, then the system prompt is truncated.
+
+Retrieved memory is delimited and explicitly described as data rather than
+instructions. Memory text is additionally stripped of delimiter breakouts,
+control characters, and role prefixes before rendering.
+
+Because context reduction depends mostly on how much raw history is replayed,
+the baseline modes (Phase 6) must configure `recent_turn_budget` per mode —
+otherwise "BrainOS mode" is indistinguishable from full context plus overhead.
 
 ### Storage
 

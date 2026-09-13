@@ -7,9 +7,10 @@ the baseline modes and benchmark dataset are validated.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Callable
+from typing import Any
 from uuid import uuid4
 
 from .datasets import BenchmarkTask

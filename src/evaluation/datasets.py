@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -22,7 +23,7 @@ class BenchmarkTask:
     metadata: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
-    def from_dict(cls, item: dict[str, Any]) -> "BenchmarkTask":
+    def from_dict(cls, item: dict[str, Any]) -> BenchmarkTask:
         return cls(
             task_id=str(item["task_id"]),
             category=str(item["category"]),

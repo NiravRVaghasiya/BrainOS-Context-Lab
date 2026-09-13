@@ -12,5 +12,6 @@ def write_json_report(report: dict[str, Any], output: str | Path) -> Path:
 
     destination = Path(output)
     destination.parent.mkdir(parents=True, exist_ok=True)
-    destination.write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    rendered = json.dumps(report, indent=2, ensure_ascii=False) + "\n"
+    destination.write_text(rendered, encoding="utf-8")
     return destination

@@ -14,9 +14,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run a BrainOS Context Lab evaluation.")
     parser.add_argument("--model", default="", help="Provider model identifier.")
     parser.add_argument("--provider", default="", help="Provider name.")
-    parser.add_argument("--mode", required=True, choices=["full_context", "sliding_window", "rag", "brainos", "brainos_rag"])
+    parser.add_argument(
+        "--mode",
+        required=True,
+        choices=["full_context", "sliding_window", "rag", "brainos", "brainos_rag"],
+    )
     parser.add_argument("--benchmark", default="context_rot")
-    parser.add_argument("--dataset", type=Path, default=Path("benchmarks/context_rot/dataset.jsonl"))
+    parser.add_argument(
+        "--dataset", type=Path, default=Path("benchmarks/context_rot/dataset.jsonl")
+    )
     parser.add_argument("--output", type=Path, required=True)
     return parser
 

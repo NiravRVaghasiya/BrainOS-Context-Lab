@@ -15,7 +15,7 @@ src_dir = Path(__file__).resolve().parents[2] / "src"
 if str(src_dir) not in sys.path:
     sys.path.insert(0, str(src_dir))
 
-from evaluation.datasets import BenchmarkTask, write_jsonl
+from evaluation.datasets import BenchmarkTask, write_jsonl  # noqa: E402  (path bootstrap first)
 
 
 def generate_fixture(count: int = 3) -> list[BenchmarkTask]:
