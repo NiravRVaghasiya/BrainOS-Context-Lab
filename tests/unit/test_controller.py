@@ -12,6 +12,7 @@ import pytest
 
 from app.controller import UIController, UILimits
 from app.session import SessionManager
+from baselines.modes import MODE_SLIDING_WINDOW
 from brain.adapter import BrainOSAdapter, BrainOSNotConfiguredError
 from providers import ProviderError
 from tests.fakes import FakeLLMProvider, LooseFakeRuntime
@@ -171,15 +172,38 @@ def test_chat_without_credentials_still_observes_and_retrieves(
     assert view.history[-1]["role"] == "user"
 
 
-def test_no_memory_mode_skips_recall(controller: UIController) -> None:
+def test_sliding_window_mode_skips_recall(controller: UIController) -> None:
     session_id = _connected(controller)
-    controller.update_context(session_id, mode="no_memory")
+    controller.update_context(session_id, mode=MODE_SLIDING_WINDOW)
     controller.chat(session_id, "For Project Atlas, the production database is PostgreSQL 16.")
     view = controller.chat(session_id, "What database does Project Atlas use?")
 
     assert view.retrieved_rows == []
     assert "<retrieved_memory>" not in view.prompt
-    assert "mode `no_memory`" in view.status
+    assert "mode `sliding_window`" in view.status
+
+
+def test_legacy_no_memory_selector_resolves_to_the_sliding_window_mode(
+    controller: UIController,
+) -> None:
+    """The Phase 4/5 sidebar value keeps working after the vocabulary grew."""
+
+    session_id = _connected(controller)
+    controller.update_context(session_id, mode="no_memory")
+
+    assert controller.ensure_session(session_id).context.mode == MODE_SLIDING_WINDOW
+
+
+def test_unknown_mode_is_rejected_rather_than_run_as_brainos(
+    controller: UIController,
+) -> None:
+    session_id = _connected(controller)
+    before = controller.ensure_session(session_id).context.mode
+
+    status = controller.update_context(session_id, mode="brainos-but-better")
+
+    assert "Unknown baseline mode" in status
+    assert controller.ensure_session(session_id).context.mode == before
 
 
 def test_empty_message_does_not_create_a_turn(controller: UIController) -> None:

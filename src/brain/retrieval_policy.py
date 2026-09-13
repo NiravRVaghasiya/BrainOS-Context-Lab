@@ -62,7 +62,10 @@ _STOPWORDS = frozenset(
 _TOKEN_RE = re.compile(r"[a-z0-9]+(?:['-][a-z0-9]+)*")
 _WHITESPACE_RE = re.compile(r"\s+")
 _CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
-_DELIMITER_RE = re.compile(r"<\s*/?\s*(?:retrieved_memory|memory|system|user|assistant)\s*>", re.I)
+_DELIMITER_RE = re.compile(
+    r"<\s*/?\s*(?:retrieved_memory|retrieved_history|memory|history|system|user|assistant)\s*>",
+    re.I,
+)
 _ROLE_PREFIX_RE = re.compile(r"^\s*(?:system|assistant|developer|tool|user)\s*:\s*", re.I)
 _INJECTION_RE = re.compile(
     r"(?:\b(?:ignore|disregard|forget|override)\b[\s,]+(?:\w+\s+){0,3}"

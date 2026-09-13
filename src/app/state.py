@@ -6,16 +6,33 @@ from dataclasses import dataclass, field, replace
 from typing import Any
 from uuid import uuid4
 
+from baselines.modes import (
+    DEFAULT_MODE,
+    EVIDENCE_BUDGET,
+    EVIDENCE_ITEMS,
+    MODE_BRAINOS,
+    MODE_ORDER,
+    MODE_SLIDING_WINDOW,
+    MODES,
+    RECENT_WINDOW_BUDGET,
+    RECENT_WINDOW_TURNS,
+    BaselineMode,
+    mode_profile,
+    resolve_mode,
+)
 from brain.context_builder import ContextBudget
 from brain.retrieval_policy import RetrievalPolicy
 from providers.base import ProviderConfig
 
-#: Baseline-mode selectors the chat UI can offer today. Phase 6 adds
-#: ``sliding_window`` and ``rag``; an unrecognized value keeps memory enabled so
-#: a new mode degrades to the BrainOS behaviour rather than to silence.
-BRAINOS_MODE = "brainos"
-NO_MEMORY_MODE = "no_memory"
-MEMORY_MODES: tuple[str, ...] = (BRAINOS_MODE, NO_MEMORY_MODE)
+#: Canonical baseline-mode selector values (plan Phase 6, modes A–E).
+CONTEXT_MODES: tuple[str, ...] = MODE_ORDER
+#: The Phase 4/5 name for the same tuple, kept so existing imports keep working.
+#: The vocabulary itself grew from two memory selectors to the plan's five
+#: context-management strategies; ``no_memory`` is accepted as an alias for
+#: Mode B (see :data:`baselines.modes.LEGACY_MODE_ALIASES`).
+MEMORY_MODES: tuple[str, ...] = MODE_ORDER
+BRAINOS_MODE = MODE_BRAINOS
+NO_MEMORY_MODE = MODE_SLIDING_WINDOW
 
 
 def new_id() -> str:
@@ -28,21 +45,29 @@ def new_id() -> str:
 class ContextSettings:
     """Budgets and retrieval settings used by the context construction layer.
 
-    ``mode`` is the baseline-mode selector (Phase 6). The remaining fields are
-    the Phase 3 knobs: token budgets per section, and the deduplication,
-    relevance, conflict, and recency parameters of the retrieval policy. They
-    live on session state so the UI and the evaluation runner configure context
-    construction through one object instead of constructing dataclasses inline.
+    ``mode`` selects one of the plan's five baseline strategies (Phase 6); the
+    remaining fields are the knobs that strategy runs with. They live on session
+    state so the UI and the evaluation runner configure context construction
+    through one object instead of constructing dataclasses inline.
+
+    The defaults *are* Mode D's canonical profile, not a neutral starting point.
+    Phase 3 measured that a BrainOS session with a history window larger than
+    the conversation degenerates into full context plus memory overhead (0.0%
+    reduction, 95 tokens worse than the baseline), so the default window is the
+    small one the strategy needs. :meth:`with_mode_defaults` rewrites the same
+    fields whenever the mode changes.
     """
 
-    mode: str = "brainos"
+    mode: str = DEFAULT_MODE
     max_tokens: int = 4096
-    recent_turn_budget: int = 2048
-    memory_budget: int = 1536
+    recent_turn_budget: int = RECENT_WINDOW_BUDGET
+    memory_budget: int = EVIDENCE_BUDGET
+    chunk_budget: int = 0
     system_budget: int = 512
-    max_recent_turns: int | None = None
+    max_recent_turns: int | None = RECENT_WINDOW_TURNS
     per_message_overhead: int = 4
-    max_memories: int = 12
+    max_memories: int = EVIDENCE_ITEMS
+    rag_top_k: int = EVIDENCE_ITEMS
     relevance_floor: float = 0.12
     near_duplicate_threshold: float = 0.88
     weight_runtime_signals: float = 0.45
@@ -55,16 +80,43 @@ class ContextSettings:
     drop_stale_memories: bool = True
     drop_suspicious_memories: bool = False
 
+    def mode_profile(self) -> BaselineMode:
+        """Return the :class:`~baselines.modes.BaselineMode` this session runs.
+
+        Raises :class:`ValueError` for an unknown selector: a typo must surface
+        as an error rather than silently run a different strategy.
+        """
+
+        return mode_profile(self.mode)
+
     def uses_memory(self) -> bool:
         """Whether this mode injects BrainOS memories into the prompt.
 
-        The baseline modes of Phase 6 will extend this mapping. Until then the
-        selector the plan puts in the sidebar distinguishes exactly two
-        behaviours the application can already perform honestly: recall and
-        inject memories, or build the prompt from the recent window alone.
+        BrainOS still *observes* in every mode; this answers only "does recalled
+        memory reach the model". Modes A, B, and C are the memory-free controls.
         """
 
-        return self.mode != NO_MEMORY_MODE
+        return self.mode_profile().uses_memory
+
+    def uses_rag(self) -> bool:
+        """Whether this mode injects lexically retrieved transcript chunks."""
+
+        return self.mode_profile().uses_rag
+
+    def with_mode_defaults(self, mode: Any) -> ContextSettings:
+        """Return a copy switched to ``mode`` with that mode's budgets applied.
+
+        This is the seam the Phase 3/4 finding demands: switching strategy
+        rewrites the history window and the evidence budgets, so Mode A and
+        Mode D cannot accidentally run with the same window and produce a
+        comparison that measures nothing. The values stay editable afterwards —
+        the mode sets the experiment's starting point, and the sidebar shows
+        exactly what was applied.
+        """
+
+        resolved = resolve_mode(mode)
+        profile = MODES[resolved]
+        return replace(self, mode=resolved, **profile.budget_overrides(self.max_tokens))
 
     def context_budget(self) -> ContextBudget:
         """Return the token budget for one context construction."""
@@ -73,6 +125,7 @@ class ContextSettings:
             max_tokens=self.max_tokens,
             recent_turn_budget=self.recent_turn_budget,
             memory_budget=self.memory_budget,
+            chunk_budget=self.chunk_budget,
             system_budget=self.system_budget,
             max_recent_turns=self.max_recent_turns,
             per_message_overhead=self.per_message_overhead,

@@ -4,8 +4,8 @@
 > repository state and decisions that should be preserved between phases.
 
 **Last updated:** 2026-09-13
-**Branch:** `arena/01a09bc4-brainos-context-lab` (PR #6)
-**Baseline:** `272892e` (`origin/main`, includes PR #5's upstream Phase 4); this branch adds Phase 5 on top
+**Branch:** `arena/01a09c0c-brainos-context-lab`
+**Baseline:** `0a6f564` (`origin/main`, includes PR #6's Phase 5); this branch adds Phase 6 on top
 **Implementation plan:** [`BrainOS_Context_Lab_Implementation_Plan.md`](BrainOS_Context_Lab_Implementation_Plan.md)
 
 ## Product boundary
@@ -25,17 +25,115 @@ layer that helps select historical context.
 | Phase 2 — BrainOS adapter | Complete | Explicit mapping of `observe(source/event_type)`, `recall(top_k)`, decision strings/`assess()`, `why()`, and structured `trace()`. Session-isolated factory, conservative memory policy, and `ConversationService` wiring. **Memory-policy classifier repaired during Phase 3** (see below). |
 | Phase 3 — Context construction engine | Complete | Full retrieval pipeline (dedupe → relevance → conflict → recency → budget), enforced token budgets with documented eviction order, 26-field accounting, runtime signal consumption, injection hardening, and a credential-leak repair. Validated live at 60 turns. |
 | Phase 4 — Chat web UI | Complete | Gradio callbacks wired to a Gradio-free `UIController`: provider connect/validate/list-models, per-session chat, the five planned tabs, session controls (clear conversation / clear memory / end session / export), and a memory-mode selector. Landed on `main` via PR #5; 216 tests, live-validated at 41 turns. |
-| **Phase 5 — Conversation persistence** | **Complete in this turn (PR #6)** | SQLite backend behind the finalized store protocols (per-op thread-safe connections, lazy schema, upsert memory mirrors); the service persists turns best-effort with session-key redaction at the write site; `UIController` owns lifecycle deletes and a persisted-view export block; `create_app` picks the backend, so headless runs never touch disk. Ported onto upstream Phase 4 after PR #5 merged. 249 tests; live-validated over HTTP with real SQLite. |
-| Phase 6 — Baseline modes | Pending | Extend the `MEMORY_MODES` / `ContextSettings.uses_memory()` seam to modes A–E; per-mode `recent_turn_budget` is a hard constraint (Phase 3/4 finding); `evaluation/runner.py` remains a shell. |
-| Phases 7–20 | Pending | Benchmark, metrics, experiments, statistics, ablations, error analysis, security hardening, deployment, cost controls, reproducibility, evaluation pipeline, tests, MVP, release. |
+| Phase 5 — Conversation persistence | Complete | SQLite backend behind the finalized store protocols (per-op thread-safe connections, lazy schema, upsert memory mirrors); the service persists turns best-effort with session-key redaction at the write site; `UIController` owns lifecycle deletes and a persisted-view export block; `create_app` picks the backend, so headless runs never touch disk. Landed on `main` via PR #6. 249 tests; live-validated over HTTP with real SQLite. |
+| **Phase 6 — Baseline modes** | **Complete in this turn** | The plan's five modes (A full context, B sliding window, C lexical RAG, D BrainOS, E BrainOS + RAG) behind `ContextSettings.mode`, each fixing its own history window; a BrainOS-free lexical chunk retriever; a second delimited evidence block with its own budget, accounting, and eviction slot; mode-aware UI with a chunk panel; and the `evaluation/runner.py` seam wired, so `python -m evaluation.run --mode …` executes. 379 tests; live-validated over HTTP. |
+| Phase 7 — Context-rot benchmark | Pending | The mode harness and runner seam exist; what is missing is the dataset (long conversations with distributed, contradictory, temporally replaced facts) and scoring, which needs a model. |
+| Phases 8–20 | Pending | Metrics, experiments, statistics, ablations, error analysis, security hardening, deployment, cost controls, reproducibility, evaluation pipeline, tests, MVP, release. |
 
 Detailed logs are available in
 [`docs/phase-0-research-baseline.md`](docs/phase-0-research-baseline.md),
 [`docs/phase-1-provider-abstraction.md`](docs/phase-1-provider-abstraction.md),
 [`docs/phase-2-brainos-adapter.md`](docs/phase-2-brainos-adapter.md),
 [`docs/phase-3-context-construction.md`](docs/phase-3-context-construction.md),
-[`docs/phase-4-chat-web-ui.md`](docs/phase-4-chat-web-ui.md), and
-[`docs/phase-5-conversation-persistence.md`](docs/phase-5-conversation-persistence.md).
+[`docs/phase-4-chat-web-ui.md`](docs/phase-4-chat-web-ui.md),
+[`docs/phase-5-conversation-persistence.md`](docs/phase-5-conversation-persistence.md), and
+[`docs/phase-6-baseline-modes.md`](docs/phase-6-baseline-modes.md).
+
+## What was done in Phase 6 (this turn)
+
+### New / changed modules
+
+| File | Purpose |
+| --- | --- |
+| [`src/baselines/modes.py`](src/baselines/modes.py) (new) | The mode registry: one frozen `BaselineMode` per strategy carrying its evidence sources, history window, and section budgets. `resolve_mode()` normalizes selectors (`no_memory` → Mode B) and **rejects** anything unknown; `budget_overrides()` is what a mode change writes. |
+| [`src/baselines/rag.py`](src/baselines/rag.py) (new) | The BrainOS-free lexical baseline: sentence-packed ~400-char chunks ranked by IDF-weighted overlap, reusing the Phase 3 lexical helpers. Deterministic tie-breaks, near-duplicate suppression, and no abstention — by design, because that is what ordinary RAG does. |
+| [`src/brain/context_builder.py`](src/brain/context_builder.py) | `build_context(..., retrieved_chunks=)` renders a second `<retrieved_history>` block under a new `chunk_budget` (default `0`, so pre-Phase-6 callers are unaffected); chunks carry `[role #turn]` provenance; a chunk duplicating the retained window is dropped; seven new `ContextStats` fields; eviction order is now history → chunks → memories → system. |
+| [`src/evaluation/modes.py`](src/evaluation/modes.py) (new) | `replay_task` / `compare_modes` / `task_evaluator` run a benchmark task through any mode on the application's own service and builder — fresh session per (task, mode), no provider, no storage. `evaluation/run.py` now passes the evaluator to the runner. |
+| [`src/app/state.py`](src/app/state.py) | Five-mode vocabulary plus `chunk_budget` / `rag_top_k`; `mode_profile()`, `uses_rag()`, `with_mode_defaults()`. **Defaults are Mode D's canonical profile**, not neutral values. |
+| [`src/app/service.py`](src/app/service.py) | `_retrieve_chunks()` (credential-guarded before the builder sees it), chunks into `build_context`, `ConversationTurn.retrieved_chunks`, and a new `record_assistant_message()` so scripted benchmark turns enter the transcript and memory as generated ones do. |
+| [`src/app/controller.py`](src/app/controller.py) | `apply_mode()`; `update_context()` validates the mode and lets **the mode's budgets win when the mode changes**; `context_payload()` reports the mode profile; `TurnView.chunk_rows`. |
+| [`src/app/panels.py`](src/app/panels.py), [`src/app/ui.py`](src/app/ui.py) | Chunk table and evidence lines in the panels; five-mode dropdown with a live description, a `mode.change` handler that pushes the applied budgets back into the sliders, and new "recent turns kept" / "chunk budget" controls. |
+| Tests | 25 mode-registry, 16 retriever, 20 builder-chunk, 28 service/controller mode, 16 evaluation-seam, 11 security, 11 live-runtime: **249 → 379**. |
+
+### Key design decisions
+
+- **A mode is defined by its window as much as by its retriever.** This is the
+  Phase 3 finding turned into a constraint: `recent_turn_budget` is `None` for
+  Modes A/B (derived from the session's `max_tokens` ceiling) and 256 tokens for
+  C/D/E. Two modes sharing a window larger than the conversation are
+  indistinguishable, so switching modes rewrites the window.
+- **Modes C, D, and E share one evidence allowance** (`EVIDENCE_BUDGET = 1024`;
+  Mode E splits it 512/512). They differ in *what selects* the evidence, so
+  volume is held constant and any accuracy difference is attributable to
+  selection. Any new retrieval mode must fit inside that allowance.
+- **The mode's budgets win over sliders submitted in the same call**, but only
+  when the mode actually changes. Tuning inside a mode still works; the sidebar
+  just cannot carry the old mode's window into the new one.
+- **BrainOS still observes in every mode.** Observation is a side process, not
+  context construction, and a warm runtime means switching modes mid-session
+  does not lose memory the new mode would use. Only *injection* is
+  mode-dependent.
+- **The builder guards chunk text itself.** The retriever already neutralizes
+  what it selects, but the prompt is the one surface where a missed guard is a
+  security failure, so it does not depend on any caller remembering. Guarding is
+  idempotent.
+- **`full_context_reference_tokens` still prices only system + full history +
+  question.** Mode A has no evidence blocks; including them would compare every
+  mode against something Mode A never was.
+
+### Measured behaviour (live pinned BrainOS, 28-message transcript)
+
+Two facts separated by 24 filler turns, asked at the end. Dependency-free token
+estimator; no model in the loop; no provider API key.
+
+| Mode | Sent | Full-context ref | Reduction | Mem | Chunks | History | Fact in prompt |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| A `full_context` | 510 | 510 | 0.0% | 0 | 0 | 28 | yes |
+| B `sliding_window` | 189 | 510 | 62.9% | 0 | 0 | 8 | **no** |
+| C `rag` | 256 | 510 | 49.8% | 0 | 6 | 2 | yes |
+| D `brainos` | 182 | 510 | **64.3%** | 2 | 0 | 2 | yes |
+| E `brainos_rag` | 345 | 510 | 32.4% | 2 | 6 | 2 | yes |
+
+**Integration-validation observations, not research results** — one synthetic
+conversation, an estimated counter, no model, single trial.
+
+Mode D cost fewer tokens than Mode B *and still carried the fact B lost*: that
+is the comparison the project exists to make, and Phase 6 makes it expressible
+for the first time. Mode E is not free — combining the sources cost 1.9× Mode D
+because both blocks fill their budgets, so the hybrid's value has to be earned
+on quality rather than assumed.
+
+### Bugs found and fixed while testing
+
+1. **`_apply_mode` returned the wrong session.** It resolved the session id from
+   its input *after* acting, so with an empty browser state it minted a second
+   session and handed the browser an id whose mode had never changed — the
+   switch would have been silently lost on the next turn. Now resolved before
+   acting, matching `_update_context`.
+2. **The builder trusted the retriever to guard chunk text**, so a hand-built
+   chunk containing `</retrieved_history>` broke out of the block. Fixed in the
+   builder (twice, idempotently).
+3. **`_DELIMITER_RE` did not cover `retrieved_history`.** The Phase 3 guard
+   stripped `<retrieved_memory>` breakouts but not the new delimiter. Extended.
+
+### Live HTTP validation and the limitation it exposed
+
+Verified against a running `python app.py` with the pinned runtime and real
+SQLite: `/apply_mode` writes and returns exactly the per-mode budgets (Mode A
+came back with `recent turns = None` and `window = 4096`; Mode E with
+`512 / 512`); the chat status and Context summary name the mode that ran; the
+chunk panel is registered with its headers; `/export_session` recorded
+`mode=rag`, `letter=C`, `chunk_budget=1024`, `evidence_budget=1024` with no
+`api_key` field; and the session key appeared in no panel, response, or raw
+database byte.
+
+**Limitation found, pre-existing:** Gradio does not expose `gr.State` to API
+clients, so `/chat` accepts only `message` and an HTTP client gets a fresh
+session per request. The browser path is unaffected. Consequence: the
+*multi-turn* cross-mode comparison cannot be driven over HTTP and is covered
+instead by `tests/integration/test_baseline_modes_live.py`. Generation was not
+exercised over HTTP either (no `providers` extra installed, no real API key);
+it is covered by the fake-provider tests.
 
 ## What was done in Phase 5 (this turn)
 
@@ -300,15 +398,31 @@ build_context(
     current_user_message=...,     # str
     recent_conversation=...,      # Iterable[{role, content}]
     memories=...,                 # Iterable[MemoryRecord] from adapter.recall()
-    budget=ContextBudget(...),    # enforced, validated
+    retrieved_chunks=...,         # Phase 6: Iterable[RetrievedChunk] for Modes C/E
+    budget=ContextBudget(...),    # enforced, validated (chunk_budget added in Phase 6)
     policy=RetrievalPolicy(...),  # dedupe/relevance/conflict/recency knobs
     conflicts=adapter.conflicts(),        # BrainOS contradictions()
     stale_ids=adapter.stale_memory_ids(), # BrainOS stale_memories()
     current_turn=...,             # recency fallback when timestamps are absent
     token_counter=...,            # optional; named in the accounting
     now=...,                      # optional; inject for reproducible runs
-) -> BuiltContext(messages, selected_memories, stats, report, ranking)
+) -> BuiltContext(messages, selected_memories, stats, report, ranking, selected_chunks)
 ```
+
+Phase 6 additions to the contract, which every baseline mode relies on:
+
+- `retrieved_chunks` defaults to empty and `chunk_budget` to `0`, so a caller
+  that passes neither builds byte-for-byte the pre-Phase-6 prompt.
+- Chunks are duck-typed through a `RetrievedChunk` `Protocol`, so `brain` never
+  imports `baselines` and the dependency stays one-directional.
+- Chunk text is guarded by the builder itself (idempotently, twice), so no
+  caller can forget and break out of `<retrieved_history>`.
+- A chunk duplicating a message the retained window already carries is dropped
+  with reason `duplicate_history` rather than paid for twice.
+- Message order is `system`, memory block, chunk block, history…, question; the
+  ceiling evicts history → chunks → memories → system.
+- `full_context_reference_tokens` prices only system + full history + question,
+  because Mode A has no evidence blocks.
 
 Invariants other phases may rely on:
 
@@ -334,6 +448,12 @@ Audit reasons → Phase 12 error taxonomy mapping:
 | `memory_budget`, `budget`, `cap` | `over_compression` |
 | `duplicate`, `empty` | (not a failure — noise removed) |
 | `suspicious` | injection guard, scored in Phase 13 |
+| `chunk_budget`, `chunk_ceiling` | `over_compression`, **retrieved-chunk source only** (Phase 6) |
+| `duplicate_history` | (not a failure — chunk already inside the history window) |
+
+Phase 6 namespaced the chunk reasons (`chunk_` prefix) precisely so a
+Precision@K computation over `report.dropped` can still isolate *memory* drops;
+do not fold them into the memory counts.
 
 ## Measured behaviour (live pinned BrainOS, 60-turn conversation)
 
@@ -355,14 +475,18 @@ MySQL 8) never leaked into a production-database prompt at any length.
 come from one synthetic conversation with an estimated token counter and no
 model in the loop.
 
-### Finding that constrains Phase 6
+### Finding that constrained Phase 6 — now discharged
 
 **Context reduction is driven almost entirely by the recent-history window, not
 by memory selection.** With `recent_turn_budget` larger than the conversation,
 "BrainOS mode" degenerates into full context *plus* memory overhead: 0.0%
-reduction, 95 tokens *worse* than the baseline. Phase 6 must set
-`recent_turn_budget` per baseline mode, or Mode A and Mode D will not be
-distinguishable and the comparison will be meaningless.
+reduction, 95 tokens *worse* than the baseline.
+
+*Resolved in Phase 6:* every baseline mode now fixes its own
+`recent_turn_budget` and `max_recent_turns`, switching modes rewrites them, and
+the active window is reported in `context_payload()` and the UI. The modes are
+separable as a result — on a 28-message conversation Mode A sent 510 tokens,
+Mode B 189, Mode D 182 (see the Phase 6 table above).
 
 ### Known limitation: abstention is not yet achieved
 
@@ -405,6 +529,21 @@ threshold on it would be overfitting. Threshold calibration belongs to Phases
   conversation / clear memory / end session remove exactly the matching
   conversation, mirror, or session rows, and another session's rows provably
   survive.
+- **New (Phase 6):** retrieved transcript chunks — the second route Phase 6
+  added from conversation content into a prompt — are credential-guarded by the
+  service *before* the builder sees them, and guarded again by the builder
+  itself (idempotently) so no caller can forget. `_DELIMITER_RE` was extended to
+  cover `<retrieved_history>` breakouts, which the Phase 3 guard did not.
+- **New (Phase 6):** the evaluation replay path configures no provider, so a
+  replay holds no credential at all. A key inside a *dataset's* conversation is
+  that dataset's content and is replayed faithfully — `tests/security/`
+  documents this boundary explicitly rather than leaving it implicit.
+- **Restated (Phase 6):** raw history inside the recent window is replayed
+  verbatim. The credential guard covers recalled memory, retrieved chunks,
+  diagnostics, and persisted rows — not the transcript Mode A must send as
+  written. A key a user pasted into a conversation therefore still reaches their
+  own provider in Mode A/B history. Pre-existing Phase 3 behaviour, restated
+  because Phase 6 added a guarded retrieval route beside it.
 - BrainOS explanations and traces drop secret-named fields and scrub
   credential-shaped strings. Trace mapping records counts, not retrieved memory
   text.
@@ -426,19 +565,23 @@ python3 -m venv .venv
 .venv/bin/pip install "brainos-cli @ git+https://github.com/NiravRVaghasiya/BrainOS.git@1d9eb7a0ca537e7278e29809cda4f4c5da6c1dcc"
 
 .venv/bin/pytest -q
-# 249 passed
+# 379 passed
 
 .venv/bin/ruff check .
 # All checks passed!   (whole repository, no exclusions)
 
 .venv/bin/python app.py
 # http://localhost:7860
+
+# Phase 6: the CLI now executes a benchmark task through any mode
+PYTHONPATH=src .venv/bin/python -m evaluation.run --mode brainos --output results/run.json
 ```
 
-Test count went 154 → 216 (upstream Phase 4) → **249** in this phase.
+Test count went 154 → 216 (Phase 4) → 249 (Phase 5) → **379** in this phase.
 The live tests in `tests/integration/test_chat_controller_live.py`,
 `tests/integration/test_persistence_live.py`,
-`tests/integration/test_context_pipeline.py`, and
+`tests/integration/test_context_pipeline.py`,
+`tests/integration/test_baseline_modes_live.py`, and
 `tests/integration/test_brainos_runtime.py` run against the pinned BrainOS
 revision and skip when `brainos_runtime` is not installed; `tests/ui/` skips
 when Gradio is absent. No provider API key was used; generation is exercised
@@ -448,35 +591,55 @@ through `FakeProvider` / `FakeLLMProvider`.
 
 ## Next safe step
 
-Implement **Phase 6 — Baseline modes** (modes A–E behind
-`ContextSettings.mode`). The seams already exist: upstream Phase 4 added
-`MEMORY_MODES` (`brainos` / `no_memory`) and `ContextSettings.uses_memory()`,
-`ConversationService._recall()` skips retrieval for memory-less modes, and the
-UI mode selector flows through `update_context()`, which validates any new
-mode value added to that mapping.
+Implement **Phase 7 — Context-rot benchmark**: the long-conversation dataset and
+the task categories (single-hop, multi-hop, temporal, conflict, distractor,
+cross-session, abstention). Phase 6 already supplies everything the benchmark
+drives.
 
-Carry these constraints into Phase 6:
+What already exists and should be reused rather than rebuilt:
 
-1. **Each mode must set its own `recent_turn_budget`.** The Phase 3/4 sweep
-   shows Mode A (full context) and Mode D (sliding window) are
-   indistinguishable while the history window is larger than the conversation
-   (0.0% reduction at 1024 tokens).
-2. Modes plug into the `evaluation/runner.py` callable seam; Phase 5's
-   `EvaluationStore.save_run` is ready for results, and richer run metadata
-   awaits Phase 16.
-3. Mode C retrieval is lexical: use `retrieval_policy.lexical_score` / IDF
-   helpers, no vector DB (plan §31).
-4. Keep the same system prompt across modes and report the 26-field
-   `ContextStats` for every mode so differences are attributable to context
-   selection alone.
-5. **Persistence must not widen the credential surface** (Phase 5 rule, still
+* `evaluation/modes.py` — `replay_task(task, mode)` runs one task through any
+  mode on the real service and builder, and `compare_modes()` runs all five.
+  Fresh session per (task, mode), no provider, no disk.
+* `evaluation/runner.py` — accepts the evaluator callable
+  (`task_evaluator()`), and `evaluation/run.py` wires it, so the CLI executes.
+* `evaluation/datasets.py` — `BenchmarkTask` schema and JSONL load/write are
+  already tested; `benchmarks/context_rot/generation.py` produces only a 3-task
+  single-hop fixture that is explicitly not a research dataset.
+* `evaluation/metrics.py` — `recall_at_k`, `precision_at_k`,
+  `context_reduction`, `token_savings`, `quality_adjusted_efficiency`,
+  `summarize` are implemented and tested but not yet called by the runner.
+
+Carry these constraints into Phase 7:
+
+1. **Scoring needs a model; retrieval does not.** `expected_answer_in_prompt`
+   is an evidence-availability proxy only. Answer accuracy, faithfulness, and
+   abstention must come from a real provider call with the plan's cost controls
+   (Phase 15) in place before any benchmark is exposed in the Evaluation tab.
+2. **The evidence allowance is a contract.** Modes C, D, and E each get
+   `EVIDENCE_BUDGET = 1024` tokens; a new retrieval mode must fit inside it or
+   the comparison stops being about selection.
+3. **Mode C cannot abstain and that is a result, not a bug.** BrainOS mode can
+   return nothing; the lexical baseline always returns top-k. Abstention
+   accuracy (Phase 8) is where the two separate, so do not "fix" the retriever
+   by adding a floor without recording that the baseline changed.
+4. **Use an exact token counter for research runs.** Every number in this file
+   came from the dependency-free estimator (~4 chars/token), which
+   `stats.token_counter` names. Provider-exact counts change absolute values.
+5. **Chunk drop reasons are namespaced** (`chunk_budget`, `chunk_ceiling`,
+   `duplicate_history`) so Precision@K over `report.dropped` can still isolate
+   memory. Do not fold them into the memory counts.
+6. **Persistence must not widen the credential surface** (Phase 5 rule, still
    in force): stores receive sanitized payloads, never state objects; mode
    metadata written through `EvaluationStore` passes `strip_secret_fields`.
-6. Keep BrainOS behind `BrainMemoryAdapter`: no `brainos_runtime` import from
-   the UI, providers, storage, or evaluation metrics.
-7. Finish the Phase 15 cost controls (max input tokens, max output tokens,
-   per-session budget, benchmark tiers) before the Evaluation tab exposes
-   benchmark runs in Phase 17.
-8. Small UI follow-up candidate: surface the controller's "Session ended …"
-   confirmation in the `/end_session` handler (currently dropped by the
-   upstream UI wiring).
+7. Keep BrainOS behind the adapter: no `brainos_runtime` import from the UI,
+   providers, storage, evaluation, or `baselines` — the last is asserted in
+   `tests/security/test_mode_secrets.py`, because Mode C is only a baseline if
+   it does not use the system under test.
+8. Multi-turn behaviour cannot be driven over the public HTTP API: Gradio does
+   not expose `gr.State`, so each `/chat` request mints a fresh session.
+   Benchmark and browser-equivalent validation belong in
+   `tests/integration/`, not in an HTTP script.
+9. Small UI follow-up candidate, still open: surface the controller's
+   "Session ended …" confirmation in the `/end_session` handler (currently
+   dropped by the upstream UI wiring).

@@ -249,6 +249,10 @@ Mode A and Mode D will not be distinguishable and the comparison will be
 meaningless. This is recorded here because it is a property of the engine, not a
 tuning preference.
 
+> **Resolved in Phase 6.** Every mode now fixes its own `recent_turn_budget` and
+> `max_recent_turns`, and switching modes rewrites them. See
+> [`phase-6-baseline-modes.md`](phase-6-baseline-modes.md).
+
 ### Known limitation: abstention is not yet achieved
 
 For a question whose answer is absent ("What is the Project Atlas payroll
@@ -318,6 +322,8 @@ tests/unit/test_tokenizers.py          (new)
    `BuiltContext.final_prompt()` for the "final prompt" view.
 2. **Phase 6** — baseline modes must set `recent_turn_budget` per mode (see the
    finding above). Mode C/D/E need a retriever that shares this builder.
+   *Done:* `src/baselines/`, plus `retrieved_chunks` / `chunk_budget` on this
+   builder.
 3. **Phases 7–8** — calibrate `relevance_floor` and `relative_relevance_ratio`
    against the benchmark, and score abstention explicitly. The audit reasons map
    onto the error taxonomy: `low_relevance`/`weak_relevance` → `irrelevant_memory`,
@@ -326,6 +332,9 @@ tests/unit/test_tokenizers.py          (new)
 4. Consider whether recent history that duplicates a selected memory should be
    sent at all. Left out of Phase 3 on purpose: removing a user turn while
    keeping the assistant's reply risks incoherent conversation flow, and history
-   window strategy is Phase 6 territory.
+   window strategy is Phase 6 territory. *Partly addressed:* Phase 6 drops a
+   retrieved chunk that duplicates a message the window already carries
+   (`duplicate_history`) rather than paying for it twice; the reverse direction
+   (trimming history because a memory covers it) is still open.
 5. Optional exact tokenizer wiring per provider before research runs, so reported
    tokens match what the provider bills.

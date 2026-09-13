@@ -19,6 +19,7 @@ import pytest
 
 from app.controller import UIController
 from app.ui import create_app
+from baselines.modes import RECENT_WINDOW_TURNS
 from brain.adapter import BrainOSAdapter
 from tests.fakes import FakeLLMProvider, LooseFakeRuntime
 
@@ -39,9 +40,14 @@ def _controller() -> UIController:
 def test_app_builds_and_registers_every_callback() -> None:
     demo = create_app(_controller())
 
-    # 10 widget callbacks plus the per-page session bootstrap.
-    assert len(demo.fns) == 11
+    # 11 widget callbacks (Phase 6 adds the baseline-mode selector) plus the
+    # per-page session bootstrap.
+    assert len(demo.fns) == 12
     assert any(block_fn.targets == [(0, "load")] for block_fn in demo.fns.values())
+    assert any(
+        block_fn.targets and block_fn.targets[0][1] == "change"
+        for block_fn in demo.fns.values()
+    ), "the baseline-mode selector must rewrite the budgets it governs"
 
 
 def test_chat_callback_returns_one_value_per_declared_output() -> None:
@@ -114,10 +120,52 @@ def test_update_context_callback_accepts_the_sidebar_values() -> None:
 
     controller = _controller()
     status, session_id = _update_context(controller)(
-        "brainos", 4096, 256, 512, 6, 0.12, 20.0, True, True, False, None
+        # mode, max_tokens, max_recent_turns, recent_turn_budget, memory_budget,
+        # chunk_budget, max_memories, relevance_floor, recency_half_life_turns,
+        # resolve_conflicts, drop_stale_memories, drop_suspicious_memories, session
+        "brainos", 4096, 2, 256, 512, 0, 6, 0.12, 20.0, True, True, False, None
     )
 
     assert "Context updated" in status
     settings = controller.ensure_session(session_id).context
     assert settings.recent_turn_budget == 256
     assert settings.memory_budget == 512
+    assert settings.max_recent_turns == 2
+
+
+def test_blank_recent_turns_means_whole_conversation() -> None:
+    from app.ui import _update_context
+
+    controller = _controller()
+    _status, session_id = _update_context(controller)(
+        "full_context", 4096, None, 4096, 0, 0, 6, 0.12, 20.0, True, True, False, None
+    )
+
+    # A blank box is "no turn limit", not "send no history at all".
+    assert controller.ensure_session(session_id).context.max_recent_turns is None
+
+
+def test_mode_selector_rewrites_the_budgets_it_governs() -> None:
+    from app.ui import _apply_mode
+
+    controller = _controller()
+    apply_mode = _apply_mode(controller)
+    # ``session_id`` threads through gr.State in the app, so the callback's
+    # return value is the only handle on the session it changed.
+    status, info, *_rest, session_id = apply_mode("full_context", None)
+
+    assert "Mode A" in info
+    assert "Mode A" in status
+    full_context = controller.ensure_session(session_id).context
+    # Mode A replays everything: no turn cap, and the window is the ceiling.
+    assert full_context.max_recent_turns is None
+    assert full_context.recent_turn_budget == full_context.max_tokens
+    assert full_context.memory_budget == 0
+    assert full_context.chunk_budget == 0
+
+    _status, rag_info, *_rag_rest, session_id = apply_mode("rag", session_id)
+    assert "Mode C" in rag_info
+    rag = controller.ensure_session(session_id).context
+    assert rag.uses_rag() and not rag.uses_memory()
+    assert rag.chunk_budget > 0
+    assert rag.max_recent_turns == RECENT_WINDOW_TURNS
