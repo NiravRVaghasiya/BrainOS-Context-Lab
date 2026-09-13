@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from providers.base import ProviderError
+
 
 @dataclass
 class FakeMemory:
@@ -159,6 +161,45 @@ class FakeProvider:
 
         self.requests.append(messages)
         return ProviderResponse(text=self.text, model="fake-model", usage={"total_tokens": 4})
+
+
+class FakeLLMProvider:
+    """Deterministic provider with the full :class:`LLMProvider` surface.
+
+    ``FakeProvider`` covers generation only. The UI controller also lists models
+    and validates credentials, so this double records the configuration it was
+    built from and can fail on demand.
+    """
+
+    def __init__(
+        self,
+        config: Any,
+        *,
+        models: list[str] | None = None,
+        text: str = "You use PostgreSQL 16.",
+        fail: bool = False,
+    ) -> None:
+        self.config = config
+        self.models = list(models or ["gpt-4o-mini", "gpt-4o"])
+        self.text = text
+        self.fail = fail
+        self.requests: list[list[dict[str, str]]] = []
+
+    def list_models(self) -> list[str]:
+        if self.fail:
+            raise ProviderError(f"401 unauthorized for key {self.config.api_key}")
+        return list(self.models)
+
+    def validate_credentials(self) -> bool:
+        if self.fail:
+            raise ProviderError(f"401 unauthorized for key {self.config.api_key}")
+        return True
+
+    def generate(self, messages: list[dict[str, str]], **kwargs: Any) -> Any:
+        from providers.base import ProviderResponse
+
+        self.requests.append(messages)
+        return ProviderResponse(text=self.text, model=self.config.model, usage={"total_tokens": 4})
 
 
 class LooseFakeRuntime(FakeRuntime):
