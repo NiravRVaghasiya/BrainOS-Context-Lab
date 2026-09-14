@@ -53,8 +53,44 @@ def message(text: str, *, session_id: str = SESSION) -> ConversationMessage:
     )
 
 
+def _footprint(database: Path) -> int:
+    """Total bytes in SQLite's footprint for ``database``.
+
+    Under WAL journal mode (Phase 14) pages accumulate in the ``-wal`` sidecar
+    until a checkpoint moves them into the main file, so measuring only the
+    main file lies in both directions: the main file can be 4 KB while the WAL
+    holds the data, and after a TRUNCATE checkpoint the WAL is zero bytes
+    while the main file holds the records. Summing the main file, WAL, and
+    SHM gives a journal-mode-independent size for secure-deletion assertions.
+    """
+
+    total = database.stat().st_size if database.exists() else 0
+    for suffix in ("-wal", "-shm"):
+        sidecar = database.with_name(database.name + suffix)
+        if sidecar.exists():
+            total += sidecar.stat().st_size
+    return total
+
+
 def raw(database: Path) -> bytes:
-    return database.read_bytes()
+    """Return every byte SQLite can use to hold a page.
+
+    Phase 14 switched the stores to WAL journal mode so concurrent Gradio
+    worker threads don't lock the file. Under WAL the database's `-wal` and
+    `-shm` sidecar files hold recent writes until a checkpoint moves them
+    into the main file — a raw-read that ignored them would conclude "gone"
+    while the bytes were still sitting in the WAL, or "present" while the
+    main file was still empty. Reading the main file, the WAL, and the shm
+    together makes the secure-deletion assertion honest across both journal
+    modes.
+    """
+
+    pieces = [database.read_bytes() if database.exists() else b""]
+    for suffix in ("-wal", "-shm"):
+        sidecar = database.with_name(database.name + suffix)
+        if sidecar.exists():
+            pieces.append(sidecar.read_bytes())
+    return b"".join(pieces)
 
 
 class VacuumSpy(SqliteConversationStore):
@@ -172,12 +208,16 @@ def test_vacuum_reclaims_the_pages_a_deletion_freed(tmp_path: Path) -> None:
     store = SqliteConversationStore(database)
     for index in range(200):
         store.append(message(f"{MARKER} line {index} " + "padding " * 12))
-    size_before = database.stat().st_size
+    # Force a checkpoint so all of the inserted data is in the main file
+    # before we measure; otherwise the WAL holds it and ``st_size`` undercounts.
+    with store._connect() as connection:
+        connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    size_before = _footprint(database)
 
     store.delete_session(SESSION)
     assert store.vacuum() is True
 
-    size_after = database.stat().st_size
+    size_after = _footprint(database)
     assert size_after < size_before, "freed pages are returned to the filesystem"
     assert MARKER.encode() not in raw(database)
 

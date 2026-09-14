@@ -8,7 +8,7 @@ This repository integrates BrainOS as an upstream dependency. It does **not** mo
 
 ## Current status
 
-Phases 1–13 are complete and validated against the pinned BrainOS runtime. The
+Phases 1–14 are complete and validated against the pinned BrainOS runtime. The
 app persists conversations and memory mirrors to SQLite with hard session
 isolation, offers the full data-control set (clear conversation, clear memory,
 export session, end/delete session), can run the same conversation through all
@@ -90,6 +90,14 @@ reported in the UI, in exports, and in evaluation artifacts.
   `python -m security.scan` to answer "is there a credential in this artifact?"
   over any directory. A quarantine is a security finding, not a tenth error
   label, so `labels_vs_scorer.unexpected` stays zero.
+- **Phase 14** turns the repo into a deployable HF Space: a flat
+  `requirements.txt` (pinned BrainOS commit, no `-e .[ui,providers]` only), a
+  present `packages.txt`, WAL-mode SQLite with TRUNCATE checkpoints after
+  every destructive write, a shared-cache `:memory:` mode for stateless
+  deployments, a bounded Gradio queue (concurrency 3, queue depth 32, public
+  API disabled) for multi-visitor safety, an honest header that discloses
+  whether messages are persisted or run fully in memory, and deployment
+  configuration tests that pin all of the above.
 
 A session-scoped `ConversationService` combines the adapter, the retrieval
 policy, the context builder, and the provider factory. Deterministic fakes cover

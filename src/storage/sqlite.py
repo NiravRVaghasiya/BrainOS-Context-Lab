@@ -2,10 +2,13 @@
 
 Design rules:
 
-* **Thread safety by construction.** Gradio runs callbacks in worker threads,
-  so every operation opens and closes its own connection instead of sharing
-  one. The database file is server-wide; isolation happens at the row level
-  through exact ``session_id`` / ``conversation_id`` filters.
+* **Thread safety by construction.** Gradio runs callbacks in worker threads
+  (and a public Space runs many visitors concurrently), so every operation
+  opens and closes its own connection instead of sharing one. The database
+  file is server-wide; isolation happens at the row level through exact
+  ``session_id`` / ``conversation_id`` filters. Concurrent readers use WAL
+  mode and a 30-second busy timeout so parallel callbacks wait their turn
+  instead of raising ``database is locked``.
 * **Secrets never reach disk.** Secret-named fields are stripped recursively
   from every metadata/payload blob before it is written, as defence in depth
   over the service-layer sanitization. Callers additionally redact the active
@@ -37,6 +40,11 @@ from .conversations import ConversationMessage
 
 DEFAULT_DATABASE_ENV = "BRAINOS_LAB_DB"
 DEFAULT_DATABASE_PATH = Path("data") / "brainos_lab.sqlite3"
+#: The string an operator sets ``BRAINOS_LAB_DB`` to in order to force an
+#: in-memory shared-cache database. Useful on ephemeral hosts (HF Spaces
+#: configured as stateless demos, test runs) where persisting to disk is not
+#: desired but the SQLite code paths should still be exercised.
+MEMORY_DATABASE_SENTINEL = ":memory:"
 
 _SECRET_FIELD_NAMES = frozenset(
     {
@@ -103,11 +111,29 @@ _EVAL_SESSION_INDEX_DDL = (
 )
 
 
-def default_database_path() -> Path:
-    """Return the configured database location, or the repository default."""
+def default_database_path() -> Path | str:
+    """Return the configured database location, or the repository default.
+
+    Returns the literal string ``":memory:"`` when the operator explicitly asks
+    for an in-memory shared-cache database (useful for stateless deployments
+    and tests). All other values are treated as filesystem paths.
+    """
 
     configured = os.getenv(DEFAULT_DATABASE_ENV, "").strip()
+    if configured == MEMORY_DATABASE_SENTINEL:
+        return MEMORY_DATABASE_SENTINEL
     return Path(configured) if configured else DEFAULT_DATABASE_PATH
+
+
+def persistence_enabled() -> bool:
+    """Whether the active database setting writes to a real file.
+
+    Exposed so the UI header can disclose the persistence posture honestly —
+    on an ephemeral HF Space configured with ``BRAINOS_LAB_DB=:memory:`` the
+    disclaimer that messages are written to disk must not appear.
+    """
+
+    return default_database_path() != MEMORY_DATABASE_SENTINEL
 
 
 def strip_secret_fields(value: Any) -> Any:
@@ -144,15 +170,45 @@ class SqliteStore:
     """Shared connection handling for the SQLite-backed stores."""
 
     def __init__(self, database_path: Path | str | None = None) -> None:
-        self.database_path = Path(database_path) if database_path else default_database_path()
+        resolved = database_path if database_path is not None else default_database_path()
+        # Keep the ``":memory:"`` sentinel as a plain string (``Path(":memory:")``
+        # would resolve to a filesystem entry named ``:memory:``).
+        self.database_path: Path | str = (
+            MEMORY_DATABASE_SENTINEL
+            if str(resolved) == MEMORY_DATABASE_SENTINEL
+            else Path(resolved)
+        )
         self._ddl: tuple[str, ...] = ()
 
+    #: The ``file:`` URI used for shared-cached in-memory connections. When the
+    #: configured path resolves to the magic sentinel ``:memory:`` every store
+    #: attaches to the same shared cache, which mirrors the behaviour of a
+    #: disk-backed file without touching the filesystem. This keeps a headless
+    #: or ephemeral deployment (e.g. an HF Space that disables persistence)
+    #: honest about what "not persisted" means.
+    MEMORY_URI = "file:brainos_lab_shared?mode=memory&cache=shared"
+
     def _connect(self) -> sqlite3.Connection:
-        parent = self.database_path.parent
-        if str(parent) not in {"", "."}:
-            parent.mkdir(parents=True, exist_ok=True)
-        connection = sqlite3.connect(str(self.database_path), timeout=30.0)
+        path = self.database_path
+        is_memory = str(path) == ":memory:"
+        if is_memory:
+            # Shared-cache URI so per-operation connections all see the same
+            # database. ``uri=True`` is required for the query-string options.
+            connection = sqlite3.connect(self.MEMORY_URI, timeout=30.0, uri=True)
+        else:
+            parent = path.parent
+            if str(parent) not in {"", "."}:
+                parent.mkdir(parents=True, exist_ok=True)
+            connection = sqlite3.connect(str(path), timeout=30.0)
         connection.row_factory = sqlite3.Row
+        # Phase 14: WAL mode lets concurrent Gradio worker threads read while a
+        # writer commits, which eliminates the "database is locked" errors a
+        # multi-visitor Space would otherwise see under light load. ``busy_timeout``
+        # is an additional safety net in case a checkpoint is in progress.
+        if not is_memory:
+            connection.execute("PRAGMA journal_mode=WAL")
+        connection.execute("PRAGMA busy_timeout=30000")
+        connection.execute("PRAGMA synchronous=NORMAL")
         # Phase 13: zero deleted content instead of merely unlinking the rows.
         # ``secure_delete`` is per-connection, so it has to be set on every one;
         # a connection that forgets it would leave recoverable bytes behind.
@@ -172,6 +228,17 @@ class SqliteStore:
             row = connection.execute("PRAGMA secure_delete").fetchone()
         return bool(row[0]) if row is not None else False
 
+    def journal_mode(self) -> str:
+        """Return the active journal mode (``wal``, ``delete``, ...).
+
+        Exposed for Phase 14 deployment tests so the concurrency pragmas
+        applied on every connection are verifiable without probing the file.
+        """
+
+        with self._connect() as connection:
+            row = connection.execute("PRAGMA journal_mode").fetchone()
+        return str(row[0]) if row is not None else ""
+
     def vacuum(self) -> bool:
         """Rewrite the database file without its freed pages.
 
@@ -182,14 +249,27 @@ class SqliteStore:
         boolean the caller may log rather than an exception.
         """
 
+        if str(self.database_path) == ":memory:":
+            # In-memory stores have no file to VACUUM; there is also nothing to
+            # reclaim on disk because nothing was written.
+            return True
         if not self.database_path.exists():
             return False
         connection = None
         try:
             connection = sqlite3.connect(str(self.database_path), timeout=30.0)
             connection.isolation_level = None
+            connection.execute("PRAGMA busy_timeout=30000")
             connection.execute("PRAGMA secure_delete=ON")
+            # Phase 14: checkpoint the WAL before VACUUM so that any freed
+            # content still sitting in the WAL (not yet merged) is actually
+            # removed, and truncate the WAL afterwards so a raw read of the
+            # file cannot still see deleted bytes. ``wal_checkpoint(TRUNCATE)``
+            # blocks until the checkpoint finishes and returns the page
+            # counts; VACUUM then rewrites the database itself.
+            connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
             connection.execute("VACUUM")
+            connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
             return True
         except sqlite3.Error:
             return False
@@ -245,11 +325,22 @@ class SqliteConversationStore(SqliteStore):
         ]
 
     def clear(self, session_id: str, conversation_id: str) -> None:
-        with self._connect() as connection:
+        connection = self._connect()
+        try:
             connection.execute(
                 "DELETE FROM messages WHERE session_id = ? AND conversation_id = ?",
                 (str(session_id), str(conversation_id)),
             )
+            connection.commit()
+            # Phase 14 (WAL mode): checkpoint immediately after a destructive
+            # write so the WAL does not retain a pre-deletion page image.
+            # ``wal_checkpoint`` must run outside a write transaction, which is
+            # why the commit above happens first. ``TRUNCATE`` empties the WAL
+            # file so a raw byte scan over the whole database footprint cannot
+            # still read deleted content.
+            connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        finally:
+            connection.close()
 
     def list_conversations(self, session_id: str) -> list[str]:
         with self._connect() as connection:
@@ -261,10 +352,15 @@ class SqliteConversationStore(SqliteStore):
         return [row["conversation_id"] for row in rows]
 
     def delete_session(self, session_id: str) -> None:
-        with self._connect() as connection:
+        connection = self._connect()
+        try:
             connection.execute(
                 "DELETE FROM messages WHERE session_id = ?", (str(session_id),)
             )
+            connection.commit()
+            connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        finally:
+            connection.close()
 
 
 class SqliteMemoryStore(SqliteStore):
@@ -325,10 +421,15 @@ class SqliteMemoryStore(SqliteStore):
         return [payload for payload in payloads if isinstance(payload, dict)]
 
     def clear(self, session_id: str) -> None:
-        with self._connect() as connection:
+        connection = self._connect()
+        try:
             connection.execute(
                 "DELETE FROM memories WHERE session_id = ?", (str(session_id),)
             )
+            connection.commit()
+            connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        finally:
+            connection.close()
 
 
 class SqliteEvaluationStore(SqliteStore):
@@ -375,10 +476,15 @@ class SqliteEvaluationStore(SqliteStore):
         }
 
     def delete_session_data(self, session_id: str) -> None:
-        with self._connect() as connection:
+        connection = self._connect()
+        try:
             connection.execute(
                 "DELETE FROM evaluation_runs WHERE session_id = ?", (str(session_id),)
             )
+            connection.commit()
+            connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        finally:
+            connection.close()
 
 
 __all__ = [

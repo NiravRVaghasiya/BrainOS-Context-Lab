@@ -1,0 +1,6 @@
+# System packages installed via apt on Hugging Face Spaces.
+#
+# The application is pure Python — Gradio only, no PyTorch, no custom binary
+# extensions — so the default Space image already has everything the runtime
+# needs. This file exists so the Space SDK reports a complete layout; if future
+# phases add native dependencies (e.g. a faster tokenizer) they go here.
