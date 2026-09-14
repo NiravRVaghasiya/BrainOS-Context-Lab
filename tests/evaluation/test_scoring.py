@@ -20,8 +20,10 @@ from evaluation.scoring import (
     contains_phrase,
     detect_facts_in_texts,
     expects_abstention,
+    is_conflict_task,
     normalize_answer,
     score_answer,
+    score_faithfulness,
     score_record,
     score_retrieval,
     unavailable_required_facts,
@@ -392,7 +394,11 @@ def test_score_record_is_json_ready_and_carries_the_cost_numbers() -> None:
 
     assert scored["context_reduction"] == 0.5
     assert scored["final_context_tokens"] == 100
+    assert scored["token_savings"] == 100
     assert scored["answer"]["verdict"] == "correct"
+    assert scored["faithfulness"] == 1.0
+    assert scored["quality_adjusted_efficiency"] == 0.01
+    assert scored["conflict_task"] is True
     assert set(scored) == {
         "task_id",
         "category",
@@ -403,6 +409,14 @@ def test_score_record_is_json_ready_and_carries_the_cost_numbers() -> None:
         "context_reduction",
         "final_context_tokens",
         "full_context_reference_tokens",
+        "token_savings",
+        "quality_adjusted_efficiency",
+        "faithfulness",
+        "conflict_task",
+        "conversation_length",
+        "length_tier",
+        "latency_ms",
+        "token_counter",
     }
 
 
@@ -474,6 +488,128 @@ def test_aggregate_groups_by_category() -> None:
 
     assert set(summary["by_category"]) == {"conflict", "temporal"}
     assert summary["by_category"]["temporal"]["answer_accuracy"] == 1.0
+
+
+def test_a_correct_guess_without_evidence_is_unfaithful() -> None:
+    scored = score_record(_task(), _record("MySQL 8", evidence=False), answer="MySQL 8")
+
+    assert scored["answer"]["verdict"] == "correct"
+    assert scored["retrieval"]["evidence_in_prompt"] is False
+    assert scored["faithfulness"] == 0.0
+
+
+def test_faithfulness_is_grounding_not_accuracy() -> None:
+    """A guess can be correct and still unfaithful; a stale echo can be faithful."""
+
+    assert (
+        score_faithfulness(
+            verdict="correct",
+            evidence_in_prompt=True,
+            expected_answer_in_prompt=True,
+            prompt_contains_forbidden=False,
+            abstention_expected=False,
+        )
+        == 1.0
+    )
+    assert (
+        score_faithfulness(
+            verdict="correct",
+            evidence_in_prompt=False,
+            expected_answer_in_prompt=False,
+            prompt_contains_forbidden=False,
+            abstention_expected=False,
+        )
+        == 0.0
+    )
+    assert (
+        score_faithfulness(
+            verdict="stale_answer",
+            evidence_in_prompt=False,
+            expected_answer_in_prompt=False,
+            prompt_contains_forbidden=True,
+            abstention_expected=False,
+        )
+        == 1.0
+    )
+    assert (
+        score_faithfulness(
+            verdict="abstained",
+            evidence_in_prompt=False,
+            expected_answer_in_prompt=False,
+            prompt_contains_forbidden=False,
+            abstention_expected=False,
+        )
+        == 1.0
+    )
+    assert (
+        score_faithfulness(
+            verdict="ungraded",
+            evidence_in_prompt=True,
+            expected_answer_in_prompt=True,
+            prompt_contains_forbidden=False,
+            abstention_expected=False,
+        )
+        is None
+    )
+    assert is_conflict_task("temporal")
+    assert is_conflict_task("conflict")
+    assert not is_conflict_task("single_hop")
+
+
+def test_aggregate_reports_efficiency_and_refuses_a_single_length_curve() -> None:
+    task = _task()
+    scores = [
+        score_record(task, _record("MySQL 8"), answer="MySQL 8"),
+        score_record(task, _record("MySQL 8"), answer="PostgreSQL 16"),
+    ]
+
+    summary = aggregate_scores(scores)
+
+    assert summary["metrics_version"] == "metrics-v1"
+    # One correct (faithful) and one stale echo of a value that was not in the
+    # prompt (unfaithful): both rates are 0.5, and they measure different things.
+    assert summary["faithfulness"] == pytest.approx(0.5)
+    assert summary["conflict_resolution_accuracy"] == pytest.approx(0.5)
+    assert summary["mean_token_savings"] == pytest.approx(100.0)
+    assert summary["mean_final_context_tokens"] == pytest.approx(100.0)
+    assert summary["quality_per_token"] == pytest.approx(0.005)
+    assert summary["mean_latency_ms"] is None
+    assert summary["latency_count"] == 0
+    assert summary["degradation"]["point_count"] == 1
+    assert summary["degradation"]["area_under_degradation_curve"] is None
+    assert "single length" in summary["degradation"]["note"]
+
+
+def test_aggregate_builds_a_degradation_curve_across_length_tiers() -> None:
+    short = score_record(_task(), _record("MySQL 8"), answer="MySQL 8")
+    short["length_tier"] = 5000
+    mid = score_record(_task(), _record("MySQL 8"), answer="MySQL 8")
+    mid["length_tier"] = 10000
+    long = score_record(_task(), _record("MySQL 8"), answer="PostgreSQL 16")
+    long["length_tier"] = 20000
+
+    summary = aggregate_scores([short, mid, long])
+    curve = summary["degradation"]
+
+    assert curve["point_count"] == 3
+    assert curve["reference_length"] == 5000
+    assert curve["reference_accuracy"] == pytest.approx(1.0)
+    assert curve["area_under_degradation_curve"] is not None
+    assert curve["area_under_degradation_curve"] > 0
+    assert curve["mean_degradation"] > 0
+    assert summary["by_length"]["20000"]["answer_accuracy"] == pytest.approx(0.0)
+
+
+def test_latency_is_reported_only_when_supplied() -> None:
+    record = _record("MySQL 8")
+    record["latency_ms"] = 42.5
+    scored = score_record(_task(), record, answer="MySQL 8")
+
+    summary = aggregate_scores([scored])
+
+    assert scored["latency_ms"] == 42.5
+    assert summary["mean_latency_ms"] == pytest.approx(42.5)
+    assert summary["latency_count"] == 1
 
 
 def test_every_verdict_is_in_the_documented_vocabulary() -> None:

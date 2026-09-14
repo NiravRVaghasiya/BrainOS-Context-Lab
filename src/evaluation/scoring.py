@@ -17,6 +17,12 @@ here calls a model: a caller supplies the answers (a real run from Phase 8, or a
 deterministic mock from the Phase 18 tests). That keeps the scoring rules
 testable in isolation and keeps a provider key out of the benchmark path.
 
+Phase 8 extends each scored record with the rest of the plan's metric suite
+(faithfulness, token savings, quality-adjusted efficiency, length-tier, optional
+latency) and turns :func:`aggregate_scores` from a descriptive summary into the
+run-level report: quality rates, efficiency means, per-length curves, and the
+degradation/AUC measures. The verdict rules themselves do not change.
+
 The verdict vocabulary is fixed here because later phases consume it:
 
 ```text
@@ -41,7 +47,21 @@ from dataclasses import dataclass, field, replace
 from typing import Any
 
 from .datasets import BenchmarkFact, BenchmarkTask
-from .metrics import precision_at_k, recall_at_k, summarize
+from .metrics import (
+    CONFLICT_CATEGORIES,
+    METRICS_VERSION,
+    accuracy_degradation,
+    area_under_curve,
+    area_under_degradation_curve,
+    mean_degradation,
+    precision_at_k,
+    quality_adjusted_efficiency,
+    rate,
+    recall_at_k,
+    relative_degradation,
+    summarize,
+    token_savings,
+)
 
 #: Verdicts, most specific first. ``stale_answer`` outranks ``incorrect`` because
 #: a run that confidently repeats a superseded value is a different failure from
@@ -408,6 +428,51 @@ def score_answer(
     )
 
 
+def score_faithfulness(
+    *,
+    verdict: str,
+    evidence_in_prompt: bool,
+    expected_answer_in_prompt: bool,
+    prompt_contains_forbidden: bool,
+    abstention_expected: bool,
+) -> float | None:
+    """Whether the answer is grounded in the evidence the model actually saw.
+
+    Faithfulness is *not* accuracy. A stale answer that repeats a superseded
+    value present in the prompt is faithful to retrieved memory and still a
+    conflict-resolution failure; a correct answer whose evidence never reached
+    the prompt is accurate and unfaithful (a guess). Ungraded records return
+    ``None`` and are excluded from the rate.
+
+    The prompt, not the retriever, is the grounding surface: Mode A retrieves
+    nothing and can still be faithful because the full transcript is in the
+    prompt.
+    """
+
+    if verdict == "ungraded":
+        return None
+    if abstention_expected:
+        return 1.0 if verdict == "correct" else 0.0
+    if verdict in {"abstained", "wrong_abstention"}:
+        return 0.0 if evidence_in_prompt else 1.0
+    if verdict == "correct":
+        # All required evidence must have reached the prompt. A correct answer
+        # whose evidence was missing is a guess — the multi-hop case where
+        # Recall@K is 1.0 but evidence-in-prompt is 0.0. The unused
+        # ``expected_answer_in_prompt`` stays on the signature so callers can
+        # pass the whole retrieval record through; it does not relax this.
+        return 1.0 if evidence_in_prompt else 0.0
+    if verdict == "stale_answer":
+        return 1.0 if prompt_contains_forbidden else 0.0
+    return 0.0
+
+
+def is_conflict_task(category: str) -> bool:
+    """Whether conflict-resolution accuracy is defined for this category."""
+
+    return category in CONFLICT_CATEGORIES
+
+
 def _error_type(verdict: str, *, category: str, abstention_expected: bool = False) -> str:
     """Map a verdict onto the plan's Phase 12 error taxonomy.
 
@@ -484,6 +549,22 @@ def score_record(
     # observed failure, and the retrieval half already reports whether the
     # evidence was missing.
 
+    conversation_length, length_tier = _length_fields(task, record)
+    final_tokens = int(record.get("final_context_tokens", 0) or 0)
+    full_tokens = int(record.get("full_context_reference_tokens", 0) or 0)
+    savings = token_savings(full_tokens, final_tokens)
+    quality: float | None
+    if answer_score.verdict == "ungraded":
+        quality = None
+    else:
+        quality = 1.0 if answer_score.verdict == "correct" else 0.0
+    qae = (
+        None
+        if quality is None
+        else quality_adjusted_efficiency(quality, final_tokens)
+    )
+    stats = record.get("stats") if isinstance(record.get("stats"), Mapping) else {}
+    latency = _optional_float(record.get("latency_ms", record.get("generation_latency_ms")))
     return {
         "task_id": task.task_id,
         "category": task.category,
@@ -492,52 +573,115 @@ def score_record(
         "answer": answer_score.to_dict(),
         "error_type": error_type,
         "context_reduction": float(record.get("context_reduction", 0.0) or 0.0),
-        "final_context_tokens": int(record.get("final_context_tokens", 0) or 0),
-        "full_context_reference_tokens": int(
-            record.get("full_context_reference_tokens", 0) or 0
+        "final_context_tokens": final_tokens,
+        "full_context_reference_tokens": full_tokens,
+        "token_savings": savings,
+        "quality_adjusted_efficiency": qae,
+        "faithfulness": score_faithfulness(
+            verdict=answer_score.verdict,
+            evidence_in_prompt=retrieval.evidence_in_prompt,
+            expected_answer_in_prompt=retrieval.expected_answer_in_prompt,
+            prompt_contains_forbidden=retrieval.prompt_contains_forbidden,
+            abstention_expected=answer_score.abstention_expected,
         ),
+        "conflict_task": is_conflict_task(task.category),
+        "conversation_length": conversation_length,
+        "length_tier": length_tier,
+        "latency_ms": latency,
+        "token_counter": str(stats.get("token_counter") or record.get("token_counter") or ""),
     }
 
 
 def aggregate_scores(scores: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     """Aggregate scored records into the headline numbers for one run.
 
-    Deliberately descriptive: means, counts, and rates. Per-length curves,
-    paired trials, confidence intervals across trials, and effect sizes belong to
-    Phase 8/10 — this is the number a run can report the moment it finishes, and
-    each rate carries its own denominator so a partially graded run cannot
-    flatter itself.
+    Phase 7 reported counts, rates, and means, each with its own denominator.
+    Phase 8 keeps those and adds the rest of the plan's suite: faithfulness,
+    conflict-resolution accuracy, token savings, quality-adjusted efficiency,
+    optional latency, per-length curves, and the degradation/AUC measures.
+
+    Paired trials, effect sizes, and trial-level confidence intervals still
+    belong to Phase 10 — a single run's task-level mean is not a trial CI.
+    Each rate still carries its own denominator so a partially graded run
+    cannot flatter itself.
     """
 
     records = [dict(score) for score in scores]
     graded = [record for record in records if record["answer"]["verdict"] != "ungraded"]
-    abstention_tasks = [record for record in records if record["answer"]["abstention_expected"]]
-
-    def rate(numerator: int, denominator: int) -> float:
-        return numerator / denominator if denominator else 0.0
+    abstention_tasks = [
+        record for record in records if record["answer"]["abstention_expected"]
+    ]
+    conflict_tasks = [
+        record
+        for record in graded
+        if record.get("conflict_task") or is_conflict_task(str(record.get("category", "")))
+    ]
+    faithful_defined = [
+        record for record in records if record.get("faithfulness") is not None
+    ]
+    # Forbidden-in-prompt is only meaningful on tasks that declare a stale
+    # value. Using the conflict/temporal categories keeps the denominator honest.
+    forbidden_scope = [
+        record
+        for record in records
+        if is_conflict_task(str(record.get("category", "")))
+        or record.get("conflict_task")
+    ]
+    latencies = [
+        float(record["latency_ms"])
+        for record in records
+        if record.get("latency_ms") is not None
+    ]
+    qae_values = [
+        float(record["quality_adjusted_efficiency"])
+        for record in graded
+        if record.get("quality_adjusted_efficiency") is not None
+    ]
+    answerable = [
+        record for record in records if record["retrieval"]["required_fact_ids"]
+    ]
+    mean_tokens = _mean(record.get("final_context_tokens", 0) for record in records)
+    accuracy = rate(
+        sum(1 for record in graded if record["answer"]["verdict"] == "correct"),
+        len(graded),
+    )
+    by_length = _by_length(records)
+    token_counters = sorted(
+        {
+            str(record.get("token_counter") or "")
+            for record in records
+            if record.get("token_counter")
+        }
+    )
 
     summary = {
+        "metrics_version": METRICS_VERSION,
         "task_count": len(records),
         "graded_answer_count": len(graded),
         # Recall is undefined for tasks with no required evidence (the
         # abstention category): averaging in their vacuous 1.0 would flatter
         # every mode, so they are excluded from the denominator instead.
         "retrieval_recall": _mean(
-            record["retrieval"]["recall"]
-            for record in records
-            if record["retrieval"]["required_fact_ids"]
+            record["retrieval"]["recall"] for record in answerable
         ),
         "retrieval_precision": _mean(
             record["retrieval"]["precision"] for record in records
         ),
         "evidence_in_prompt_rate": rate(
             sum(1 for record in records if record["retrieval"]["evidence_in_prompt"]),
-            sum(1 for record in records if record["retrieval"]["required_fact_ids"]),
+            len(answerable),
         ),
-        "answer_accuracy": rate(
-            sum(1 for record in graded if record["answer"]["verdict"] == "correct"),
-            len(graded),
+        "answer_accuracy": accuracy,
+        "faithfulness": rate(
+            sum(1 for record in faithful_defined if record.get("faithfulness") == 1.0),
+            len(faithful_defined),
         ),
+        "faithfulness_count": len(faithful_defined),
+        "conflict_resolution_accuracy": rate(
+            sum(1 for record in conflict_tasks if record["answer"]["verdict"] == "correct"),
+            len(conflict_tasks),
+        ),
+        "conflict_task_count": len(conflict_tasks),
         "abstention_accuracy": rate(
             sum(
                 1
@@ -550,14 +694,34 @@ def aggregate_scores(scores: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
             sum(1 for record in graded if record["answer"]["verdict"] == "stale_answer"),
             len(graded),
         ),
+        "forbidden_in_prompt_rate": rate(
+            sum(
+                1
+                for record in forbidden_scope
+                if record.get("retrieval", {}).get("prompt_contains_forbidden")
+            ),
+            len(forbidden_scope),
+        ),
         "mean_context_reduction": _mean(
             record.get("context_reduction", 0.0) for record in records
         ),
-        "error_counts": _counts(record.get("error_type", "") or "none" for record in records),
-        "verdict_counts": _counts(
-            record["answer"]["verdict"] for record in records
+        "mean_final_context_tokens": mean_tokens,
+        "mean_full_context_reference_tokens": _mean(
+            record.get("full_context_reference_tokens", 0) for record in records
         ),
+        "mean_token_savings": _mean(record.get("token_savings", 0) for record in records),
+        "mean_quality_adjusted_efficiency": _mean(qae_values),
+        "quality_per_token": (
+            accuracy / mean_tokens if mean_tokens else 0.0
+        ),
+        "mean_latency_ms": _mean(latencies) if latencies else None,
+        "latency_count": len(latencies),
+        "token_counters": token_counters,
+        "error_counts": _counts(record.get("error_type", "") or "none" for record in records),
+        "verdict_counts": _counts(record["answer"]["verdict"] for record in records),
         "by_category": _by_category(records),
+        "by_length": by_length,
+        "degradation": _degradation_report(by_length),
     }
     return summary
 
@@ -567,24 +731,162 @@ def _by_category(records: Sequence[Mapping[str, Any]]) -> dict[str, dict[str, An
     for record in records:
         grouped.setdefault(str(record.get("category", "")), []).append(record)
     return {
-        category: {
-            "task_count": len(items),
-            "retrieval_recall": _mean(
-                item["retrieval"]["recall"]
-                for item in items
-                if item["retrieval"]["required_fact_ids"]
-            ),
-            "evidence_in_prompt_rate": _mean(
-                1.0 if item["retrieval"]["evidence_in_prompt"] else 0.0 for item in items
-            ),
-            "answer_accuracy": _mean(
-                1.0 if item["answer"]["verdict"] == "correct" else 0.0
-                for item in items
-                if item["answer"]["verdict"] != "ungraded"
-            ),
-        }
+        category: _group_metrics(items, extra={"conflict_task": is_conflict_task(category)})
         for category, items in sorted(grouped.items())
     }
+
+
+def _by_length(records: Sequence[Mapping[str, Any]]) -> dict[str, dict[str, Any]]:
+    grouped: dict[int, list[Mapping[str, Any]]] = {}
+    for record in records:
+        length = int(record.get("length_tier") or record.get("conversation_length") or 0)
+        grouped.setdefault(length, []).append(record)
+    return {
+        str(length): {**_group_metrics(items), "length": length}
+        for length, items in sorted(grouped.items())
+    }
+
+
+def _group_metrics(
+    items: Sequence[Mapping[str, Any]], extra: Mapping[str, Any] | None = None
+) -> dict[str, Any]:
+    graded = [item for item in items if item["answer"]["verdict"] != "ungraded"]
+    answerable = [item for item in items if item["retrieval"]["required_fact_ids"]]
+    faithful_defined = [item for item in items if item.get("faithfulness") is not None]
+    payload: dict[str, Any] = {
+        "task_count": len(items),
+        "graded_answer_count": len(graded),
+        "retrieval_recall": _mean(item["retrieval"]["recall"] for item in answerable),
+        "retrieval_precision": _mean(item["retrieval"]["precision"] for item in items),
+        "evidence_in_prompt_rate": rate(
+            sum(1 for item in items if item["retrieval"]["evidence_in_prompt"]),
+            len(answerable),
+        ),
+        "answer_accuracy": rate(
+            sum(1 for item in graded if item["answer"]["verdict"] == "correct"),
+            len(graded),
+        ),
+        "faithfulness": rate(
+            sum(1 for item in faithful_defined if item.get("faithfulness") == 1.0),
+            len(faithful_defined),
+        ),
+        "mean_final_context_tokens": _mean(
+            item.get("final_context_tokens", 0) for item in items
+        ),
+        "mean_context_reduction": _mean(
+            item.get("context_reduction", 0.0) for item in items
+        ),
+        "mean_token_savings": _mean(item.get("token_savings", 0) for item in items),
+        "mean_quality_adjusted_efficiency": _mean(
+            float(item["quality_adjusted_efficiency"])
+            for item in graded
+            if item.get("quality_adjusted_efficiency") is not None
+        ),
+    }
+    if extra:
+        payload.update(dict(extra))
+    return payload
+
+
+def _degradation_report(by_length: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
+    """Accuracy-vs-length degradation from the shortest length as reference.
+
+    A single length (the committed smoke tier) cannot support a curve: the AUC
+    fields are ``None`` and a note says so, rather than reporting a silent 0
+    that looks like "no degradation".
+    """
+
+    points = sorted(by_length.values(), key=lambda item: int(item.get("length", 0)))
+    if not points:
+        return {
+            "reference_length": 0,
+            "reference_accuracy": 0.0,
+            "point_count": 0,
+            "by_length": [],
+            "area_under_degradation_curve": None,
+            "area_under_accuracy_curve": None,
+            "mean_degradation": None,
+            "note": "No length points.",
+        }
+    reference = points[0]
+    reference_accuracy = float(reference.get("answer_accuracy", 0.0) or 0.0)
+    rows = []
+    for point in points:
+        accuracy = float(point.get("answer_accuracy", 0.0) or 0.0)
+        rows.append(
+            {
+                "length": int(point.get("length", 0) or 0),
+                "accuracy": round(accuracy, 6),
+                "absolute_degradation": round(
+                    accuracy_degradation(reference_accuracy, accuracy), 6
+                ),
+                "relative_degradation": round(
+                    relative_degradation(reference_accuracy, accuracy), 6
+                ),
+                "mean_final_context_tokens": point.get("mean_final_context_tokens", 0.0),
+            }
+        )
+    if len(points) < 2:
+        return {
+            "reference_length": int(reference.get("length", 0) or 0),
+            "reference_accuracy": round(reference_accuracy, 6),
+            "point_count": 1,
+            "by_length": rows,
+            "area_under_degradation_curve": None,
+            "area_under_accuracy_curve": None,
+            "mean_degradation": None,
+            "note": "A single length cannot support a degradation curve.",
+        }
+    lengths = [row["length"] for row in rows]
+    accuracies = [row["accuracy"] for row in rows]
+    return {
+        "reference_length": int(reference.get("length", 0) or 0),
+        "reference_accuracy": round(reference_accuracy, 6),
+        "point_count": len(points),
+        "by_length": rows,
+        "area_under_degradation_curve": round(
+            area_under_degradation_curve(
+                lengths, accuracies, reference_accuracy=reference_accuracy
+            ),
+            6,
+        ),
+        "area_under_accuracy_curve": round(area_under_curve(lengths, accuracies), 6),
+        "mean_degradation": round(
+            mean_degradation(lengths, accuracies, reference_accuracy=reference_accuracy),
+            6,
+        ),
+        "note": "",
+    }
+
+
+def _length_fields(task: BenchmarkTask, record: Mapping[str, Any]) -> tuple[int, int]:
+    """Return ``(conversation_length, length_tier)`` for a scored record.
+
+    The length ladder is the plan's token-tier (5k, 10k, …), not the message
+    count. Message count is still stored because some fixtures have no tier.
+    """
+
+    conversation_length = record.get("conversation_length")
+    if conversation_length is None:
+        conversation_length = task.conversation_length
+    if conversation_length is None:
+        conversation_length = len(task.conversation)
+    metadata = task.metadata or {}
+    length_tier = record.get("length_tier")
+    if length_tier is None:
+        length_tier = metadata.get("length_tier") or metadata.get("target_tokens")
+    if not length_tier:
+        length_tier = conversation_length
+    return int(conversation_length or 0), int(length_tier or 0)
+
+
+def _optional_float(value: Any) -> float | None:
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _mean(values: Iterable[float]) -> float:
@@ -647,9 +949,11 @@ __all__ = [
     "detect_facts_in_texts",
     "expects_abstention",
     "fact_markers_present",
+    "is_conflict_task",
     "latest_session_index",
     "normalize_answer",
     "score_answer",
+    "score_faithfulness",
     "score_record",
     "score_retrieval",
     "unavailable_required_facts",

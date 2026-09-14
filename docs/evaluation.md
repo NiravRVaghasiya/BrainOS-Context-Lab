@@ -77,10 +77,33 @@ refinements that need both halves of a record: declining although the evidence
 was in the prompt is `wrong_abstention`, and an incorrect answer whose evidence
 was missing from the prompt is `missed_memory` rather than `hallucination`.
 
-The aggregate a run reports is descriptive only: counts, rates, and means, each
-with its own denominator, plus a per-category breakdown. Confidence intervals
-across trials, paired comparisons, effect sizes, and the planned plots belong to
-Phases 8 and 10.
+The aggregate a run reports is the Phase 8 metric suite: quality rates
+(recall, precision, evidence-in-prompt, accuracy, faithfulness,
+conflict-resolution, abstention), efficiency means (tokens, reduction, savings,
+quality-adjusted efficiency), a `by_length` breakdown, and a degradation block
+whose AUC is JSON `null` when only one length is present. Confidence intervals
+across trials, paired comparisons, effect sizes, and rendered plots belong to
+Phase 10 — a single run's task-level mean is not a trial CI.
+
+## Metrics (Phase 8)
+
+Faithfulness is grounding, not accuracy: a correct answer whose required
+evidence never reached the prompt is a guess (unfaithful); a stale answer that
+repeats a superseded value that *was* in the prompt is faithful to retrieved
+memory and still a conflict-resolution failure. Conflict-resolution accuracy is
+scoped to the `conflict` and `temporal` categories. Latency is optional and
+stays `null` until a generation path supplies `latency_ms`; replay wall-clock
+is not a substitute.
+
+Two efficiency numbers are reported because they are not the same:
+
+- `mean_quality_adjusted_efficiency` = mean of per-record `quality / tokens`
+- `quality_per_token` = `answer_accuracy / mean_final_context_tokens`
+
+Degradation uses the shortest length in the run as the reference. Raw AUC has
+units of accuracy × tokens; `mean_degradation` divides by the length span so
+ladders of different width can be compared. A smoke-tier run (one length) must
+not be read as "no degradation".
 
 ## Metrics
 

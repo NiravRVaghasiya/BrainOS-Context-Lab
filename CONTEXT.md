@@ -3,9 +3,9 @@
 > Living hand-off context for implementation work. This file records the
 > repository state and decisions that should be preserved between phases.
 
-**Last updated:** 2026-09-13
-**Branch:** `arena/01a09c46-brainos-context-lab`
-**Baseline:** `147c189` (`origin/main`, includes PR #7's Phase 6); this branch adds Phase 7 on top
+**Last updated:** 2026-09-14
+**Branch:** `arena/01a09f1b-brainos-context-lab`
+**Baseline:** `ef1bef6` (`origin/main`, includes PR #8's Phase 7); this branch adds Phase 8 on top
 **Implementation plan:** [`BrainOS_Context_Lab_Implementation_Plan.md`](BrainOS_Context_Lab_Implementation_Plan.md)
 
 ## Product boundary
@@ -27,9 +27,11 @@ layer that helps select historical context.
 | Phase 4 — Chat web UI | Complete | Gradio callbacks wired to a Gradio-free `UIController`: provider connect/validate/list-models, per-session chat, the five planned tabs, session controls (clear conversation / clear memory / end session / export), and a memory-mode selector. Landed on `main` via PR #5; 216 tests, live-validated at 41 turns. |
 | Phase 5 — Conversation persistence | Complete | SQLite backend behind the finalized store protocols (per-op thread-safe connections, lazy schema, upsert memory mirrors); the service persists turns best-effort with session-key redaction at the write site; `UIController` owns lifecycle deletes and a persisted-view export block; `create_app` picks the backend, so headless runs never touch disk. Landed on `main` via PR #6. 249 tests; live-validated over HTTP with real SQLite. |
 | Phase 6 — Baseline modes | Complete | The plan's five modes (A full context, B sliding window, C lexical RAG, D BrainOS, E BrainOS + RAG) behind `ContextSettings.mode`, each fixing its own history window; a BrainOS-free lexical chunk retriever; a second delimited evidence block with its own budget, accounting, and eviction slot; mode-aware UI with a chunk panel; and the `evaluation/runner.py` seam wired, so `python -m evaluation.run --mode …` executes. 379 tests; live-validated over HTTP. |
-| **Phase 7 — Context-rot benchmark** | **Complete in this turn** | The seven plan categories are generated (`spec.py` + `generation.py`) with a fact ledger and evidence contract; retrieval scoring is model-free (markers → Recall@K / precision / evidence-in-prompt) and answer scoring grades supplied answers (`--answers`) into a fixed verdict vocabulary with the Phase 12 error labels; the runner reports aggregates and the dataset hash; the committed smoke dataset is 7 tasks, SHA-256 pinned by a manifest. 494 tests; live-validated on the pinned runtime. |
-| Phase 8 — Metrics | Pending | `aggregate_scores` is descriptive only (counts/rates/means with per-rate denominators). Missing: the full metric suite (faithfulness, latency), per-length curves, quality-adjusted efficiency reported per mode, and the degradation/AUC measures. |
-| Phases 9–20 | Pending | Controlled experiments, statistics, ablations, error analysis, security hardening, deployment, cost controls, reproducibility, evaluation pipeline, tests, MVP, release. |
+| Phase 7 — Context-rot benchmark | Complete | The seven plan categories are generated (`spec.py` + `generation.py`) with a fact ledger and evidence contract; retrieval scoring is model-free (markers → Recall@K / precision / evidence-in-prompt) and answer scoring grades supplied answers (`--answers`) into a fixed verdict vocabulary with the Phase 12 error labels; the runner reports aggregates and the dataset hash; the committed smoke dataset is 7 tasks, SHA-256 pinned by a manifest. Landed on `main` via PR #8. |
+| **Phase 8 — Metrics** | **Complete in this turn** | The plan's quality / efficiency / robustness suite on top of the Phase 7 scorer: faithfulness (grounding, not accuracy), conflict-resolution accuracy, token savings, quality-adjusted efficiency, optional latency, `by_length` curves, and a degradation/AUC block that is `null` on a single length rather than a silent 0. Plot-ready series for the six planned figures; matplotlib stays optional. 503 tests; live-validated on the pinned runtime. |
+| Phase 9 — Controlled experiments | Pending | Same model/temperature/tasks, only the context-management strategy changes; needs a generation path and cost controls (Phase 15) before real answers replace `--answers`. |
+| Phase 10 — Statistical evaluation | Pending | Trial-level mean/SD/95% CI, paired comparisons, effect sizes, and rendered plots. Series builders exist; do not present a single run's task-level mean as a trial CI. |
+| Phases 11–20 | Pending | Ablations, error analysis, security hardening, deployment, cost controls, reproducibility, evaluation pipeline, tests, MVP, release. |
 
 Detailed logs are available in
 [`docs/phase-0-research-baseline.md`](docs/phase-0-research-baseline.md),
@@ -39,9 +41,92 @@ Detailed logs are available in
 [`docs/phase-4-chat-web-ui.md`](docs/phase-4-chat-web-ui.md),
 [`docs/phase-5-conversation-persistence.md`](docs/phase-5-conversation-persistence.md),
 [`docs/phase-6-baseline-modes.md`](docs/phase-6-baseline-modes.md), and
-[`docs/phase-7-context-rot-benchmark.md`](docs/phase-7-context-rot-benchmark.md).
+[`docs/phase-7-context-rot-benchmark.md`](docs/phase-7-context-rot-benchmark.md),
+and [`docs/phase-8-metrics.md`](docs/phase-8-metrics.md).
 
-## What was done in Phase 7 (this turn)
+## What was done in Phase 8 (this turn)
+
+### New / changed modules
+
+| File | Purpose |
+| --- | --- |
+| [`src/evaluation/metrics.py`](src/evaluation/metrics.py) | Phase 8 primitives: `METRICS_VERSION = "metrics-v1"`, `CONFLICT_CATEGORIES`, signed `accuracy_degradation` / `relative_degradation`, trapezoidal `area_under_curve` / `area_under_degradation_curve` / `mean_degradation` (AUC ÷ length span), `rate`, `Summary.to_dict()`. `token_savings` and `quality_adjusted_efficiency` are now called by the aggregate. |
+| [`src/evaluation/scoring.py`](src/evaluation/scoring.py) | `score_faithfulness` (grounding, not accuracy) and `is_conflict_task`; `score_record` gains token savings, QAE, faithfulness, `conflict_task`, `conversation_length`, `length_tier`, optional `latency_ms`, and `token_counter`. `aggregate_scores` reports the full suite, `by_length`, and a degradation block whose AUC is JSON `null` when only one length is present. |
+| [`src/evaluation/analysis.py`](src/evaluation/analysis.py) | `headline_from_aggregate` / `HEADLINE_KEYS` and `plot_series` for the six plan plots, built without matplotlib. `compare_runs` now carries a headline row and the degradation block. |
+| [`src/evaluation/plots.py`](src/evaluation/plots.py) | Renderers for accuracy-vs-length, tokens-vs-length, accuracy-vs-tokens, retrieval, token savings, and quality-adjusted efficiency. Matplotlib remains the `evaluation` extra; tests cover the series, not the renderer. |
+| [`src/evaluation/reports.py`](src/evaluation/reports.py) | `metrics_report` and `comparison_report` around the existing JSON writer. |
+| [`src/evaluation/compare.py`](src/evaluation/compare.py) | Writes the structured comparison and prints a compact headline table. |
+| [`src/evaluation/run.py`](src/evaluation/run.py) | Summary line includes `faithfulness` and `qae`. |
+| Tests | `tests/unit/test_metrics.py` 2 → 8, `tests/evaluation/test_scoring.py` +5, `tests/evaluation/test_analysis.py` (6), live aggregate assertions: **494 → 503**. `ruff check .` clean. |
+
+### Metric contract (what later phases build on)
+
+```text
+per record
+  retrieval.*              Phase 7, unchanged
+  answer.* / error_type    Phase 7, unchanged (inverted abstention scoring stays)
+  token_savings            full_context_reference − final
+  quality_adjusted_efficiency   1/tokens if correct, 0/tokens if graded-wrong, null if ungraded
+  faithfulness             1/0/null  — grounded in the prompt, not "was the answer right"
+  conflict_task            temporal | conflict
+  length_tier              metadata.length_tier (the 5k/10k/… ladder)
+  latency_ms               optional; null unless a generation path supplied it
+
+aggregate
+  quality     recall, precision, evidence_in_prompt, accuracy, faithfulness,
+              conflict_resolution_accuracy, abstention_accuracy
+  efficiency  mean tokens, reduction, savings, QAE, quality_per_token
+  robustness  by_length, degradation.{absolute, relative, AUC, mean_degradation}
+```
+
+Faithfulness rules, compressed:
+
+- ungraded → excluded;
+- abstention expected → 1 iff the answer declined;
+- correct → 1 iff **all required evidence reached the prompt** (a correct guess is unfaithful — this is the multi-hop finding as a metric);
+- stale_answer → 1 iff the forbidden value was in the prompt (faithful to retrieved memory, still a conflict failure);
+- abstained → 1 iff the evidence was **not** in the prompt;
+- incorrect → 0.
+
+Degradation: reference = shortest length in the run. One length → `area_under_degradation_curve: null` and an explicit note. Do not read a missing curve as "no degradation".
+
+Two efficiency numbers: `mean_quality_adjusted_efficiency` is `E[q_i / t_i]`; `quality_per_token` is `accuracy / mean_tokens`. They diverge when token counts vary.
+
+### Measured behaviour (live pinned BrainOS, committed smoke dataset, no provider)
+
+Scripted answers from the contract. Estimated token counter.
+
+```text
+mode=brainos  tasks=7  graded=7
+recall=1.000  evidence_in_prompt=0.833  accuracy=1.000  faithfulness=0.857
+conflict_resolution=1.000  abstention=1.000  forbidden_in_prompt=1.000
+reduction=0.832  mean_tokens=193.6  savings=959.1  qae=0.005200
+latency=null  degradation.auc=null
+```
+
+Accuracy 1.0 is plumbing (scripted answers). Faithfulness 0.857 is the multi-hop
+task: Recall@K 1.0, evidence-in-prompt 0.0, scripted answer correct and
+unfaithful. That disagreement is the Phase 7 finding, now a headline number.
+The degradation block refuses to invent a curve from one length.
+
+**Integration-validation observations, not research results.**
+
+### Findings this phase produced (carry into Phases 9–11)
+
+1. **The metric split is load-bearing.** On the smoke run, accuracy, recall,
+   evidence-in-prompt, and faithfulness are 1.00 / 1.00 / 0.83 / 0.86. Collapsing
+   any two of them hides the multi-hop failure.
+2. **`forbidden_in_prompt_rate` is 1.0** on conflict and temporal even when
+   conflict-resolution accuracy is 1.0 (scripted current-value answers). Conflict
+   handling is still an *answer* problem; the prompt still carries the stale
+   value. Phase 11 should ablate the conflict drop.
+3. **QAE on the smoke tier is not comparable across modes yet** — accuracy is
+   scripted. Phase 9 has to put a model in the loop before quality-adjusted
+   efficiency means anything.
+4. **Latency stays null** until generation exists. Do not fill it with replay
+   wall-clock; that would mix retrieval time into a generation metric.
+
+## What was done in Phase 7 (PR #8, previous turn)
 
 ### New / changed modules
 
@@ -78,7 +163,7 @@ task = conversation + question + expected_answer
 - **Two validity properties are enforced by tests**: every planted fact is
   storable by the app's memory policy, and no filler turn is storable.
 - **Scoring is split.** Retrieval scoring is model-free (Recall@K, Precision@K
-  over required∪supporting, `evidence_in_prompt`, `expected_answer_in_prompt`,
+  over required∪supporting, `evidence_in_prompt`, `expected_answer_inmpt`,
   `prompt_contains_forbidden`). Answer scoring takes a supplied string
   (`--answers` JSONL `{task_id, mode?, answer}`) and never calls a model.
 - **Verdicts**: `correct | abstained | wrong_abstention | stale_answer |
@@ -675,6 +760,10 @@ threshold on it would be overfitting. Threshold calibration belongs to Phases
   never a client; the run's provenance block carries the dataset hash, counts,
   and categories, never a key; and the committed dataset was generated offline
   (`generation.py` imports no provider and no runtime).
+- **New (Phase 8):** metric artifacts (`aggregate_metrics`, `metrics_report`,
+  `comparison_report`, plot series) are derived from scored records and carry
+  no credentials. Latency is omitted (`null`) rather than filled with replay
+  wall-clock. A missing degradation curve is `null` with a note, not a zero.
 - **Restated (Phase 6):** raw history inside the recent window is replayed
   verbatim. The credential guard covers recalled memory, retrieved chunks,
   diagnostics, and persisted rows — not the transcript Mode A must send as
@@ -702,7 +791,7 @@ python3 -m venv .venv
 .venv/bin/pip install "brainos-cli @ git+https://github.com/NiravRVaghasiya/BrainOS.git@1d9eb7a0ca537e7278e29809cda4f4c5da6c1dcc"
 
 .venv/bin/pytest -q
-# 494 passed
+# 503 passed (1 skipped: Gradio)
 
 .venv/bin/ruff check .
 # All checks passed!   (whole repository, no exclusions)
@@ -739,48 +828,44 @@ through `FakeProvider` / `FakeLLMProvider`.
 
 ## Next safe step
 
-Implement **Phase 8 — Metrics** on top of the Phase 7 scorer, then Phase 9
-(controlled experiments) and Phase 10 (statistics/plots).
+Implement **Phase 9 — Controlled experiments**: the same model, temperature,
+generation parameters, and tasks, with only the context-management strategy
+changing. Then Phase 10 (trial-level statistics and rendered plots).
 
 What already exists and should be reused rather than rebuilt:
 
-* `evaluation/scoring.py` — `score_record` produces one JSON-ready record per
-  (task, mode) with `retrieval`, `answer`, `error_type`, and cost fields;
-  `aggregate_scores` already reports counts/rates/means with per-rate
-  denominators and a `by_category` block. Phase 8 extends this, it does not
-  replace it.
-* `evaluation/metrics.py` — `recall_at_k`, `precision_at_k`,
-  `context_reduction`, `token_savings`, `quality_adjusted_efficiency`,
-  `summarize` (mean/SD/95% CI). Only `summarize` is used by the aggregate today;
-  the efficiency metrics are still uncalled.
+* `evaluation/scoring.py` — `score_record` / `aggregate_scores` now emit the
+  full Phase 8 suite (faithfulness, conflict-resolution, QAE, `by_length`,
+  degradation). Do not replace the verdict rules.
+* `evaluation/metrics.py` — primitives including degradation/AUC and
+  `summarize` (mean/SD/95% CI). `summarize` is the trial-level building block
+  for Phase 10; a single run's task-level mean is not a trial CI.
+* `evaluation/analysis.py` / `plots.py` / `compare.py` — headline tables and
+  the six plot series. Phase 10 renders them and adds paired tests.
 * `evaluation/modes.py` — `replay_task` / `compare_modes` (with
-  `session_isolation`) run any task through any mode on the real service; the
-  replay carries the retrieved texts, the prompt, the stored-memory count, and
-  the sessions used.
+  `session_isolation`) run any task through any mode on the real service.
 * `evaluation/runner.py` + `evaluation/run.py` — a run already scores,
   aggregates, records the dataset hash and notes, and writes JSON.
 * `benchmarks/context_rot` — `--tier standard` (5k/10k/20k/40k) and
-  `--variants N` generate the length ladder; `reports.py`, `analysis.py`,
-  `plots.py`, and `compare.py` are thin scaffolding waiting for Phase 8/10.
+  `--variants N` generate the length ladder into the Git-ignored
+  `generated/` directory.
 
-Carry these constraints into Phase 8:
+Carry these constraints into Phase 9:
 
-1. **Recall@K and evidence-in-prompt must both be reported** — the multi-hop
-   case has 1.0 and 0.0 respectively, and that disagreement is the finding.
-2. **Abstention is inverted-scored on purpose.** Declining is correct when
-   abstention is expected; asserting a value there is a hallucination. Do not
-   "normalise" the verdicts.
-3. **The committed smoke tier cannot support a claim** (7 tasks, one length, one
-   seed). Use `--tier standard`/`research` with multiple variants, write into the
-   Git-ignored `benchmarks/context_rot/generated/`, and treat every number from
-   the smoke tier as plumbing validation.
-4. **Use an exact token counter for research runs.** Every number in this file is
-   `estimate_tokens`; `tiktoken` is not installed here.
-5. **Grading needs the Phase 15 cost controls** before the Evaluation tab
+1. **Faithfulness, Recall@K, and evidence-in-prompt are three numbers.** They
+   disagree on multi-hop (1.00 / 1.00 / 0.00 on Mode D); do not collapse them.
+2. **Abstention is inverted-scored on purpose.** Do not "normalise" the verdicts.
+3. **The committed smoke tier cannot support a claim**, and the degradation
+   block now says so (`auc: null`). Use `--tier standard`/`research`.
+4. **QAE is meaningless while answers are scripted.** Put a model in the loop
+   before comparing quality-adjusted efficiency across modes.
+5. **Latency stays null until generation exists.** Do not fill it with replay
+   wall-clock.
+6. **Grading needs the Phase 15 cost controls** before the Evaluation tab
    (Phase 17) exposes a benchmark run; `--limit` is the only control today.
-6. **Do not tune thresholds on the smoke tier** (Phase 3/4 rule, still in force).
-7. **Keep the isolated replay in the suite**: it is the only test that would
-   catch memory leaking across sessions after a future adapter/storage change.
-8. Small UI follow-up candidate, still open: surface the controller's
-   "Session ended …" confirmation in the `/end_session` handler (currently
-   dropped by the upstream UI wiring).
+7. **Use an exact token counter for research runs.** Every number in this file is
+   `estimate_tokens`.
+8. **Do not tune thresholds on the smoke tier** (Phase 3/4 rule, still in force).
+9. **Keep the isolated replay in the suite.**
+10. Small UI follow-up candidate, still open: surface the controller's
+    "Session ended …" confirmation in the `/end_session` handler.

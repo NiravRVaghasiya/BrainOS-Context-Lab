@@ -8,12 +8,14 @@ This repository integrates BrainOS as an upstream dependency. It does **not** mo
 
 ## Current status
 
-Phases 1–7 are complete and validated against the pinned BrainOS runtime. The
+Phases 1–8 are complete and validated against the pinned BrainOS runtime. The
 app persists conversations and memory mirrors to SQLite with hard session
 isolation, offers the full data-control set (clear conversation, clear memory,
 export session, end/delete session), can run the same conversation through all
-five of the plan's baseline context-management modes, and now ships a generated
-context-rot benchmark with scoring.
+five of the plan's baseline context-management modes, ships a generated
+context-rot benchmark with scoring, and reports the plan's quality / efficiency /
+robustness metric suite (including faithfulness and a degradation curve that
+stays unset until more than one length is present).
 
 - **Phase 1** maps the provider abstraction (OpenAI and OpenAI-compatible)
   behind `LLMProvider`, with secret-safe errors and diagnostics.
@@ -43,16 +45,22 @@ context-rot benchmark with scoring.
   evidence contract, model-free retrieval scoring (Recall@K, precision,
   evidence-in-prompt), answer verdicts with an error taxonomy, and a runner that
   reports aggregates and records the dataset hash.
+- **Phase 8** fills the metric suite on top of that scorer: faithfulness to
+  retrieved evidence (grounding, not accuracy), conflict-resolution accuracy,
+  token savings, quality-adjusted efficiency, optional latency, per-length
+  curves, and degradation/AUC that is `null` on a single length rather than a
+  silent zero. Plot-ready series for the six planned figures ship without
+  requiring matplotlib.
 
 A session-scoped `ConversationService` combines the adapter, the retrieval
 policy, the context builder, and the provider factory. Deterministic fakes cover
 the whole pipeline without BrainOS installed; optional live tests exercise the
-pinned runtime. 494 tests pass and `ruff check .` is clean repository-wide.
+pinned runtime. 503 tests pass and `ruff check .` is clean repository-wide.
 
 Chat is usable without an API key: BrainOS still observes and retrieves memory,
 and the panels show exactly what the model *would* have been sent. See
 [`CONTEXT.md`](CONTEXT.md) for the living implementation state and the Phase
-0–6 logs in `docs/`.
+0–8 logs in `docs/`.
 
 ### Measured behaviour so far
 
@@ -102,6 +110,13 @@ multi-hop category**: BrainOS recalled both required facts, but the retrieval
 policy's relevance filtering delivered only one to the prompt. That is a
 measurement, not a failure of the harness, and it is the first concrete target
 for the Phase 11 ablation.
+
+Phase 8 then scored the same smoke run through the full metric suite. Scripted
+answers still produce accuracy 1.0 (plumbing). Faithfulness is **0.857**: the
+multi-hop task is a correct guess whose evidence never reached the prompt, so
+accuracy, Recall@K, evidence-in-prompt, and faithfulness are four different
+numbers (1.00 / 1.00 / 0.83 / 0.86). The degradation AUC is `null` — one length
+cannot support a curve.
 
 **Integration-validation observations, not research results**: one seed, one
 length tier, an estimated token counter, and no model in the loop — answer
