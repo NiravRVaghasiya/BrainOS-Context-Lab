@@ -105,6 +105,14 @@ Verdicts: `correct`, `abstained`, `wrong_abstention`, `stale_answer`,
 `wrong_abstention`, `wrong_answer`) so Phase 12's error analysis starts from the
 same record the aggregate metrics do.
 
+Phase 8 adds faithfulness (was the answer grounded in the prompt?),
+conflict-resolution accuracy (temporal and conflict categories only), token
+savings, quality-adjusted efficiency, per-length curves, and a degradation/AUC
+block. A single length — this smoke tier — cannot support a curve; the AUC
+fields are `null` rather than a silent zero. Recall@K, evidence-in-prompt,
+accuracy, and faithfulness are four numbers and must all be reported: they
+disagree on multi-hop.
+
 ## What this benchmark is not
 
 - It is not a natural-language dataset: the filler is template-generated, so it

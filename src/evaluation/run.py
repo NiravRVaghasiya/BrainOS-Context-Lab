@@ -152,7 +152,9 @@ def main(argv: list[str] | None = None) -> int:
         f"recall={metrics.get('retrieval_recall', 0.0):.3f} "
         f"evidence_in_prompt={metrics.get('evidence_in_prompt_rate', 0.0):.3f} "
         f"accuracy={metrics.get('answer_accuracy', 0.0):.3f} "
-        f"reduction={metrics.get('mean_context_reduction', 0.0):.3f}"
+        f"faithfulness={metrics.get('faithfulness', 0.0):.3f} "
+        f"reduction={metrics.get('mean_context_reduction', 0.0):.3f} "
+        f"qae={metrics.get('mean_quality_adjusted_efficiency', 0.0):.6f}"
     )
     for issue in run.dataset_issues:
         print(f"dataset issue: {issue}", file=sys.stderr)

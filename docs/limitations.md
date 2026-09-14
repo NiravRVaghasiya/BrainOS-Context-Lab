@@ -50,6 +50,15 @@ This project is an experimental evaluation platform, not a claim that BrainOS pr
 - The committed dataset is a smoke tier (7 tasks, one length, one seed). It
   validates plumbing; it cannot support a claim. Robustness curves need the
   `standard`/`research` tiers, multiple variants, and a model in the loop.
+  Phase 8 records this in the artifact: `degradation.area_under_degradation_curve`
+  is JSON `null` with an explicit note when only one length is present.
+- Faithfulness, Recall@K, evidence-in-prompt, and answer accuracy are four
+  different numbers. On the smoke run they disagree on multi-hop (recall 1.0,
+  evidence-in-prompt 0.0, scripted accuracy 1.0, faithfulness 0.0 for that
+  task). Collapsing them hides the failure the benchmark exists to expose.
+- Quality-adjusted efficiency is undefined as a cross-mode comparison while
+  answers are scripted. Latency is omitted until a generation path exists;
+  replay wall-clock is not a generation metric.
 - Measured benchmark numbers came from the dependency-free token estimator
   (`estimate_tokens`); runs using a different counter are not comparable, and
   `stats.token_counter` is what records which one produced a figure.

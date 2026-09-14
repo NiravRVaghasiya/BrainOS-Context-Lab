@@ -205,6 +205,11 @@ def test_live_a_scored_run_produces_aggregates_without_a_provider() -> None:
     # Retrieval ran without a key, and every record carries its scoring block.
     assert metrics["retrieval_recall"] > 0
     assert metrics["mean_context_reduction"] > 0
+    assert metrics["mean_token_savings"] > 0
+    assert "faithfulness" in metrics
+    assert "quality_per_token" in metrics
+    assert metrics["degradation"]["point_count"] == 1
+    assert metrics["degradation"]["area_under_degradation_curve"] is None
     for result in run.task_results:
         assert "scores" in result
         assert result["scores"]["answer"]["verdict"] in {"correct", "ungraded"}
