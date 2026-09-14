@@ -797,7 +797,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--manifest",
         type=Path,
-        default=Path("benchmarks/context_rot/MANIFEST.json"),
+        default=None,
+        help=(
+            "Where to write the run manifest. Defaults to MANIFEST.json beside "
+            "--output, so regenerating another tier (e.g. into "
+            "benchmarks/context_rot/generated/) cannot overwrite the committed "
+            "smoke-tier manifest."
+        ),
     )
     return parser
 
@@ -839,8 +845,11 @@ def main(argv: list[str] | None = None) -> int:
         variants=args.variants,
         seed=args.seed,
     )
-    args.manifest.parent.mkdir(parents=True, exist_ok=True)
-    args.manifest.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    # Default the manifest beside the dataset it describes: regenerating a
+    # non-default tier must not overwrite the committed smoke-tier manifest.
+    manifest_path = args.manifest or args.output.parent / "MANIFEST.json"
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
 
     print(
         f"{len(tasks)} tasks → {args.output} "

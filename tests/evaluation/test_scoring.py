@@ -417,6 +417,9 @@ def test_score_record_is_json_ready_and_carries_the_cost_numbers() -> None:
         "length_tier",
         "latency_ms",
         "token_counter",
+        # Phase 12: the Phase 3 retrieval audit travels with the score, because
+        # the error taxonomy needs the drop reasons, not only the drop counts.
+        "retrieval_audit",
     }
 
 

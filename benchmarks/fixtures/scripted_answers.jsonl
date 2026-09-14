@@ -1,0 +1,15 @@
+{"task_id": "cr-single-hop-800-00", "answer": "MongoDB 7"}
+{"task_id": "cr-multi-hop-800-00", "answer": "ca-central-1"}
+{"task_id": "cr-temporal-800-00", "answer": "SQLite 3"}
+{"task_id": "cr-conflict-800-00", "answer": "Monday at 17:00 UTC"}
+{"task_id": "cr-distractor-800-00", "answer": "Couchbase 7"}
+{"task_id": "cr-cross-session-800-00", "answer": "us-east-2"}
+{"task_id": "cr-abstention-800-00", "answer": "I don't know; that was not mentioned."}
+{"task_id": "cr-multi-hop-800-00", "mode": "brainos", "answer": "eu-west-1"}
+{"task_id": "cr-multi-hop-800-00", "mode": "brainos_no_memory", "answer": "eu-west-1"}
+{"task_id": "cr-multi-hop-800-00", "mode": "brainos_no_relevance", "answer": "ca-central-1"}
+{"task_id": "cr-temporal-800-00", "mode": "brainos_no_temporal", "answer": "Couchbase 7"}
+{"task_id": "cr-conflict-800-00", "mode": "brainos_no_conflict", "answer": "Wednesday at 09:30 UTC"}
+{"task_id": "cr-single-hop-800-00", "mode": "full_context", "answer": "PostgreSQL 16"}
+{"task_id": "cr-single-hop-800-00", "mode": "rag", "answer": "I don't know; that was not mentioned."}
+{"task_id": "cr-abstention-800-00", "mode": "brainos", "answer": "The legal counsel for Project Lumen is Priya Raman."}

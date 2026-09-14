@@ -27,6 +27,7 @@ from benchmarks.context_rot.generation import (
     dataset_sha256,
     generate_dataset,
     generate_task,
+    main,
 )
 from brain.memory_policy import MemoryPolicy, extract_candidates
 from evaluation.datasets import dataset_issues, load_jsonl
@@ -326,3 +327,30 @@ def test_unknown_category_is_rejected() -> None:
 def test_zero_length_is_rejected() -> None:
     with pytest.raises(ValueError, match="greater than zero"):
         generate_task(spec.CATEGORY_SINGLE_HOP, 0)
+
+
+def test_generating_another_tier_keeps_its_manifest_beside_its_dataset(
+    tmp_path: Path,
+) -> None:
+    """A non-default output must not overwrite the committed smoke manifest.
+
+    Phase 12 regenerated the quick tier into ``benchmarks/context_rot/generated/``
+    to exercise the length dimension of the error report. ``--manifest`` used to
+    default to the committed smoke-tier file, so that run silently replaced the
+    hash the smoke results are pinned to. The default is now derived from
+    ``--output``; regeneration of the committed dataset is byte-identical to
+    before, but any other output writes its own manifest.
+    """
+
+    committed_before = MANIFEST.read_bytes()
+    output = tmp_path / "generated" / "quick.jsonl"
+
+    assert main(["--tier", "quick", "--output", str(output), "--seed", "5"]) == 0
+
+    manifest_path = output.parent / "MANIFEST.json"
+    assert manifest_path.is_file()
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["tier"] == "quick"
+    assert manifest["lengths"] == list(spec.TIERS["quick"])
+    assert manifest["dataset_sha256"] == dataset_sha256(load_jsonl(output))
+    assert MANIFEST.read_bytes() == committed_before

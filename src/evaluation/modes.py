@@ -88,6 +88,11 @@ class ModeReplay:
     expected_answer_in_prompt: bool = False
     prompt_messages: tuple[dict[str, str], ...] = ()
     stats: dict[str, Any] = field(default_factory=dict)
+    #: Phase 12: the Phase 3 retrieval audit for the question's turn — drop
+    #: reasons for every memory the policy removed, plus the conflict
+    #: resolutions. ``stats`` says what the prompt cost; the audit says why the
+    #: evidence in it is what it is, which is what failure attribution needs.
+    retrieval_report: dict[str, Any] = field(default_factory=dict)
     #: Phase 9: the model's answer, present only when a generation path was
     #: supplied. ``None`` means "no model was called", not "the model said
     #: nothing" — an empty completion is a generation failure and scores as
@@ -144,6 +149,7 @@ class ModeReplay:
             "expected_answer_in_prompt": self.expected_answer_in_prompt,
             "prompt_messages": [dict(message) for message in self.prompt_messages],
             "stats": dict(self.stats),
+            "retrieval_report": dict(self.retrieval_report),
         }
 
 
@@ -251,6 +257,7 @@ def replay_task(
         expected_answer_in_prompt=bool(expected) and expected in prompt,
         prompt_messages=tuple(dict(message) for message in turn.context_messages),
         stats=stats,
+        retrieval_report=dict(turn.context_report),
         answer=generation.text if generation is not None else None,
         generation=generation.to_dict() if generation is not None else None,
     )

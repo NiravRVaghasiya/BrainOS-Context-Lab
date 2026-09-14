@@ -74,8 +74,14 @@ def compare_runs(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return comparison
 
 
-def _extract_mode_result_items(source: Any) -> list[dict[str, Any]]:
-    """Normalize various run structures into a uniform list of mode-trial dicts."""
+def extract_mode_result_items(source: Any) -> list[dict[str, Any]]:
+    """Normalize run structures into a uniform list of mode-trial dicts.
+
+    Public because Phase 12's error analysis consumes the same three shapes the
+    statistical analysis does — a live ``ExperimentRun``, an exported
+    experiment artifact, or a list of run files — and a second normalizer would
+    be a second place for the shapes to drift apart.
+    """
 
     if hasattr(source, "mode_results"):
         return [
@@ -145,7 +151,7 @@ def _extract_mode_result_items(source: Any) -> list[dict[str, Any]]:
 def summarize_trial_modes(runs_or_results: Any) -> dict[str, dict[str, Any]]:
     """Summarize metrics across trials for each baseline mode."""
 
-    items = _extract_mode_result_items(runs_or_results)
+    items = extract_mode_result_items(runs_or_results)
     if not items:
         return {}
 
@@ -250,7 +256,7 @@ def compare_modes_paired(
 ) -> list[dict[str, Any]]:
     """Perform paired task comparisons between mode A and mode B."""
 
-    items = _extract_mode_result_items(runs_or_results)
+    items = extract_mode_result_items(runs_or_results)
     items_a = [it for it in items if it["mode"] == mode_a]
     items_b = [it for it in items if it["mode"] == mode_b]
     if not items_a or not items_b:
@@ -345,7 +351,7 @@ def pairwise_comparisons(
 ) -> list[dict[str, Any]]:
     """Compute standard paired comparisons against a baseline and between key modes."""
 
-    items = _extract_mode_result_items(runs_or_results)
+    items = extract_mode_result_items(runs_or_results)
     available_modes = {it["mode"] for it in items if it["mode"]}
     if not available_modes:
         return []
@@ -389,7 +395,7 @@ def statistical_analysis(
 ) -> dict[str, Any]:
     """Build the comprehensive Phase 10 statistical analysis report."""
 
-    items = _extract_mode_result_items(experiment_or_runs)
+    items = extract_mode_result_items(experiment_or_runs)
     summaries = summarize_trial_modes(items)
     paired = pairwise_comparisons(items, baseline_mode=baseline_mode)
 
@@ -430,7 +436,7 @@ def statistical_plot_series(
 ) -> dict[str, list[dict[str, Any]]]:
     """Build the six plan-required plot series with trial statistics and error bars."""
 
-    items = _extract_mode_result_items(runs_or_results)
+    items = extract_mode_result_items(runs_or_results)
     if not items:
         return plot_series([])
 
@@ -664,6 +670,7 @@ __all__ = [
     "STATISTICAL_METRICS",
     "compare_modes_paired",
     "compare_runs",
+    "extract_mode_result_items",
     "headline_from_aggregate",
     "length_curve_rows",
     "pairwise_comparisons",
