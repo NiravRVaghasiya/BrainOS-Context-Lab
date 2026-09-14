@@ -4,8 +4,8 @@
 > repository state and decisions that should be preserved between phases.
 
 **Last updated:** 2026-09-14
-**Branch:** `arena/01a09f7a-brainos-context-lab`
-**Baseline:** `8fe2ec8` (`origin/main`, the PR #11 merge that includes Phase 10); this branch adds Phase 11 on top
+**Branch:** `arena/01a09f9e-brainos-context-lab`
+**Baseline:** `2536f54` (`origin/main`, the PR #12 merge that includes Phase 11); this branch adds Phase 12 on top
 **Implementation plan:** [`BrainOS_Context_Lab_Implementation_Plan.md`](BrainOS_Context_Lab_Implementation_Plan.md)
 
 ## Product boundary
@@ -31,8 +31,9 @@ layer that helps select historical context.
 | Phase 8 — Metrics | Complete (landed via PR #9) | The plan's quality / efficiency / robustness suite on top of the Phase 7 scorer: faithfulness (grounding, not accuracy), conflict-resolution accuracy, token savings, quality-adjusted efficiency, optional latency, `by_length` curves, and a degradation/AUC block that is `null` on a single length rather than a silent 0. Plot-ready series for the six planned figures; matplotlib stays optional. 503 tests; live-validated on the pinned runtime. |
 | Phase 9 — Controlled experiments | Complete (landed via PR #10) | `python -m evaluation.experiment` runs the same tasks, model, sampling parameters, and scoring through all five modes with the credential read from an environment variable; `check_constants` verifies the plan's "only the strategy changes" rule after the run (fingerprint, system prompt, task wording, mode set, provider-reported model, token counter) and fails the run instead of reporting an uncontrolled comparison. Generation path (`generation.py`) plus the cost controls a run cannot exist without: `RunLimits` / `RunBudget` / `BudgetExceeded` with the `quick` / `standard` / `research` presets, per-request prompt ceilings, recorded skips, and per-request timeouts. `--generate` on the single-mode CLI. 586 tests; live-validated on the pinned runtime plus a localhost HTTP transport check. |
 | Phase 10 — Statistical evaluation | Complete (landed via PR #11) | Trial-level mean, SD, and 95% CI across repeated trials ($T \ge 1$); exact Student's t critical values ($df \in [1, 30]$) and Cornish-Fisher expansion ($df > 30$); exact regularized incomplete beta p-values (`student_t_p_value`); paired difference tests across benchmark tasks (`paired_difference_test`); Cohen's d (paired $d_z$ and independent pooled) and Hedges' g bias-corrected effect sizes; sign test win/loss/tie binomial analysis; `statistical_report` JSON report; rendering all 6 planned figures with trial error bars / CIs; CLI enhancements (`--stats`, `--plots-dir`, `--baseline-mode`). 598 tests. |
-| **Phase 11 — Ablation study** | **Complete in this turn** | Mode D with one component removed: D1 no temporal (`weight_recency=0` + signal strip), D2 no relevance (`relevance_floor=0`, `relative_relevance_ratio=0`), D3 no conflict (resolution/staleness off + runtime reports ignored + lifecycle neutralized), D4 no memory (D window, zero injection). Working memory and consolidation excluded with documented pinned-revision reasons. Ablations resolve as modes, run via `--modes ablations`, and pair against `brainos` (`--baseline-mode`). 632 tests. |
-| Phases 12–20 | Pending | Error analysis, security hardening, deployment, cost controls, reproducibility, evaluation pipeline, tests, MVP, release. |
+| Phase 11 — Ablation study | Complete (landed via PR #12) | Mode D with one component removed: D1 no temporal (`weight_recency=0` + signal strip), D2 no relevance (`relevance_floor=0`, `relative_relevance_ratio=0`), D3 no conflict (resolution/staleness off + runtime reports ignored + lifecycle neutralized), D4 no memory (D window, zero injection). Working memory and consolidation excluded with documented pinned-revision reasons. Ablations resolve as modes, run via `--modes ablations`, and pair against `brainos` (`--baseline-mode`). 632 tests. |
+| **Phase 12 — Error analysis** | **Complete in this turn** | The plan's nine-label failure taxonomy with stage attribution: builds on `score_record` + the Phase 3 drop-reason audit (never a second scorer), emits one JSON failure record per defect (`task_id`, `mode`, `conversation_length`, `expected_memory`, `retrieved_memories`, `answer`, `failure_type` + verdict/retrieval/prompt/grounding contexts), and aggregates by mode (baselines *and* ablations), category, and length. `python -m evaluation.errors` over dry-run, three-tier, and scripted-answer runs; `labels_vs_scorer.unexpected=0`. 696 tests. |
+| Phases 13–20 | Pending | Security hardening, deployment, cost controls, reproducibility, evaluation pipeline, tests, MVP, release. |
 
 Detailed logs are available in
 [`docs/phase-0-research-baseline.md`](docs/phase-0-research-baseline.md),
@@ -46,9 +47,176 @@ Detailed logs are available in
 [`docs/phase-8-metrics.md`](docs/phase-8-metrics.md),
 [`docs/phase-9-controlled-experiments.md`](docs/phase-9-controlled-experiments.md),
 [`docs/phase-10-statistical-evaluation.md`](docs/phase-10-statistical-evaluation.md), and
-[`docs/phase-11-ablation-study.md`](docs/phase-11-ablation-study.md).
+[`docs/phase-11-ablation-study.md`](docs/phase-11-ablation-study.md), and
+[`docs/phase-12-error-analysis.md`](docs/phase-12-error-analysis.md).
 
-## What was done in Phase 11 (this turn)
+## What was done in Phase 12 (this turn)
+
+Phase 12 answers the plan's "why does it fail?" by turning every defective record
+the harness already produces into a structured failure with a label, a pipeline
+stage, and the evidence for both — then aggregating those failures by mode,
+category, and length so the distribution, not just the count, is visible.
+
+### New / changed modules
+
+| File | Purpose |
+| --- | --- |
+| [`src/evaluation/errors.py`](src/evaluation/errors.py) (new) | The taxonomy (nine labels, stage ownership, `ATTRIBUTION_ORDER`), the drop-reason → label table published in `docs/evaluation.md`, `classify_failure` / `failure_record`, `collect_failures`, `mode_result_items` (run files, experiment artifacts, live runs), `error_report` (per-mode/category/length distributions, concentration, `labels_vs_scorer`), `write_failure_records` (JSONL), and the `python -m evaluation.errors` CLI. |
+| [`src/evaluation/scoring.py`](src/evaluation/scoring.py) | `RetrievalScore` gains `supporting_fact_ids` / `prompt_fact_ids` / `prompt_forbidden_fact_ids` and the derived `absent_from_prompt_fact_ids` / `lost_after_selection_fact_ids` / `unneeded_prompt_fact_ids`; `score_record` passes the Phase 3 audit through as `retrieval_audit` (`reason_counts`, per-drop reason/detail/score/text). No verdict and no metric changed. |
+| [`src/evaluation/modes.py`](src/evaluation/modes.py) | `ModeReplay.retrieval_report` carries the question turn's drop reasons and conflict resolutions, so a replay explains its own prompt. |
+| [`src/evaluation/analysis.py`](src/evaluation/analysis.py) | `extract_mode_result_items` is public — Phase 12 normalizes live runs, exported experiments, and run files through the same function the statistics use. |
+| [`benchmarks/context_rot/generation.py`](benchmarks/context_rot/generation.py) | `--manifest` defaults beside `--output` instead of the committed smoke manifest, so regenerating another tier cannot overwrite the hash results are pinned to (see bug 4). |
+| [`benchmarks/fixtures/scripted_answers.jsonl`](benchmarks/fixtures/scripted_answers.jsonl) (new) | 15 deliberately imperfect answers (correct-by-contract, plus a multi-hop guess, superseded values on the temporal/conflict ablations, an asserted fact on the isolated replay, and a decline with the evidence present) so every label is reachable without a provider key. |
+| Tests | `tests/evaluation/test_error_taxonomy.py` (47), `tests/integration/test_error_analysis_live.py` (12, pinned runtime), `tests/security/test_error_records.py` (4), plus the manifest-default regression. **632 → 696 tests**; `ruff check .` clean. |
+
+### The error taxonomy (what later phases build on)
+
+```text
+label                stage       fires when
+missed_memory        recall      required fact never selected, in a mode that has a retriever or window
+irrelevant_memory    selection   required fact selected, then dropped low_relevance / weak_relevance
+over_compression     selection   required fact selected, then dropped by cap or a token budget
+                                 (or absent from a prompt that replays the whole transcript)
+under_compression    prompt      prompt carried a fact the contract forbids (superseded / distractor)
+conflicting_memory   generation  stale_answer on a conflict task (an explicit correction not applied)
+stale_memory         generation  stale_answer anywhere else (the temporal category)
+hallucination        generation  a value asserted where abstention was expected, or over a clean prompt
+wrong_memory         generation  wrong answer, all required facts present, plus evidence the task rejects
+wrong_abstention     generation  declined although every required fact was in the prompt
+```
+
+Rules:
+
+- Primary label = the earliest stage that can explain the failure
+  (`ATTRIBUTION_ORDER`); everything else detected stays on the record as
+  `contributors` and is counted in the aggregate. **`over_compression` is a
+  contributor on every record whose prompt lost required evidence** — the
+  primary says why it was lost, the contributor says that it was, which is the
+  Phase 11 D2 distinction kept as data. The invariant is asserted live:
+  `absent_from_prompt_fact_ids` is non-empty **iff** `over_compression` is among
+  the labels.
+- **`under_compression` means harmful retention only** (a forbidden value in the
+  prompt, whatever the verdict). A prompt that merely kept *unneeded* ledger
+  facts is reported as a field, not a failure — on a failing answer the excess
+  cannot be separated from the model's own error.
+- Drop reasons map through the documented table; unknown reasons map to no
+  label, and `duplicate` / `empty` are noise removal, never failures.
+- Correct answers over defective prompts are `latent` records, not successes —
+  the D4 "six correct guesses" case Phase 11 measured.
+- **No re-grading**: the taxonomy reproduces the scorer's `stale_answer` split,
+  `wrong_abstention`, and the answer-side consequences of `incorrect`, and
+  refines only `missed_memory → irrelevant_memory` and
+  `hallucination → wrong_memory`. `labels_vs_scorer.unexpected` must stay 0 and
+  is printed on every run.
+
+### Measured behaviour (live pinned BrainOS, committed smoke dataset, no provider key)
+
+```bash
+# retrieval side: dry run, no answers graded (all five baselines + four ablations)
+PYTHONPATH=src .venv/bin/python -m evaluation.experiment --preset quick   --modes all --dry-run --output results/phase12-dry-all.json
+PYTHONPATH=src .venv/bin/python -m evaluation.experiment --preset quick   --modes ablations --dry-run --baseline-mode brainos   --output results/phase12-dry-ablations.json
+PYTHONPATH=src .venv/bin/python -m evaluation.errors   results/phase12-dry-all.json results/phase12-dry-ablations.json
+
+# answer side: the committed scripted-answer fixture, one run per mode
+for mode in full_context sliding_window rag brainos brainos_rag             brainos_no_temporal brainos_no_relevance brainos_no_conflict             brainos_no_memory; do
+  PYTHONPATH=src .venv/bin/python -m evaluation.run --mode "$mode"     --answers benchmarks/fixtures/scripted_answers.jsonl     --output "results/phase12/run-$mode.json"
+done
+PYTHONPATH=src .venv/bin/python -m evaluation.run --mode brainos --session-isolation   --answers benchmarks/fixtures/scripted_answers.jsonl   --output results/phase12/run-brainos-isolated.json
+PYTHONPATH=src .venv/bin/python -m evaluation.errors results/phase12/*.json   --output results/report/phase12-graded-report.json   --records results/raw/phase12-graded-records.jsonl
+```
+
+```text
+dry run          scored=70 graded=0 defects=32 latent=32 (baselines + ablations)
+  primary        under_compression 16, missed_memory 12, irrelevant_memory 4
+  contributors   over_compression 16 — one per record whose prompt lost required evidence
+  brainos             under_compression=4, irrelevant_memory=2 (evidence_lost 2/6)
+  brainos_no_relevance under_compression=2, evidence_lost 0 — the multi-hop
+                      filter loss is gone (D2 repair, now visible as an error)
+  brainos_no_memory / sliding_window   missed_memory=6 each (nothing selected)
+  brainos_no_temporal / brainos_no_conflict  under_compression=2 + irrelevant_memory=1
+  rag / brainos_rag / full_context     under_compression only (forbidden value kept)
+
+scripted answers scored=70 graded=70 defects=37 observed=10 latent=27
+  primary        missed_memory 12, under_compression 14, irrelevant_memory 4,
+                 hallucination 3, conflicting_memory 1, stale_memory 1,
+                 wrong_abstention 1, wrong_memory 1
+  contributors   over_compression 17, under_compression 2, missed_memory 1
+  stages         prompt 14, recall 12, generation 7, selection 4
+  labels/scorer  agree=7 refined=3 unexpected=0
+
+three tiers      scored=140 defects=64: over_compression first appears as a
+                 *primary* label at 4 000 tokens, and only for Mode A — the one
+                 mode with no retriever to blame when the transcript stops fitting
+```
+
+The eight observed failures land on the intended label: the multi-hop guess
+under `brainos` (`irrelevant_memory` + `over_compression`, `fact-2` dropped
+`low_relevance` 0.1167 < floor 0.1200), the same question under D4
+(`missed_memory`, nothing selected), the superseded value under D1
+(`stale_memory`), the corrected value under D3 (`conflicting_memory`), the
+asserted fact on the session-isolated replay (`hallucination`), the asserted
+value on the abstention task (`hallucination`), the decline with evidence present
+(`wrong_abstention`), and Mode A's wrong value over an unneeded-fact prompt
+(`wrong_memory`).
+
+**Integration-validation observations, not research results** (one seed, one
+variant, no model in the loop — Phase 8's constraint still holds).
+
+### Bugs found and fixed while building it
+
+1. **Every ungraded dry-run record was labelled `under_compression`** (all 30).
+   The first rule counted *unneeded* retention, which is true of every
+   long-context prompt; that is a property of the benchmark, not the answer. The
+   label now requires harmful retention, and unneeded retention is a field.
+2. **The wasteful-retention note vanished for `wrong_memory` records** because
+   the two notes were an `elif` chain; the conditions are independent now.
+3. **The taxonomy contradicted the scorer twice** — a temporal `stale_answer`
+   was labelled `conflicting_memory`, and a wrong value over a clean prompt was
+   labelled `wrong_memory`. Both fixed in the taxonomy; `labels_vs_scorer` now
+   exists to catch that class of drift.
+4. **Regenerating the quick tier overwrote the committed benchmark manifest.**
+   `--manifest` defaulted to `benchmarks/context_rot/MANIFEST.json`, so writing
+   `generated/phase12-quick.jsonl` silently replaced the `dataset_sha256` the
+   smoke results are pinned to. The default now derives from `--output`.
+5. **A path argument to the library read as "no failures"**: a bare
+   `str`/`Path` normalized to nothing, so `collect_failures("results/run.json")`
+   returned an empty report indistinguishable from a clean run. The normalizer
+   now refuses paths and says to load the JSON first.
+6. **A single-mode run file nested its scores** under `task_results[*]["scores"]`
+   while experiment artifacts put them at the top level, so the first CLI run
+   reported `scored=0`. `mode_result_items` handles both shapes.
+
+### Findings this phase produced (carry into Phase 13+)
+
+1. **The four missing labels were missing for a reason** — every one needed data
+   the application had and discarded (the per-fact prompt/selection split, the
+   drop-reason audit). Exposing them changed no verdict and no metric.
+2. **The relevance filter is now measurable as an error distribution**: `brainos`
+   loses required evidence on one answerable smoke task, D2 loses none. Counting
+   `evidence_in_prompt` alone hid *which* task and *which* hop.
+3. **Full context fails its own way** — never blamed on a retriever (there is
+   none): `under_compression` (keeps the superseded value) and, at 4 000 tokens,
+   `over_compression` (transcript stops fitting).
+4. **Scripted answers cannot support a claim about the model.** They prove each
+   label is reachable and correctly owned; only real generations (Phase 9's
+   `--generate`) can say whether a model fails where the fixture pretends it
+   does. Phase 17 must run this report over generated answers and compare
+   distributions, not accuracies.
+
+### Constraints carried into later phases
+
+1. **Do not re-grade.** If a new label is needed, record more — keep
+   `labels_vs_scorer.unexpected` at 0.
+2. **Keep the compression labels distinct**: `over_compression` is volume,
+   `under_compression` is harmful retention; wasteful retention stays a field.
+3. **Keep the audit with the replay** (`ModeReplay.retrieval_report`), or the
+   taxonomy degrades to reason-group attribution.
+4. **Never put credentials in these artifacts** — `tests/security/test_error_records.py`
+   pins key-free reports/records and path+digest provenance.
+5. **The smoke tier still cannot support a claim**, and neither can scripted
+   answers; they validate the implementation, not the system's behaviour.
+
+## What was done in Phase 11 (PR #12, previous turn)
 
 Phase 11 answers the plan's "which components are responsible?" by running
 Mode D with exactly one component removed at a time — through the same
@@ -1140,20 +1308,38 @@ PYTHONPATH=src .venv/bin/python -m evaluation.compare results/phase11-dry.json \
   --stats --baseline-mode brainos --output results/phase11-stat-report.json
 PYTHONPATH=src .venv/bin/python -m evaluation.run --mode brainos_no_relevance \
   --output results/run.json
+
+# Phase 12: classify failures and aggregate them by mode, category, length.
+# Positional args are run files and/or experiment artifacts; --dataset enriches
+# records with the fact ledger, --records writes the plan's failure-record JSONL.
+PYTHONPATH=src .venv/bin/python -m evaluation.errors results/phase11-dry.json \
+  --output results/report/error-report.json \
+  --records results/raw/error-records.jsonl --examples 1
+
+# Answer side without a key: the committed Phase 12 scripted-answer fixture.
+PYTHONPATH=src .venv/bin/python -m evaluation.run --mode brainos \
+  --answers benchmarks/fixtures/scripted_answers.jsonl \
+  --output results/phase12/run-brainos.json
+PYTHONPATH=src .venv/bin/python -m evaluation.errors results/phase12/run-brainos.json
+
+# The length dimension: a generated second tier (writes its own manifest).
+PYTHONPATH=src .venv/bin/python benchmarks/context_rot/generation.py --tier quick \
+  --variants 1 --output benchmarks/context_rot/generated/phase12-quick.jsonl
 ```
 
 Test count went 154 → 216 (Phase 4) → 249 (Phase 5) → 379 (Phase 6) → 494
-(Phase 8) → 586 (Phase 9) → 598 (Phase 10) → **632** in this phase (+34: 19
-ablation registry/settings, 8 ablation replay/experiment/CLI, 7 live
-ablation). (+12 in Phase 10: 4 metrics, 5 analysis/plots, 2 experiment, 1
+(Phase 8) → 586 (Phase 9) → 598 (Phase 10) → 632 (Phase 11) → **696** in this
+phase (+64: 47 taxonomy/attribution, 12 live error analysis, 4
+credential-redaction, 1 generator-manifest regression). (+12 in Phase 10: 4 metrics, 5 analysis/plots, 2 experiment, 1
 live statistical integration.)
 The live tests in `tests/integration/test_chat_controller_live.py`,
 `tests/integration/test_persistence_live.py`,
 `tests/integration/test_context_pipeline.py`,
 `tests/integration/test_baseline_modes_live.py`,
 `tests/integration/test_brainos_runtime.py`,
-`tests/integration/test_controlled_experiment_live.py`, and
-`tests/integration/test_ablation_live.py` run against the pinned
+`tests/integration/test_controlled_experiment_live.py`,
+`tests/integration/test_ablation_live.py`, and
+`tests/integration/test_error_analysis_live.py` run against the pinned
 BrainOS revision and skip when `brainos_runtime` is not installed;
 `tests/integration/test_provider_http_live.py` needs the `openai` SDK and talks
 only to a stub on `127.0.0.1`; `tests/ui/` skips when Gradio is absent. No
@@ -1165,30 +1351,25 @@ and the localhost stub.
 
 ## Next safe step
 
-Implement **Phase 12 — Error analysis** (plan §18): turn the scored records
-the harness already produces into a structured failure taxonomy —
-`missed_memory`, `wrong_memory`, `stale_memory`, `conflicting_memory`,
-`irrelevant_memory`, `hallucination`, `over_compression`,
-`under_compression`, `wrong_abstention` — with one JSON record per failure
-carrying task id, mode, conversation length, expected vs. retrieved memories,
-answer, and failure type.
+Phase 12 is complete and validated (696 tests, `ruff check .` clean). The
+suggested next phase is **Phase 13 — Security hardening** (plan §19): prompt
+injection hardening beyond the Phase 3 guard, secret redaction across every
+artifact and log path, a documented threat model tied to tests, and the
+`suspicious` drop reason — currently the one audit reason that maps to no
+taxonomy label because it is a security finding, not an answer failure.
 
-Carry these constraints into Phase 12:
-1. **Build on the existing seams, not a second scorer**: `score_record`
-   already emits verdicts and the Phase 12 error labels, and
-   `RetrievalReport.dropped` already carries audit reasons with a documented
-   reason → taxonomy mapping. Phase 12 aggregates and reports; it must not
-   re-grade.
-2. **Separate `over_compression` from `missed_memory`.** Phase 11 proved they
-   have different owners: the relevance filter dropping needed evidence
-   (multi-hop, repaired by D2) vs. evidence never recalled at all. The
-   taxonomy must keep them distinct so each maps to its fix.
-3. **Keep the metric split load-bearing.** Accuracy, Recall@K,
-   evidence-in-prompt, and faithfulness are four different numbers; an error
-   record must carry all four contexts (verdict, retrieval, prompt evidence,
-   grounding) so a failure can be attributed to the right stage.
-4. **Aggregate by mode, category, and length.** The report must show *where*
-   each failure type concentrates (e.g. stale/conflicting on temporal and
-   conflict categories, over-compression on multi-hop) across baselines *and*
-   ablations — D2's extra selections and D4's empty prompts are error
-   distributions of their own.
+Carry these constraints into Phase 13:
+1. **The `suspicious` reason is already routed, not forgotten.** Phase 12
+   deliberately maps it to no label (`DROP_REASON_LABELS`); the injection guard's
+   quarantines should surface as security findings, so Phase 13 must decide where
+   they are reported rather than adding a tenth error label.
+2. **Keep all artifacts credential-free.** `tests/security/test_error_records.py`
+   pins the errors pipeline; the same property should be asserted for any new
+   Phase 13 surface (logs, traces, UI panels, exports).
+3. **Do not weaken the taxonomy to make a security point.** `labels_vs_scorer.unexpected`
+   must stay 0 after any Phase 13 change; if a security change alters a label,
+   that is a taxonomy change and needs its own tests and a Phase 12 doc update.
+4. **Prove it live, not only with fakes.** The existing live suites
+   (pinned `brainos_runtime`, no provider key) are the pattern to extend: a
+   redaction or injection claim in the doc should have a test that drives the
+   real path and asserts the secret/attack marker is absent.

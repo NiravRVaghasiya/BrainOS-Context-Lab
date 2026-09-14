@@ -37,6 +37,23 @@ ungraded          no answer was supplied
 Every scored record also carries an ``error_type`` drawn from the plan's Phase 12
 taxonomy when the verdict is not ``correct``, so error analysis starts from the
 same record the aggregate metrics do.
+
+Phase 12 exposed two things this module already computed but did not report, so
+that :mod:`evaluation.errors` can attribute a failure to the *stage* it happened
+at without re-deriving anything:
+
+* :class:`RetrievalScore` now carries ``supporting_fact_ids``,
+  ``prompt_fact_ids``, and ``prompt_forbidden_fact_ids`` — the per-fact view of
+  what was selected versus what reached the prompt. ``evidence_in_prompt`` says
+  *that* evidence was lost; the per-fact sets say *which* fact was lost where
+  (never retrieved, retrieved then dropped, retrieved then invisible).
+* :func:`score_record` passes the Phase 3 ``RetrievalReport`` audit through as
+  ``retrieval_audit`` (drop reasons and conflicts), because the documented
+  reason → taxonomy mapping is what decides between ``over_compression``,
+  ``irrelevant_memory``, and ``missed_memory``.
+
+Neither addition changes a verdict or a metric. They only carry the evidence an
+error record needs.
 """
 
 from __future__ import annotations
@@ -245,20 +262,71 @@ def expects_abstention(task: BenchmarkTask, *, session_isolation: bool = False) 
 
 @dataclass(frozen=True)
 class RetrievalScore:
-    """What a mode's retrieval put in front of the model for one task."""
+    """What a mode's retrieval put in front of the model for one task.
+
+    The fact-id fields are the ledger view of one replay, kept separate on
+    purpose:
+
+    ```text
+    required_fact_ids      facts the task needs to be answerable
+    supporting_fact_ids    facts the ledger allows as help but does not require
+    retrieved_fact_ids     required/supporting facts the mode's evidence carried
+    prompt_fact_ids        ledger facts visible anywhere in the final prompt
+    missing_fact_ids       required facts the mode never selected (recall failure)
+    forbidden_retrieved    facts the ledger forbids that the mode selected anyway
+    prompt_forbidden_fact_ids
+                           forbidden facts that reached the final prompt
+    ```
+
+    A fact in ``retrieved_fact_ids`` but not in ``prompt_fact_ids`` was selected
+    for the prompt and lost inside context construction; a fact in neither was
+    never selected. Phase 12 reads exactly that difference.
+    """
 
     task_id: str
     category: str
     mode: str = ""
     required_fact_ids: tuple[str, ...] = ()
+    supporting_fact_ids: tuple[str, ...] = ()
     retrieved_fact_ids: tuple[str, ...] = ()
     missing_fact_ids: tuple[str, ...] = ()
     forbidden_retrieved: tuple[str, ...] = ()
+    prompt_fact_ids: tuple[str, ...] = ()
+    prompt_forbidden_fact_ids: tuple[str, ...] = ()
     recall: float = 0.0
     precision: float = 0.0
     evidence_in_prompt: bool = False
     expected_answer_in_prompt: bool = False
     prompt_contains_forbidden: bool = False
+
+    @property
+    def lost_after_selection_fact_ids(self) -> tuple[str, ...]:
+        """Required facts the mode selected and the prompt did not carry."""
+
+        return tuple(
+            fact_id
+            for fact_id in self.required_fact_ids
+            if fact_id in set(self.retrieved_fact_ids)
+            and fact_id not in set(self.prompt_fact_ids)
+        )
+
+    @property
+    def absent_from_prompt_fact_ids(self) -> tuple[str, ...]:
+        """Required facts the final prompt does not carry, however they were lost."""
+
+        visible = set(self.prompt_fact_ids)
+        return tuple(fact_id for fact_id in self.required_fact_ids if fact_id not in visible)
+
+    @property
+    def unneeded_prompt_fact_ids(self) -> tuple[str, ...]:
+        """Ledger facts in the prompt that the task neither requires nor supports.
+
+        ``forbidden`` facts are included: they are the most explicit form of
+        evidence a task must not be answered from.
+        """
+
+        wanted = set(self.required_fact_ids) | set(self.supporting_fact_ids)
+        return tuple(fact_id for fact_id in self.prompt_fact_ids if fact_id not in wanted)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -266,9 +334,15 @@ class RetrievalScore:
             "category": self.category,
             "mode": self.mode,
             "required_fact_ids": list(self.required_fact_ids),
+            "supporting_fact_ids": list(self.supporting_fact_ids),
             "retrieved_fact_ids": list(self.retrieved_fact_ids),
             "missing_fact_ids": list(self.missing_fact_ids),
             "forbidden_retrieved": list(self.forbidden_retrieved),
+            "prompt_fact_ids": list(self.prompt_fact_ids),
+            "prompt_forbidden_fact_ids": list(self.prompt_forbidden_fact_ids),
+            "absent_from_prompt_fact_ids": list(self.absent_from_prompt_fact_ids),
+            "lost_after_selection_fact_ids": list(self.lost_after_selection_fact_ids),
+            "unneeded_prompt_fact_ids": list(self.unneeded_prompt_fact_ids),
             "recall": round(self.recall, 6),
             "precision": round(self.precision, 6),
             "evidence_in_prompt": self.evidence_in_prompt,
@@ -329,11 +403,16 @@ def score_retrieval(
     every required fact's markers are present there. The two differ by design —
     Mode A retrieves nothing and still puts every fact in the prompt, and a
     retriever can select the right evidence and have the budget evict it.
+
+    The per-fact sets (``prompt_fact_ids``, ``prompt_forbidden_fact_ids``,
+    ``supporting_fact_ids``) are what let Phase 12 say *which* fact was lost at
+    *which* stage, instead of only that the prompt was incomplete.
     """
 
     planted = task.planted_facts()
     retrieved = detect_facts_in_texts(retrieved_texts, planted)
     required = tuple(task.evidence.required)
+    supporting = tuple(task.evidence.supporting)
     forbidden = tuple(task.evidence.forbidden)
     prompt_items = [str(message.get("content", "")) for message in prompt_messages]
     in_prompt = detect_facts_in_texts(prompt_items, planted)
@@ -347,11 +426,14 @@ def score_retrieval(
         category=task.category,
         mode=mode,
         required_fact_ids=required,
+        supporting_fact_ids=supporting,
         retrieved_fact_ids=tuple(sorted(retrieved)),
         missing_fact_ids=tuple(fact_id for fact_id in required if fact_id not in retrieved),
         forbidden_retrieved=tuple(sorted(set(forbidden) & retrieved)),
+        prompt_fact_ids=tuple(sorted(in_prompt)),
+        prompt_forbidden_fact_ids=tuple(sorted(prompt_forbidden)),
         recall=recall_at_k(retrieved, required),
-        precision=precision_at_k(retrieved, (*required, *task.evidence.supporting)),
+        precision=precision_at_k(retrieved, (*required, *supporting)),
         evidence_in_prompt=bool(required) and len(prompt_required) == len(required),
         expected_answer_in_prompt=bool(accepted)
         and any(
@@ -514,6 +596,12 @@ def score_record(
       ``missed_memory`` rather than ``hallucination``: the model was never given
       the fact, so the failure belongs to context construction. That split is the
       reason the retrieval half is scored separately at all.
+
+    The record also carries ``retrieval_audit`` when the replay supplied the
+    Phase 3 :class:`~brain.retrieval_policy.RetrievalReport`. Phase 12 needs the
+    audit because the *reason* a memory was dropped — relevance floor, item cap,
+    token budget, supersession — is what separates the taxonomy's
+    ``irrelevant_memory`` from ``over_compression``.
     """
 
     retrieved_texts = [
@@ -589,6 +677,57 @@ def score_record(
         "length_tier": length_tier,
         "latency_ms": latency,
         "token_counter": str(stats.get("token_counter") or record.get("token_counter") or ""),
+        "retrieval_audit": retrieval_audit(record),
+    }
+
+
+def retrieval_audit(record: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the Phase 3 retrieval audit carried by a replay record.
+
+    The retrieval report is where the *reasons* live: which memories the policy
+    dropped and why (``low_relevance``, ``cap``, ``memory_budget``,
+    ``superseded``, …), and which contradictions it resolved. Phase 12's
+    taxonomy reads the reasons; keeping the mapping there rather than here means
+    a change to the taxonomy does not change what a run recorded.
+
+    Older records have no report, so the block degrades to empty counts rather
+    than raising: an artifact written before Phase 12 still scores, it just
+    cannot be attributed past the fact-level evidence.
+    """
+
+    report = record.get("retrieval_report")
+    if not isinstance(report, Mapping):
+        return {
+            "available": False,
+            "candidate_count": 0,
+            "selected_count": 0,
+            "reason_counts": {},
+            "conflicts": [],
+            "dropped": [],
+        }
+    dropped = [
+        {
+            "memory_id": str(item.get("memory_id", "")),
+            "reason": str(item.get("reason", "")),
+            "detail": str(item.get("detail", "")),
+            "score": float(item.get("score", 0.0) or 0.0),
+            "text": str(item.get("text", "")),
+        }
+        for item in report.get("dropped") or ()
+        if isinstance(item, Mapping)
+    ]
+    reason_counts: dict[str, int] = {}
+    for item in dropped:
+        reason_counts[item["reason"]] = reason_counts.get(item["reason"], 0) + 1
+    return {
+        "available": True,
+        "candidate_count": int(report.get("candidate_count", 0) or 0),
+        "selected_count": int(report.get("selected_count", 0) or 0),
+        "reason_counts": dict(sorted(reason_counts.items())),
+        "conflicts": [
+            dict(item) for item in report.get("conflicts") or () if isinstance(item, Mapping)
+        ],
+        "dropped": dropped,
     }
 
 
@@ -952,6 +1091,7 @@ __all__ = [
     "is_conflict_task",
     "latest_session_index",
     "normalize_answer",
+    "retrieval_audit",
     "score_answer",
     "score_faithfulness",
     "score_record",

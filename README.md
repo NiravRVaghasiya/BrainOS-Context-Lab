@@ -8,7 +8,7 @@ This repository integrates BrainOS as an upstream dependency. It does **not** mo
 
 ## Current status
 
-Phases 1–11 are complete and validated against the pinned BrainOS runtime. The
+Phases 1–12 are complete and validated against the pinned BrainOS runtime. The
 app persists conversations and memory mirrors to SQLite with hard session
 isolation, offers the full data-control set (clear conversation, clear memory,
 export session, end/delete session), can run the same conversation through all
@@ -17,8 +17,8 @@ context-rot benchmark with scoring, reports the plan's quality / efficiency /
 robustness metric suite (including faithfulness and a degradation curve that
 stays unset until more than one length is present), runs controlled
 multi-mode experiments with cost budgets, summarizes trials with paired
-statistics and effect sizes, and ablates the BrainOS pipeline one component
-at a time.
+statistics and effect sizes, ablates the BrainOS pipeline one component at a
+time, and turns the scored records into a structured failure taxonomy.
 
 - **Phase 1** maps the provider abstraction (OpenAI and OpenAI-compatible)
   behind `LLMProvider`, with secret-safe errors and diagnostics.
@@ -67,16 +67,25 @@ at a time.
   ablation against the full system. Working memory and consolidation are
   excluded with documented pinned-revision reasons rather than run as null
   ablations.
+- **Phase 12** classifies every defective record with the plan's nine-label
+  taxonomy (`missed_memory`, `irrelevant_memory`, `over_compression`,
+  `under_compression`, `conflicting_memory`, `stale_memory`, `hallucination`,
+  `wrong_memory`, `wrong_abstention`), each attributed to a pipeline stage, and
+  emits the plan's per-failure JSON records plus a report that aggregates them
+  by mode (baselines *and* ablations), category, and length. Failure attribution
+  builds on the existing scorer and the Phase 3 drop-reason audit — it never
+  re-grades — and `labels_vs_scorer.unexpected` is printed on every run and must
+  stay zero.
 
 A session-scoped `ConversationService` combines the adapter, the retrieval
 policy, the context builder, and the provider factory. Deterministic fakes cover
 the whole pipeline without BrainOS installed; optional live tests exercise the
-pinned runtime. 632 tests pass and `ruff check .` is clean repository-wide.
+pinned runtime. 696 tests pass and `ruff check .` is clean repository-wide.
 
 Chat is usable without an API key: BrainOS still observes and retrieves memory,
 and the panels show exactly what the model *would* have been sent. See
 [`CONTEXT.md`](CONTEXT.md) for the living implementation state and the Phase
-0–11 logs in `docs/`.
+0–12 logs in `docs/`.
 
 ### Measured behaviour so far
 
@@ -168,10 +177,11 @@ src/
                                #   builder, memory policy, tokenizers, traces
   providers/                   # LLM provider interfaces and adapters
   storage/                     # Conversation and evaluation persistence
-  evaluation/                  # Benchmark runners, mode strategies, metrics, reports
+  evaluation/                  # Benchmark runners, mode strategies, metrics,
+                               #   reports, and the Phase 12 error taxonomy
 benchmarks/
   context_rot/                 # Phase 7 generator, spec, scored dataset, manifest
-  fixtures/                    # Small deterministic test fixtures
+  fixtures/                    # Deterministic fixtures (Phase 12 scripted answers)
 docs/                          # Architecture, integration, evaluation, and security notes
 tests/                         # Unit, integration, security, and evaluation tests
 results/                       # Generated results (not committed by default)
@@ -260,6 +270,18 @@ python -m evaluation.experiment --preset quick --modes ablations --dry-run \
   --baseline-mode brainos --output results/phase11-dry.json
 python -m evaluation.compare results/phase11-dry.json --stats \
   --baseline-mode brainos --output results/phase11-stat-report.json
+
+# Phase 12: classify failures and aggregate them by mode, category, and length.
+# Accepts run files and experiment artifacts; --dataset enriches the records
+# with the fact ledger, --records writes the plan's per-failure JSON Lines.
+python -m evaluation.errors results/phase11-dry.json \
+  --output results/report/error-report.json \
+  --records results/raw/error-records.jsonl
+
+# Phase 12 answer side without a key: the committed scripted-answer fixture
+python -m evaluation.run --mode brainos \
+  --answers benchmarks/fixtures/scripted_answers.jsonl --output results/run.json
+python -m evaluation.errors results/run.json --examples 1
 ```
 
 `--session-isolation` replays each transcript session separately, which is how
