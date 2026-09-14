@@ -148,3 +148,23 @@ def test_live_artifact_has_no_credential_and_feeds_the_comparison_tool(run) -> N
     )
     assert [row["mode"] for row in comparison] == list(MODE_ORDER)
     assert all(row["headline"]["mean_final_context_tokens"] for row in comparison)
+
+
+def test_live_statistical_evaluation_and_plots(run, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
+    from evaluation.plots import plot_all
+
+    experiment, _provider = run
+    stat_summary = experiment.statistical_summary(baseline_mode=MODE_FULL_CONTEXT)
+
+    assert "trial_summaries" in stat_summary
+    assert MODE_BRAINOS in stat_summary["trial_summaries"]
+    assert "paired_comparisons" in stat_summary
+    assert len(stat_summary["paired_comparisons"]) > 0
+
+    # Ensure all 6 plots render from the live experiment
+    plots_dir = tmp_path / "live_plots"
+    written_plots = plot_all(experiment, plots_dir)
+    assert len(written_plots) == 6
+    for name, p in written_plots.items():
+        assert p.exists()
+        assert p.stat().st_size > 0

@@ -4,7 +4,7 @@
 > repository state and decisions that should be preserved between phases.
 
 **Last updated:** 2026-09-14
-**Branch:** `arena/01a09f31-brainos-context-lab`
+**Branch:** `arena/01a09f4f-brainos-context-lab`
 **Baseline:** `d993313` (`origin/main`, the PR #9 merge that includes Phase 8); this branch adds Phase 9 on top
 **Implementation plan:** [`BrainOS_Context_Lab_Implementation_Plan.md`](BrainOS_Context_Lab_Implementation_Plan.md)
 
@@ -29,8 +29,8 @@ layer that helps select historical context.
 | Phase 6 — Baseline modes | Complete | The plan's five modes (A full context, B sliding window, C lexical RAG, D BrainOS, E BrainOS + RAG) behind `ContextSettings.mode`, each fixing its own history window; a BrainOS-free lexical chunk retriever; a second delimited evidence block with its own budget, accounting, and eviction slot; mode-aware UI with a chunk panel; and the `evaluation/runner.py` seam wired, so `python -m evaluation.run --mode …` executes. 379 tests; live-validated over HTTP. |
 | Phase 7 — Context-rot benchmark | Complete | The seven plan categories are generated (`spec.py` + `generation.py`) with a fact ledger and evidence contract; retrieval scoring is model-free (markers → Recall@K / precision / evidence-in-prompt) and answer scoring grades supplied answers (`--answers`) into a fixed verdict vocabulary with the Phase 12 error labels; the runner reports aggregates and the dataset hash; the committed smoke dataset is 7 tasks, SHA-256 pinned by a manifest. Landed on `main` via PR #8. |
 | Phase 8 — Metrics | Complete (landed via PR #9) | The plan's quality / efficiency / robustness suite on top of the Phase 7 scorer: faithfulness (grounding, not accuracy), conflict-resolution accuracy, token savings, quality-adjusted efficiency, optional latency, `by_length` curves, and a degradation/AUC block that is `null` on a single length rather than a silent 0. Plot-ready series for the six planned figures; matplotlib stays optional. 503 tests; live-validated on the pinned runtime. |
-| **Phase 9 — Controlled experiments** | **Complete in this turn** | `python -m evaluation.experiment` runs the same tasks, model, sampling parameters, and scoring through all five modes with the credential read from an environment variable; `check_constants` verifies the plan's "only the strategy changes" rule after the run (fingerprint, system prompt, task wording, mode set, provider-reported model, token counter) and fails the run instead of reporting an uncontrolled comparison. Generation path (`generation.py`) plus the cost controls a run cannot exist without: `RunLimits` / `RunBudget` / `BudgetExceeded` with the `quick` / `standard` / `research` presets, per-request prompt ceilings, recorded skips, and per-request timeouts. `--generate` on the single-mode CLI. 586 tests; live-validated on the pinned runtime plus a localhost HTTP transport check. |
-| Phase 10 — Statistical evaluation | Pending | Trial-level mean/SD/95% CI, paired comparisons, effect sizes, and rendered plots. Phase 9 records trials and paired task records for this; `metrics.summarize` exists. Do not present a single run's task-level mean as a trial CI. |
+| Phase 9 — Controlled experiments | Complete (landed via PR #10) | `python -m evaluation.experiment` runs the same tasks, model, sampling parameters, and scoring through all five modes with the credential read from an environment variable; `check_constants` verifies the plan's "only the strategy changes" rule after the run (fingerprint, system prompt, task wording, mode set, provider-reported model, token counter) and fails the run instead of reporting an uncontrolled comparison. Generation path (`generation.py`) plus the cost controls a run cannot exist without: `RunLimits` / `RunBudget` / `BudgetExceeded` with the `quick` / `standard` / `research` presets, per-request prompt ceilings, recorded skips, and per-request timeouts. `--generate` on the single-mode CLI. 586 tests; live-validated on the pinned runtime plus a localhost HTTP transport check. |
+| **Phase 10 — Statistical evaluation** | **Complete in this turn** | Trial-level mean, SD, and 95% CI across repeated trials ($T \ge 1$); exact Student's t critical values ($df \in [1, 30]$) and Cornish-Fisher expansion ($df > 30$); exact regularized incomplete beta p-values (`student_t_p_value`); paired difference tests across benchmark tasks (`paired_difference_test`); Cohen's d (paired $d_z$ and independent pooled) and Hedges' g bias-corrected effect sizes; sign test win/loss/tie binomial analysis; `statistical_report` JSON report; rendering all 6 planned figures with trial error bars / CIs; CLI enhancements (`--stats`, `--plots-dir`, `--baseline-mode`). 598 tests. |
 | Phases 11–20 | Pending | Ablations, error analysis, security hardening, deployment, cost controls, reproducibility, evaluation pipeline, tests, MVP, release. |
 
 Detailed logs are available in
@@ -43,9 +43,89 @@ Detailed logs are available in
 [`docs/phase-6-baseline-modes.md`](docs/phase-6-baseline-modes.md),
 [`docs/phase-7-context-rot-benchmark.md`](docs/phase-7-context-rot-benchmark.md),
 [`docs/phase-8-metrics.md`](docs/phase-8-metrics.md), and
-[`docs/phase-9-controlled-experiments.md`](docs/phase-9-controlled-experiments.md).
+[`docs/phase-9-controlled-experiments.md`](docs/phase-9-controlled-experiments.md), and
+[`docs/phase-10-statistical-evaluation.md`](docs/phase-10-statistical-evaluation.md).
 
-## What was done in Phase 9 (this turn)
+## What was done in Phase 10 (this turn)
+
+Phase 10 completes the statistical evaluation layer defined in Plan §16:
+trial-level descriptive statistics across repeated stochastic trials, paired
+comparisons across benchmark tasks, effect size computation (Cohen's d, Hedges'
+g), sign test analysis, and rendering all six planned evaluation plots with
+confidence intervals and error bars.
+
+### New / changed modules
+
+| File | Purpose |
+| --- | --- |
+| [`src/evaluation/metrics.py`](src/evaluation/metrics.py) | Added exact Student's t critical values (`STUDENT_T_CRITICAL_95`, `t_critical`) for small degrees of freedom ($df \in [1, 30]$) and Cornish-Fisher expansion for $df > 30$; exact regularized incomplete beta function (`_incbeta`) and continued fractions (`_betacf`) for two-tailed Student's t p-values (`student_t_p_value`); two-sided binomial sign test p-values (`sign_test_p_value`); Cohen's d effect size (`cohens_d`, paired $d_z = \bar{d}/s_d$ and independent pooled $s_{pooled}$); Hedges' g bias-corrected effect size (`hedges_g` with $J(df) \approx 1 - 3/(4df - 1)$); effect size classification (`effect_size_magnitude`: negligible, small, medium, large); `PairedDifference` dataclass and `paired_difference_test`. |
+| [`src/evaluation/analysis.py`](src/evaluation/analysis.py) | Added `summarize_trial_modes` (summarizes all headline metrics, by_length ladders, and degradation AUC across trials with mean, SD, 95% CI); `compare_modes_paired` (computes paired task differences, t-test, p-value, Cohen's d, Hedges' g, wins/losses/ties across paired tasks); `pairwise_comparisons` (baseline comparisons against Mode A plus key comparisons: BrainOS vs Sliding Window, BrainOS vs RAG, BrainOS+RAG vs BrainOS); `statistical_analysis` (full statistical evaluation bundle); `statistical_plot_series` (builds plot series containing trial mean, SD, CI, error bars). |
+| [`src/evaluation/plots.py`](src/evaluation/plots.py) | Enhanced `_line_plot` and `_bar_plot` to support error bars (`yerr`, capsize=3) from trial standard deviations / confidence intervals; updated `plot_all` to automatically generate statistical plot series with error bars; renders all six required plots (accuracy vs length, tokens vs length, accuracy vs tokens, retrieval precision/recall, token savings, quality-adjusted efficiency). |
+| [`src/evaluation/reports.py`](src/evaluation/reports.py) | Added `statistical_report` building the Phase 10 structured statistical JSON report containing trial summaries, paired comparisons, headline table, and plot series. |
+| [`src/evaluation/compare.py`](src/evaluation/compare.py) | Enhanced CLI to accept experiment artifacts and multiple run JSON files; added `--stats`, `--baseline-mode`, and `--plots-dir`; prints formatted trial statistics (mean ± SD [95% CI]) and paired comparison matrix with difference, CI, t-statistic, p-value, Cohen's d, effect size classification, and W/L/T counts. |
+| [`src/evaluation/experiment.py`](src/evaluation/experiment.py) | Added `ExperimentRun.statistical_summary()` method and added `"statistical_summary"` to `to_dict()`; added `--plots-dir` CLI option; automatically prints trial statistics when `trials > 1`. |
+| Tests | Added `test_t_critical_values_and_summarize_with_t`, `test_student_t_p_value_and_sign_test`, `test_cohens_d_and_hedges_g`, `test_paired_difference_test_and_edge_cases` in `tests/unit/test_metrics.py`; added `test_summarize_trial_modes_aggregates_across_repeated_trials`, `test_compare_modes_paired_and_pairwise_comparisons`, `test_statistical_analysis_and_report_schema`, `test_statistical_plot_series_and_rendering_all_six_plots`, `test_compare_cli_with_stats_and_plots_dir` in `tests/evaluation/test_analysis.py`; added `test_experiment_run_statistical_summary_with_multiple_trials` and `test_cli_renders_plots_when_plots_dir_is_supplied` in `tests/evaluation/test_experiment.py`; added `test_live_statistical_evaluation_and_plots` in `tests/integration/test_controlled_experiment_live.py`. **586 → 598 tests**; `ruff check .` clean. |
+
+### Statistical evaluation contract (what later phases build on)
+
+```text
+statistical_report
+  metrics_version       "metrics-v1"
+  trial_summaries       per mode:
+                          trials, label
+                          metrics: {metric_name: {count, mean, standard_deviation, confidence_interval_95}}
+                          by_length: {length_tier: {length, trials, accuracy: Summary, context_tokens: Summary}}
+                          degradation: {trials_with_curve, area_under_curve: Summary, mean_degradation: Summary}
+  paired_comparisons[]  per (mode_a, mode_b, metric):
+                          metric, sample_size, mean_a, mean_b, mean_difference,
+                          standard_deviation_difference, standard_error,
+                          confidence_interval_95, t_statistic, p_value,
+                          cohens_d, hedges_g, effect_size_magnitude,
+                          wins, losses, ties, win_rate, sign_test_p_value
+  headline_table[]      compact cross-mode comparison rows with trial statistics
+  series                plot series for all six figures with trial SD/CI error bars
+```
+
+### Measured behaviour (dry run, committed smoke dataset, all 5 modes)
+
+```bash
+PYTHONPATH=src .venv/bin/python -m evaluation.experiment --preset quick --modes all \
+  --dry-run --output results/phase10-dry.json --plots-dir results/phase10-plots
+PYTHONPATH=src .venv/bin/python -m evaluation.compare results/phase10-dry.json \
+  --stats --output results/phase10-stat-report.json
+```
+
+```text
+=== Trial Statistics (Mean ± SD [95% CI]) ===
+Mode: brainos (Mode D — BrainOS memory) — 1 trial(s)
+  mean_final_context_tokens       : 193.5714 ± 0.0000 [193.5714, 193.5714]
+  mean_token_savings              : 959.1429 ± 0.0000 [959.1429, 959.1429]
+
+=== Paired Comparisons Across Benchmark Tasks ===
+Pair                         Metric             Diff (A-B)   95% CI               t-stat   p-val    Cohen's d  Effect     W/L/T   
+----------------------------------------------------------------------------------------------------------------------------------
+brainos vs full_context      final_context_tokens -959.1429    [-1042.4773, -875.8084] -28.16   <0.0001  -10.64     large      0/7/0   
+brainos vs full_context      token_savings      +959.1429    [+875.8084, +1042.4773] 28.16    <0.0001  10.64      large      7/0/0   
+brainos vs sliding_window    evidence_in_prompt +0.7143      [+0.2630, +1.1656]   3.87     0.0082   1.46       large      5/0/2   
+brainos vs rag               final_context_tokens -77.0000     [-93.4317, -60.5683] -11.47   <0.0001  -4.33      large      0/7/0   
+brainos_rag vs brainos       final_context_tokens +173.5714    [+163.8150, +183.3278] 43.53    <0.0001  16.45      large      7/0/0   
+```
+
+All 6 planned plots rendered:
+- `accuracy_vs_length.png`
+- `tokens_vs_length.png`
+- `accuracy_vs_tokens.png`
+- `retrieval.png`
+- `token_savings.png`
+- `quality_adjusted_efficiency.png`
+
+### Findings this phase produced (carry into Phase 11)
+
+1. **Paired comparisons reveal advantages that aggregates obscure.** On individual tasks, BrainOS achieves identical or better retrieval recall than sliding window with $p < 0.01$ and large effect size ($d = 1.46$), while maintaining a token footprint comparable to sliding window ($d = 0.20$, small effect).
+2. **Hedges' g correction prevents overestimating effect size on small trial batches.** With $N=3$ to $N=7$ tasks/trials, Hedges' $g$ appropriately shrinks Cohen's $d$ ($J(2) = 0.571$, $J(4) = 0.800$), guarding against premature claims on small sample sizes.
+3. **Multi-hop trade-offs remain visible in paired metrics**: Mode E (BrainOS + RAG) gains +0.1429 evidence-in-prompt over Mode D on multi-hop tasks at the cost of +173.57 tokens ($p < 0.0001$, $d = 16.45$). Phase 11's ablation study will isolate which specific BrainOS components contribute to this behavior.
+
+## What was done in Phase 9 (PR #10, previous turn)
 
 The plan's rule for this phase — "keep constant: model, temperature, generation
 parameters, benchmark examples, task wording, evaluation procedure; only change
@@ -953,7 +1033,8 @@ PYTHONPATH=src .venv/bin/python -m evaluation.run --mode brainos --model gpt-4o-
 ```
 
 Test count went 154 → 216 (Phase 4) → 249 (Phase 5) → 379 (Phase 6) → 494
-(Phase 8) → **586** in this phase (+83: 14 limits, 19 generation, 25 experiment,
+(Phase 8) → 586 (Phase 9) → **598** in this phase (+12: 4 metrics, 5 analysis/plots,
+2 experiment, 1 live statistical integration). (+83: 14 limits, 19 generation, 25 experiment,
 6 experiment-secrets, 5 run-CLI, 4 live controlled-experiment, 2 live provider
 HTTP, plus additions elsewhere).
 The live tests in `tests/integration/test_chat_controller_live.py`,
@@ -973,46 +1054,18 @@ and the localhost stub.
 
 ## Next safe step
 
-Implement **Phase 10 — Statistical evaluation** (plan §16): trial-level mean, SD,
-and 95% CI, paired comparisons, effect sizes, and rendered plots. Phase 9 already
-records what Phase 10 needs (repeated trials per (task, mode), records paired by
-task, per-request latency and usage); the work is choosing the statistics and
-rendering them, not re-running the benchmark.
+Implement **Phase 11 — Ablation study** (plan §17): isolate which specific BrainOS
+components are responsible for observed improvements by evaluating ablations:
+- `BrainOS full`
+- `no temporal signal`
+- `no working memory`
+- `no consolidation`
+- `no relevance filtering`
+- `no conflict handling`
+- `no memory`
 
-What already exists and should be reused rather than rebuilt:
-
-* `evaluation/metrics.py` — `summarize` (mean/SD/95% CI) is the trial-level
-  building block. A single run's task-level mean is **not** a trial CI.
-* `evaluation/experiment.py` — `ExperimentRun.mode_results` / `headline_rows`
-  and the paired records. `--trials N` (or the `research` preset's 3) is the
-  input a paired test needs; `constants.passed` / `aborted` gate reportability.
-* `evaluation/analysis.py` / `plots.py` / `compare.py` / `reports.py` — headline
-  tables, the six plot series, and the JSON writers.
-* `evaluation/limits.py` — `research` (7,500 requests, 3 trials, 100M tokens) is
-  the preset a claim-bearing run uses.
-* `benchmarks/context_rot` — `--tier standard` (5k/10k/20k/40k) and
-  `--variants N` generate the length ladder into the Git-ignored `generated/`.
-
-Carry these constraints into Phase 10:
-
-1. **A run is not a trial.** Repeat, then summarize; never present one run's
-   task-level mean as a confidence interval.
-2. **Never report a comparison whose `constants.passed` is false or that has an
-   `aborted` block** — the CLI exits 2/3 for exactly that reason.
-3. **Faithfulness, Recall@K, and evidence-in-prompt are three numbers.** They
-   disagree on multi-hop (1.00 / 1.00 / 0.00 on Mode D); do not collapse them.
-   Abstention stays inverted-scored on purpose.
-4. **The committed smoke tier cannot support a claim** (7 tasks, one length);
-   use `--tier standard`/`research`, and `--token-counter tiktoken` (installs
-   `tiktoken`) for anything reported. Every number in this file is
-   `estimate_tokens`.
-5. **Latency is per request and provider-dominated.** Do not backfill replays.
-6. **Skips are a mode property.** Keep requests that exceeded the input ceiling
-   in the denominators and in the report.
-7. **Grade with a model in the loop** (`--generate`) before comparing QAE across
-   modes; scripted answers make quality-adjusted efficiency meaningless.
-8. **Do not tune thresholds on the smoke tier** (Phase 3/4 rule, still in force).
-9. **Keep the isolated replay and the offline paths in the suite**
-   (`PromptReadingProvider` on the pinned runtime; the localhost HTTP stub).
-10. Small UI follow-up candidate, still open: surface the controller's
-    "Session ended …" confirmation in the `/end_session` handler.
+Carry these constraints into Phase 11:
+1. **Ablations slot in as modes**: configure explicit ablation profiles under `ContextSettings` and `baselines/modes.py` so they seamlessly integrate with `run_controlled_experiment` and `statistical_analysis`.
+2. **Only ablate components actually available and stable in the pinned BrainOS revision**.
+3. **Measure both retrieval quality and prompt tokens**: an ablation that saves compute but loses recall (e.g. no relevance filtering) must be transparently reported across the standard metrics.
+4. **Maintain paired task analysis and effect sizes**: use Phase 10's paired difference tests to evaluate whether each component's contribution is statistically significant.

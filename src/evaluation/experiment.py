@@ -349,6 +349,13 @@ class ExperimentRun:
             )
         return rows
 
+    def statistical_summary(self, *, baseline_mode: str = "full_context") -> dict[str, Any]:
+        """Compute the Phase 10 statistical analysis across trials and paired tasks."""
+
+        from .analysis import statistical_analysis
+
+        return statistical_analysis(self, baseline_mode=baseline_mode)
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "experiment_version": EXPERIMENT_VERSION,
@@ -379,6 +386,7 @@ class ExperimentRun:
             "aborted": self.aborted,
             "modes": [result.to_dict() for result in self.mode_results],
             "headline": self.headline_rows(),
+            "statistical_summary": self.statistical_summary(),
         }
 
 
@@ -943,6 +951,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Build every prompt and report cost without calling a provider.",
     )
+    parser.add_argument(
+        "--plots-dir",
+        type=Path,
+        help="Directory to save the six evaluation plots.",
+    )
     parser.add_argument("--quiet", action="store_true", help="Suppress the summary table.")
     return parser
 
@@ -1066,6 +1079,11 @@ def main(argv: list[str] | None = None) -> int:
                 result.to_run_dict(), Path(args.runs_dir) / f"{result.mode}{suffix}.json"
             )
 
+    if args.plots_dir:
+        from .plots import plot_all
+
+        plot_all(run, args.plots_dir)
+
     if not args.quiet:
         _print_summary(run, output=args.output, runs_dir=args.runs_dir)
     return _exit_code(run)
@@ -1130,6 +1148,10 @@ def _print_summary(run: ExperimentRun, *, output: Path, runs_dir: Path | None) -
     _print_table(columns, rows)
     if ungraded and rows:
         print("No answers were graded: accuracy and faithfulness are unset, not zero.")
+    if run.plan.trials > 1:
+        from .compare import _print_statistical_summary
+
+        _print_statistical_summary(run.statistical_summary())
     budget = run.budget
     print(
         f"cost: requests={budget.get('requests', 0)} input={budget.get('input_tokens', 0)} "

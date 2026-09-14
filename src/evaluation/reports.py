@@ -1,8 +1,9 @@
 """Report generation for evaluation results.
 
 Phase 8 writes a structured metrics report (the plan's quality / efficiency /
-robustness numbers) without credentials or provider clients. Markdown and plot
-rendering stay optional: JSON is the archival form.
+robustness numbers) without credentials or provider clients. Phase 10 adds
+statistical evaluation reports with trial-level confidence intervals and
+paired comparison effect sizes.
 """
 
 from __future__ import annotations
@@ -11,7 +12,13 @@ import json
 from pathlib import Path
 from typing import Any
 
-from .analysis import compare_runs, headline_from_aggregate, plot_series
+from .analysis import (
+    compare_runs,
+    headline_from_aggregate,
+    plot_series,
+    statistical_analysis,
+    statistical_plot_series,
+)
 from .metrics import METRICS_VERSION
 
 
@@ -57,8 +64,27 @@ def comparison_report(runs: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def statistical_report(
+    runs_or_experiment: Any,
+    *,
+    baseline_mode: str = "full_context",
+) -> dict[str, Any]:
+    """Build the Phase 10 statistical evaluation report."""
+
+    analysis = statistical_analysis(runs_or_experiment, baseline_mode=baseline_mode)
+    series = statistical_plot_series(runs_or_experiment)
+    return {
+        "metrics_version": METRICS_VERSION,
+        "trial_summaries": analysis.get("trial_summaries", {}),
+        "paired_comparisons": analysis.get("paired_comparisons", []),
+        "headline_table": analysis.get("headline_table", []),
+        "series": series,
+    }
+
+
 __all__ = [
     "comparison_report",
     "metrics_report",
+    "statistical_report",
     "write_json_report",
 ]
