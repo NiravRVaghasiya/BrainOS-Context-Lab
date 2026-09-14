@@ -91,6 +91,23 @@ def sent_text(providers: list[FakeLLMProvider]) -> str:
     )
 
 
+def _raw(database: Path) -> bytes:
+    """Read SQLite's full on-disk footprint (main + WAL + SHM).
+
+    Phase 14 switched the stores to WAL journal mode. The same reasoning as
+    ``tests/security/test_secure_deletion.py::raw`` applies here: the marker
+    may be in the WAL before the next checkpoint, and a byte-scan that reads
+    only the main file both under-counts on insert and over-counts on delete.
+    """
+
+    pieces: list[bytes] = [database.read_bytes() if database.exists() else b""]
+    for suffix in ("-wal", "-shm"):
+        sidecar = database.with_name(database.name + suffix)
+        if sidecar.exists():
+            pieces.append(sidecar.read_bytes())
+    return b"".join(pieces)
+
+
 # --------------------------------------------------------------------------- #
 # The memory route, live
 # --------------------------------------------------------------------------- #
@@ -216,13 +233,12 @@ def test_live_credential_never_reaches_the_provider_disk_or_export(
     assert KEY not in sent_text(providers)
     assert KEY not in view.prompt
     assert KEY not in str(view.security_report)
-    assert KEY not in db_path.read_bytes().decode("utf-8", errors="replace")
+    db_bytes = _raw(db_path)
+    assert KEY.encode() not in db_bytes
     assert KEY not in export_path.read_text(encoding="utf-8")
     assert KEY not in controller.export_text(session_id)
     # The transcript content itself survives: redaction removes the key, not the turn.
-    assert MARKER in str(export["messages"]) or MARKER in db_path.read_text().decode(
-        "utf-8", errors="replace"
-    )
+    assert MARKER in str(export["messages"]) or MARKER.encode() in db_bytes
 
     report = controller.service(session_id).security_report()
     assert report["clean"] is False, "the redactions are findings, not silent edits"
@@ -256,19 +272,21 @@ def test_live_end_session_removes_the_bytes_not_just_the_rows(
         tmp_path, monkeypatch, api_key=KEY
     )
     controller.chat(session_id, f"My API key is {KEY}. {MARKER} {FACT}")
-    assert MARKER.encode() in db_path.read_bytes(), "the fixture must be on disk first"
+    assert MARKER.encode() in _raw(db_path), "the fixture must be on disk first"
 
     ended = controller.end_session(session_id)
 
     assert "Session ended" in ended.status
-    contents = db_path.read_bytes().decode("utf-8", errors="replace")
+    contents = _raw(db_path).decode("utf-8", errors="replace")
     assert MARKER not in contents, "the transcript text is gone from the file"
     assert KEY not in contents
     from storage.sqlite import SqliteConversationStore, SqliteMemoryStore
 
     assert SqliteConversationStore(db_path).list_conversations(session_id) == []
     assert SqliteMemoryStore(db_path).list_memories(session_id) == []
-    assert scan_paths([db_path]).clean is True
+    # scan_paths needs to scan sidecar files too; use the file parent so the
+    # scanner picks up the WAL and SHM alongside the main database.
+    assert scan_paths([db_path.parent]).clean is True
 
 
 def test_live_clear_conversation_scrubs_the_transcript_from_disk(
@@ -276,12 +294,12 @@ def test_live_clear_conversation_scrubs_the_transcript_from_disk(
 ) -> None:
     controller, session_id, db_path, _providers = _live_controller(tmp_path, monkeypatch)
     controller.chat(session_id, f"{MARKER} {FACT}")
-    assert MARKER.encode() in db_path.read_bytes()
+    assert MARKER.encode() in _raw(db_path)
 
     view = controller.clear_conversation(session_id)
 
     assert view.history == []
-    assert MARKER not in db_path.read_bytes().decode("utf-8", errors="replace")
+    assert MARKER.encode() not in _raw(db_path)
 
 
 # --------------------------------------------------------------------------- #

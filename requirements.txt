@@ -1,3 +1,27 @@
-# Hugging Face Space/runtime dependencies for the initial UI scaffold.
-# Install the project itself with: pip install -e ".[ui,providers]"
--e .[ui,providers]
+# Hugging Face Space runtime dependencies.
+#
+# The application is a BYOK (bring-your-own-key) Gradio app. No shared provider
+# key lives anywhere in source: the user enters an API key in the sidebar, it is
+# held in server memory for their session only, and End session discards it.
+#
+# Versions match the Phase 0-13 validation baseline; the Git dependency (the
+# pinned BrainOS runtime) is installed at Space build time.
+
+# Web framework
+gradio>=6.0
+
+# Providers (OpenAI + OpenAI-compatible)
+openai>=1.0
+
+# BrainOS runtime — commit pinned in Phase 0 and re-validated live at every
+# phase through tests/integration/
+brainos-cli @ git+https://github.com/NiravRVaghasiya/BrainOS.git@1d9eb7a0ca537e7278e29809cda4f4c5da6c1dcc
+
+# Plotting (used by the evaluation runner, not by the chat UI directly)
+matplotlib>=3.7
+pandas>=2.0
+
+# Install the project itself from the Space checkout so that the src/ package
+# layout (app, brain, providers, baselines, evaluation, security, storage)
+# resolves when app.py is launched by Gradio.
+-e .

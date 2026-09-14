@@ -46,7 +46,35 @@ from .panels import (
 
 TITLE = "BrainOS Context Lab"
 
-HEADER_MARKDOWN = f"""# {TITLE}
+
+def _header_markdown() -> str:
+    """Build the header copy, reflecting whether persistence is enabled.
+
+    Phase 14: the same code runs locally (where ``data/brainos_lab.sqlite3`` is
+    the default) and on an ephemeral deployment (where an operator may set
+    ``BRAINOS_LAB_DB=:memory:`` to keep everything in RAM). The header must
+    not claim data is persisted when that would be a lie, and must disclose
+    persistence when it does happen.
+    """
+
+    try:
+        from storage.sqlite import persistence_enabled
+    except Exception:  # noqa: BLE001 - header copy must not break the build
+        persistence_enabled_result = True
+    else:
+        persistence_enabled_result = persistence_enabled()
+
+    persistence_line = (
+        "Transcript messages and BrainOS memories are persisted to a server-side "
+        "SQLite database, with credentials redacted before writing; **Clear "
+        "conversation**, **Clear memory**, and **End session** delete the matching "
+        "rows."
+        if persistence_enabled_result
+        else "This deployment runs **fully in memory**: closing the tab, ending the "
+        "session, or restarting the Space discards every transcript and every memory."
+    )
+
+    return f"""# {TITLE}
 > Bring your model. Give it memory. Measure context efficiency.
 
 BrainOS observes the conversation, retrieves what matters, and builds the
@@ -55,10 +83,7 @@ and what it would have cost to send everything.
 
 **Your provider account is responsible for API usage and cost.** Keys are held
 in server memory for the active session only and are never written to disk.
-Transcript messages and BrainOS memories *are* persisted to a server-side
-SQLite database, with credentials redacted before writing; **Clear
-conversation**, **Clear memory**, and **End session** delete the matching
-rows.
+{persistence_line}
 """
 
 EVALUATION_MARKDOWN = """### Evaluation
@@ -215,7 +240,7 @@ def create_app(controller: UIController | None = None) -> Any:
         )
 
     with gr.Blocks(title=TITLE) as demo:
-        gr.Markdown(HEADER_MARKDOWN)
+        gr.Markdown(_header_markdown())
         session_state = gr.State(None)  # non-secret session identifier only
 
         with gr.Row():
@@ -845,14 +870,43 @@ def _optional_int(value: Any) -> int | None:
     return number if number > 0 else None
 
 
+#: Maximum concurrent callbacks Gradio will run for this Space. Above this,
+#: visitors wait in a short queue. The number is deliberately modest: each turn
+#: runs BrainOS recall plus a provider call, both of which are CPU/network
+#: bound, and a BYOK public demo must protect one visitor's budget from being
+#: starved by traffic spikes. Phase 15 will layer per-turn token/turn ceilings
+#: on top of this concurrency gate.
+DEFAULT_CONCURRENCY_LIMIT = 3
+#: Maximum queue size before Gradio returns "queue full" to new visitors rather
+#: than letting wait times grow without bound.
+DEFAULT_MAX_QUEUE_SIZE = 32
+
+
 def main() -> None:
-    """Launch the UI using settings compatible with local and HF deployment."""
+    """Launch the UI using settings compatible with local and HF deployment.
+
+    Phase 14: every option here has an environment-variable override so a
+    deployment (HF Space, Docker, a local dev server) can tune the server
+    without editing source. Gradio's queue is enabled unconditionally — a
+    public surface must serialize callbacks to a bounded pool instead of
+    letting every request hit the BrainOS runtime and SQLite concurrently.
+    """
 
     demo = create_app()
+
+    concurrency_limit = int(os.getenv("BRAINOS_LAB_CONCURRENCY", str(DEFAULT_CONCURRENCY_LIMIT)))
+    max_queue_size = int(os.getenv("BRAINOS_LAB_MAX_QUEUE", str(DEFAULT_MAX_QUEUE_SIZE)))
+    demo.queue(
+        default_concurrency_limit=concurrency_limit,
+        max_size=max_queue_size,
+        api_open=False,
+    )
+
     launch_options: dict[str, Any] = {
         "server_name": os.getenv("GRADIO_SERVER_NAME", "0.0.0.0"),
         "server_port": int(os.getenv("GRADIO_SERVER_PORT", "7860")),
         "show_error": True,
+        "share": False,
     }
     # ``strict_cors`` defaults to True (Gradio refuses cross-origin requests to
     # a local server). Deployments that must be embedded — the sandbox preview,

@@ -56,13 +56,21 @@ BEARER_SHAPED = "Bearer zz99YY88xx77WW66vv55"
 PASSPHRASE = "correct-horse-battery-staple-9"
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-#: Surfaces this project ships: source, docs, the plan, and benchmark data.
+#: Surfaces this project ships: source, docs, the plan, benchmark data, and
+#: the Phase 14 HF Space deployment files (``app.py``, ``requirements.txt``,
+#: ``packages.txt``, the Space README). Anything added to the repository and
+#: shipped to visitors must be added here — the test is the assertion that the
+#: artifact scanner actually covers the tree a Space will build from.
 SHIPPED_PATHS = (
     "src",
     "docs",
     "README.md",
     "CONTEXT.md",
     "benchmarks",
+    "app.py",
+    "requirements.txt",
+    "packages.txt",
+    "pyproject.toml",
     "BrainOS_Context_Lab_Implementation_Plan.md",
 )
 

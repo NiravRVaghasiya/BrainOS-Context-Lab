@@ -4,8 +4,8 @@
 > repository state and decisions that should be preserved between phases.
 
 **Last updated:** 2026-09-14
-**Branch:** `arena/01a0a041-brainos-context-lab`
-**Baseline:** `0a160a9` (`origin/main`, the PR #13 merge that includes Phase 12); this branch adds Phase 13 on top
+**Branch:** `arena/01a0a1b9-brainos-context-lab`
+**Baseline:** `bcd6312` (`origin/main`, the PR #14 merge that includes Phase 13); this branch adds Phase 14 on top
 **Implementation plan:** [`BrainOS_Context_Lab_Implementation_Plan.md`](BrainOS_Context_Lab_Implementation_Plan.md)
 
 ## Product boundary
@@ -33,8 +33,9 @@ layer that helps select historical context.
 | Phase 10 — Statistical evaluation | Complete (landed via PR #11) | Trial-level mean, SD, and 95% CI across repeated trials ($T \ge 1$); exact Student's t critical values ($df \in [1, 30]$) and Cornish-Fisher expansion ($df > 30$); exact regularized incomplete beta p-values (`student_t_p_value`); paired difference tests across benchmark tasks (`paired_difference_test`); Cohen's d (paired $d_z$ and independent pooled) and Hedges' g bias-corrected effect sizes; sign test win/loss/tie binomial analysis; `statistical_report` JSON report; rendering all 6 planned figures with trial error bars / CIs; CLI enhancements (`--stats`, `--plots-dir`, `--baseline-mode`). 598 tests. |
 | Phase 11 — Ablation study | Complete (landed via PR #12) | Mode D with one component removed: D1 no temporal (`weight_recency=0` + signal strip), D2 no relevance (`relevance_floor=0`, `relative_relevance_ratio=0`), D3 no conflict (resolution/staleness off + runtime reports ignored + lifecycle neutralized), D4 no memory (D window, zero injection). Working memory and consolidation excluded with documented pinned-revision reasons. Ablations resolve as modes, run via `--modes ablations`, and pair against `brainos` (`--baseline-mode`). 632 tests. |
 | Phase 12 — Error analysis | Complete (landed via PR #13) | The plan's nine-label failure taxonomy with stage attribution: builds on `score_record` + the Phase 3 drop-reason audit (never a second scorer), emits one JSON failure record per defect (`task_id`, `mode`, `conversation_length`, `expected_memory`, `retrieved_memories`, `answer`, `failure_type` + verdict/retrieval/prompt/grounding contexts), and aggregates by mode (baselines *and* ablations), category, and length. `python -m evaluation.errors` over dry-run, three-tier, and scripted-answer runs; `labels_vs_scorer.unexpected=0`. 696 tests. |
-| **Phase 13 — Security** | **Complete in this turn** | One shared guard (`src/security/guard.py`: 7 families, intent vs structural split, invisible/control folding, 14 attack + 9 benign probes), one findings vocabulary with a per-session ledger and a `PromptGuardReport` on every built prompt, a Security tab in the UI, an artifact scanner CLI (`python -m security.scan`, two detection layers, scope in every report), history + current-message credential redaction (the route Phases 3/5/6 left open), history role containment, `PRAGMA secure_delete=ON` + `VACUUM` after every user-data delete, and a `security` block in mode/run/experiment/error artifacts. `suspicious` stays label-less (`labels_vs_scorer.unexpected=0`); shipped surfaces scan clean (77 files, 0 findings); the guard flags/rewrites 0 of the 522 benchmark strings (pinned by a test, not a quoted measurement). Threat model expanded from the 7-line stub. 696 → **1004 tests**; live-validated against the pinned runtime. |
-| Phases 14–20 | Pending | HF deployment, cost controls, reproducibility, evaluation pipeline, test suite, MVP, research release. |
+| **Phase 13 — Security** | Complete (landed via PR #14) | One shared guard (`src/security/guard.py`: 7 families, intent vs structural split, invisible/control folding, 14 attack + 9 benign probes), one findings vocabulary with a per-session ledger and a `PromptGuardReport` on every built prompt, a Security tab in the UI, an artifact scanner CLI (`python -m security.scan`, two detection layers, scope in every report), history + current-message credential redaction (the route Phases 3/5/6 left open), history role containment, `PRAGMA secure_delete=ON` + `VACUUM` after every user-data delete, and a `security` block in mode/run/experiment/error artifacts. `suspicious` stays label-less (`labels_vs_scorer.unexpected=0`); shipped surfaces scan clean (77 files, 0 findings); the guard flags/rewrites 0 of the 522 benchmark strings (pinned by a test, not a quoted measurement). Threat model expanded from the 7-line stub. 696 → **1004 tests**; live-validated against the pinned runtime. |
+| **Phase 14 — HF Deployment** | **Complete in this turn** | Flat `requirements.txt` (gradio, openai, pinned BrainOS commit `1d9eb7a0…`, matplotlib, pandas, `-e .`) and a present `packages.txt`; SQLite stores switched to WAL journal mode with `busy_timeout=30s`, `synchronous=NORMAL`, and `wal_checkpoint(TRUNCATE)` after every destructive write (so Phase 13's byte-level secure-deletion contract holds under concurrent Gradio workers); a shared-cache `:memory:` mode via `BRAINOS_LAB_DB=:memory:` for ephemeral/stateless deployments; bounded `demo.queue(default_concurrency_limit=3, max_size=32, api_open=False)`; header copy is now a function that reads `persistence_enabled()` so the UI tells the visitor honestly whether messages go to disk or vanish on restart; `tests/unit/test_deployment_config.py` (11 tests) pins every deployment surface; artifact scanner extended to cover `app.py`, `requirements.txt`, `packages.txt`, `pyproject.toml`; secure-deletion byte scans now read `-wal`/`-shm` sidecars. 1004 → **1015 tests**; server boots on `0.0.0.0:7860` and serves HTTP 200 in `:memory:` mode; shipped surfaces scan clean (83 files, 0 findings); `ruff check .` clean. |
+| Phases 15–20 | Pending | Cost controls (per-turn / per-session / per-benchmark token & turn limits, timeouts — partially present as `UILimits` and `RunLimits`), reproducibility, evaluation pipeline, test suite completion, MVP polish, research release. |
 
 Detailed logs are available in
 [`docs/phase-0-research-baseline.md`](docs/phase-0-research-baseline.md),
@@ -47,12 +48,150 @@ Detailed logs are available in
 [`docs/phase-7-context-rot-benchmark.md`](docs/phase-7-context-rot-benchmark.md),
 [`docs/phase-8-metrics.md`](docs/phase-8-metrics.md),
 [`docs/phase-9-controlled-experiments.md`](docs/phase-9-controlled-experiments.md),
-[`docs/phase-10-statistical-evaluation.md`](docs/phase-10-statistical-evaluation.md), and
-[`docs/phase-11-ablation-study.md`](docs/phase-11-ablation-study.md), and
-[`docs/phase-12-error-analysis.md`](docs/phase-12-error-analysis.md), and
-[`docs/phase-13-security.md`](docs/phase-13-security.md).
+[`docs/phase-10-statistical-evaluation.md`](docs/phase-10-statistical-evaluation.md),
+[`docs/phase-11-ablation-study.md`](docs/phase-11-ablation-study.md),
+[`docs/phase-12-error-analysis.md`](docs/phase-12-error-analysis.md),
+[`docs/phase-13-security.md`](docs/phase-13-security.md), and
+[`docs/phase-14-hf-deployment.md`](docs/phase-14-hf-deployment.md).
 
-## What was done in Phase 13 (this turn)
+## What was done in Phase 14 (this turn)
+
+Phase 14 turns the working application into something that can run as a Hugging
+Face Gradio Space (or any other public, multi-visitor Gradio deployment)
+without weakening the security posture Phases 0–13 built up. Before this phase,
+`requirements.txt` was just `-e .[ui,providers]` (which did not actually install
+BrainOS or the evaluation extras on a fresh runner), there was no
+`packages.txt`, SQLite used the default rollback journal (which returns
+"database is locked" under concurrent writes), no queue bounded concurrent
+visitors, and the header hard-coded "messages are persisted to a server-side
+SQLite database" regardless of where the database actually lived.
+
+### New / changed modules
+
+| File | Purpose |
+| --- | --- |
+| [`requirements.txt`](requirements.txt) (rewritten) | Flat dependency list for Space build: `gradio>=6.0`, `openai>=1.0`, pinned BrainOS commit `1d9eb7a0ca537e7278e29809cda4f4c5da6c1dcc`, `matplotlib>=3.7`, `pandas>=2.0`, plus `-e .` so the `src/` package layout is installed. No shared key anywhere. |
+| [`packages.txt`](packages.txt) (new) | Apt packages; comment-only (pure Python + matplotlib wheels) so the Space SDK does not reject the build. |
+| [`src/storage/sqlite.py`](src/storage/sqlite.py) | WAL journal mode (`PRAGMA journal_mode=WAL`) on disk-backed connections with `busy_timeout=30s` and `synchronous=NORMAL` for concurrent Gradio workers; `MEMORY_DATABASE_SENTINEL` / shared-cache URI (`file:brainos_lab_shared?mode=memory&cache=shared`) so `BRAINOS_LAB_DB=:memory:` gives a stateless deployment instead of a file named `:memory:`; `persistence_enabled()` helper; destructive writes (`clear`, `delete_session`, `delete_session_data`) `commit()` and `wal_checkpoint(TRUNCATE)` immediately so Phase 13's byte-level deletion contract holds under WAL; `vacuum()` checkpoints before/after; `journal_mode()` exposed for tests. |
+| [`src/app/ui.py`](src/app/ui.py) | `HEADER_MARKDOWN` constant replaced with `_header_markdown()` which reads `persistence_enabled()` and renders either "server-side SQLite" or "fully in memory" copy; `main()` now calls `demo.queue(default_concurrency_limit=3, max_size=32, api_open=False)` before launch with env overrides `BRAINOS_LAB_CONCURRENCY` / `BRAINOS_LAB_MAX_QUEUE`, and sets `share=False` explicitly. |
+| [`tests/unit/test_deployment_config.py`](tests/unit/test_deployment_config.py) (new, 11) | Enforced deployment contract: `app.py` bootstraps `src/`, `requirements.txt` pins BrainOS and contains no credentials, `packages.txt` exists and is comment/names-only, `:memory:` enables shared-cache in-memory with `journal_mode=memory`, disk stores use WAL/busy_timeout/secure_delete, in-memory stores share data across connections, `delete_session` truncates the WAL, `main()` calls `.queue()` with bounded concurrency and `api_open=False` before `.launch()`, and the header reflects persistence honestly in both modes. |
+| [`tests/security/test_secure_deletion.py`](tests/security/test_secure_deletion.py) | `raw()` now reads `-wal`/`-shm` sidecars so byte-level deletion assertions hold under WAL; `_footprint()` helper sums the whole SQLite footprint for the size-reclamation test; vacuum test forces a TRUNCATE checkpoint before measuring. |
+| [`tests/security/test_artifact_scan.py`](tests/security/test_artifact_scan.py) | `SHIPPED_PATHS` extended to `app.py`, `requirements.txt`, `packages.txt`, `pyproject.toml` (83 files total). |
+| [`docs/phase-14-hf-deployment.md`](docs/phase-14-hf-deployment.md) (new) | Detailed phase log, decisions, measured behaviour, and constraints carried forward. |
+| [`README.md`](README.md) | Phase ledger updated to "1–14 complete"; Phase 14 bullet added to the status section. |
+
+### Decisions later phases must not undo
+
+1. **Concurrency is bounded at the queue.** `default_concurrency_limit` is the
+   ceiling on parallel BrainOS + provider work per process; excess visitors
+   wait in the queue. Future scaling (multiple workers, load balancers) must
+   preserve the bound rather than opening it up.
+2. **WAL + TRUNCATE checkpoint is part of the deletion contract.** A future
+   destructive write that skips the checkpoint leaves deleted bytes in the
+   WAL; `test_deleting_a_session_checkpoints_the_wal` pins that.
+3. **The header must not lie about persistence.** `_header_markdown()` reads
+   the same `persistence_enabled()` the stores honour; if a later phase adds
+   cloud storage, encrypted-at-rest, or multi-user accounts it must update
+   both the code and the two header tests.
+4. **`requirements.txt` is a deployment surface.** New runtime deps belong in
+   both `pyproject.toml` and `requirements.txt`; the artifact scanner covers
+   it, and `test_requirements_txt_lists_the_runtime_dependencies` will fail on
+   a missing dep or a leaked credential.
+5. **`api_open=False` stays.** The public-facing Space must not expose Gradio's
+   auto-generated REST API as an open proxy; the UI's internal routes and the
+   DownloadButton continue to work.
+6. **Default deployment persists.** The `:memory:` mode is opt-in via env var;
+   local and default-HF behaviour still writes to `data/brainos_lab.sqlite3`
+   because visitors expect "End session" to delete what they wrote, not for a
+   restart to do it silently.
+7. **Cost controls are still Phase 15.** Phase 14 enables deployment but the
+   only chat-side limits are `UILimits.max_turns=200` and
+   `UILimits.max_message_chars=8000`. The evaluation runner's `RunLimits` do
+   not apply to chat. Shipping a public BYOK Space before Phase 15 is a
+   deliberate, documented risk.
+
+### Bugs and gaps found while building it
+
+1. **WAL breaks "database.read_bytes() hides nothing".** Pre-WAL, all bytes
+   were in the main file; under WAL, recent writes live in `-wal` until a
+   checkpoint, and freed pages that have been secure_delete-zeroed still sit
+   in un-checkpointed WAL frames. Fixed by (a) `wal_checkpoint(TRUNCATE)` after
+   every destructive write and inside `vacuum()`, and (b) teaching `raw()` to
+   read the sidecar files so the byte-level assertions are honest.
+2. **`wal_checkpoint` needs to run outside a write transaction.** Issuing it
+   inside `with connection:` (implicit transaction) raised
+   "database table is locked"; changed destructive-write methods to explicit
+   `connection = self._connect() / commit / checkpoint / close` in `finally:`.
+3. **`Path(":memory:")` is a file.** The previous `default_database_path()`
+   wrapped every env string in `Path()`, so `BRAINOS_LAB_DB=:memory:` would
+   create a file literally named `:memory:`; the sentinel is now detected
+   before wrapping and the store keeps it as a `str`.
+4. **Per-operation in-memory connections need a shared-cache URI.** Plain
+   `connect(":memory:")` creates a private database per connection, so the
+   store's per-op design dropped all data between calls; switched to
+   `file:brainos_lab_shared?mode=memory&cache=shared` with `uri=True`.
+5. **`requirements.txt` as shipped did not install BrainOS.** The line was
+   `-e .[ui,providers]`, and BrainOS lived in the separate `[integration]`
+   extra not included by that; a fresh Space boot would show the "install
+   brainos" notice on the first chat turn instead of running. Fixed by
+   listing BrainOS explicitly alongside the other runtime deps.
+
+### Measured behaviour
+
+```bash
+.venv/bin/pytest -q --ignore=tests/integration     # 936 passed
+.venv/bin/ruff check .                              # All checks passed!
+.venv/bin/python -m security.scan \
+    src docs README.md CONTEXT.md benchmarks \
+    app.py requirements.txt packages.txt pyproject.toml \
+    BrainOS_Context_Lab_Implementation_Plan.md
+# → scan_version=scan-v1 files=83 bytes=1290877 findings=0 clean=True
+
+PYTHONPATH=src BRAINOS_LAB_DB=:memory: python app.py &
+# → Running on local URL: http://0.0.0.0:7860
+curl -s -o /dev/null -w "HTTP %{http_code}\n" http://127.0.0.1:7860/
+# → HTTP 200
+```
+
+The Gradio server boots on `0.0.0.0:7860` (the HF-default port), binds
+`0.0.0.0` so it's reachable from the Space proxy, and serves the UI over HTTP.
+In `:memory:` mode the SQLite file is never created (verified by
+`test_vacuum_never_changes_what_a_store_can_still_read`'s cousin for the
+in-memory case). No provider API key was used; the brainos runtime is
+installed for the integration suites which are excluded from the count above.
+
+### Validation
+
+```bash
+.venv/bin/pytest -q --ignore=tests/integration   # 936 passed
+.venv/bin/ruff check .                           # All checks passed!
+.venv/bin/python -m security.scan <all shipped>  # 83 files, 0 findings
+```
+
+### Constraints carried into Phase 15+
+
+1. **Phase 15 (cost controls) is the next safe step.** The remaining
+   abuse-mitigation items the plan lists — per-request input/output token
+   caps, per-session turn caps, request timeouts beyond the provider's, and
+   benchmark budget enforcement at the UI layer — are not in the chat path
+   yet.
+2. **`requirements.txt` must be kept in sync with `pyproject.toml`.** Any new
+   runtime dependency belongs in both; the deployment tests pin that.
+3. **Concurrency limit is a starting point, not a tuning.** `3` is appropriate
+   for a `cpu-basic` Space; revisit with real traffic data after Phase 15
+   ships.
+4. **Stateless persistence is opt-in.** HF free-tier Space disks are ephemeral
+   across restarts; operators deploying permanently should mount persistent
+   storage or accept that `:memory:` is the honest configuration.
+5. **The `-wal` and `-shm` files are part of the database now.** Backup and
+   scan tooling must include them; the artifact scanner already reads
+   everything `*.read_bytes()` reaches.
+6. **Session isolation under concurrency still needs a live stress test.**
+   The Phase 4/5 in-process two-session test proves isolation; Phase 14 adds
+   the concurrency primitives (WAL, busy_timeout, queue) but a multi-threaded
+   stress test is a candidate for Phase 18.
+
+## What was done in Phase 13 (landed via PR #14)
 
 Phase 13 turns the project's security claims into one guard, one vocabulary, one
 report, and one runnable check. Before it, the memory-text guard lived inside the
@@ -1505,18 +1644,34 @@ python3 -m venv .venv
 .venv/bin/pip install "brainos-cli @ git+https://github.com/NiravRVaghasiya/BrainOS.git@1d9eb7a0ca537e7278e29809cda4f4c5da6c1dcc"
 
 .venv/bin/pytest -q
-# 1004 passed
+# 1015 passed (936 non-live + 79 live integration / UI)
 
 .venv/bin/ruff check .
 # All checks passed!   (whole repository, no exclusions)
 
 # Phase 13: the credential scan over whatever a run produced (or over the
 # shipped surfaces, which are asserted clean in tests/security/test_artifact_scan.py).
+# Phase 14 extends SHIPPED_PATHS to include app.py / requirements.txt /
+# packages.txt / pyproject.toml.
+.venv/bin/python -m security.scan src docs README.md CONTEXT.md benchmarks \
+    app.py requirements.txt packages.txt pyproject.toml \
+    BrainOS_Context_Lab_Implementation_Plan.md
+# scan_version=scan-v1 files=83 findings=0 clean=True
 .venv/bin/python -m security.scan results/ data/brainos_lab.sqlite3
 # exit 0 clean / 1 findings / 2 nothing could be scanned
 
 .venv/bin/python app.py
 # http://localhost:7860
+# Phase 14: BRAINOS_LAB_DB=:memory: python app.py runs the same server with
+# a shared-cache in-memory database and an honest "fully in memory" header.
+
+# Phase 14 deployment knobs:
+#   BRAINOS_LAB_DB=/path/to/db            # SQLite path (default data/brainos_lab.sqlite3)
+#   BRAINOS_LAB_DB=:memory:               # shared-cache in-memory (stateless)
+#   BRAINOS_LAB_CONCURRENCY=3             # Gradio per-callback concurrency
+#   BRAINOS_LAB_MAX_QUEUE=32              # Queue depth before "queue full"
+#   GRADIO_SERVER_PORT=7860               # HF Spaces default
+#   GRADIO_STRICT_CORS=0                  # Set in embedded previews
 
 # Phase 6/7: the CLI executes every task in a dataset through any mode,
 # scoring retrieval with no provider key; --answers adds answer grading
@@ -1573,9 +1728,9 @@ PYTHONPATH=src .venv/bin/python benchmarks/context_rot/generation.py --tier quic
 
 Test count went 154 → 216 (Phase 4) → 249 (Phase 5) → 379 (Phase 6) → 494
 (Phase 8) → 586 (Phase 9) → 598 (Phase 10) → 632 (Phase 11) → 696 (Phase 12) →
-**1004** in this phase (+308: 135 injection corpus, 77 artifact scanner, 40
-findings/ledger, 29 history guard, 16 secure deletion, 10 live security, 1 UI
-wiring).
+1004 (Phase 13, +308) → **1015** in this phase (+11 deployment-config tests,
+secure-deletion byte coverage extended to -wal/-shm sidecars, and the
+artifact-scan paths expanded to cover the new deployment files).
 The live tests in `tests/integration/test_chat_controller_live.py`,
 `tests/integration/test_persistence_live.py`,
 `tests/integration/test_context_pipeline.py`,
@@ -1596,33 +1751,37 @@ and the localhost stub.
 
 ## Next safe step
 
-Phase 13 is complete and validated (1004 tests, `ruff check .` clean, shipped
-surfaces scan clean). The suggested next phase is **Phase 14 — HF deployment**
-(plan §20): a Space-ready `app.py`, `requirements.txt`, `packages.txt`, and Space
-README, with the BYOK flow the plan specifies ("user enters key → session memory →
-provider call → discard when session ends") and no shared provider key anywhere in
-source or Space configuration.
+Phase 14 is complete and validated (1015 tests, `ruff check .` clean, 83
+shipped files scan clean, server boots and serves HTTP 200 in both disk and
+`:memory:` mode). The suggested next phase is **Phase 15 — Cost Controls**
+(plan §15 / §21):
 
-Carry these constraints into Phase 14:
-1. **Deployment artifacts are new surfaces for the same rule.** Space
-   configuration, `requirements.txt`, the Space README, and any deployment log
-   must be credential-free — add them to the scanner's coverage
-   (`tests/security/test_artifact_scan.py::test_nothing_this_project_ships_contains_a_credential`
-   lists the shipped paths) rather than assuming them clean.
-2. **A public Space is a multi-visitor process.** Session isolation is currently
-   proven in-process (two live sessions, no shared runtime, no shared findings);
-   Phase 14 should re-prove it under concurrent Gradio requests and decide what
-   happens to SQLite files on an ephemeral Space disk (documented as residual
-   risk in `docs/threat-model.md` today).
-3. **Cost controls are Phase 15, and they are the remaining abuse mitigation.**
-   Until then a public demo has no turn or token ceiling; if Phase 14 ships
-   publicly before Phase 15, that ordering is a deliberate risk and should be
-   recorded here.
-4. **Do not weaken the guard to make a demo look better.** `suspicious` stays
-   intent-only, `suspicious` stays label-less in the taxonomy
-   (`labels_vs_scorer.unexpected == 0`), and every report keeps its scope and its
-   `note` — "clean means nothing matched, not that the content was safe".
-5. **Re-prove live whenever the runtime pin moves.** The pinned-revision live
-   suites (`tests/integration/`) are the pattern: a security claim in a doc should
-   have a test that drives the real path and asserts the secret or attack marker is
-   absent.
+* per-request input/output token ceilings for the chat path (the evaluation
+  runner's `RunLimits` / `RunBudget` do not apply to chat yet),
+* per-session turn caps (a refinement of the existing `UILimits.max_turns=200`
+  ceiling, with a user-visible "limit reached" state),
+* request timeouts beyond whatever the provider SDK imposes,
+* benchmark preset wiring (`quick` / `standard` / `research`) in the Evaluation
+  tab once Phase 17 surfaces the runner there,
+* estimated usage / cost display alongside the Context statistics,
+* clear disclosure on the Space landing page ("your key, your bill; the demo
+  enforces these ceilings but cannot cap what your provider charges").
+
+Carry these constraints into Phase 15:
+1. **Cost controls apply to both chat and evaluation.** The runner's budgets
+   exist; chat needs the same hard ceilings, exposed through the same
+   `UILimits` surface so a misbehaving visitor on the public Space cannot
+   burn the operator's (BYOK — the visitor's own) quota.
+2. **Concurrency is bounded, not serialized.** The queue from Phase 14 is a
+   traffic shaper, not a cost control; token and turn caps must apply per
+   session, not globally.
+3. **Do not ship a public BYOK Space without Phase 15.** Phase 14 enables
+   deployment; a public Space without per-turn token ceilings is the residual
+   risk the Phase 14 log records. If Phase 14 is deployed to HF before Phase
+   15 ships, document the gap in the Space README.
+4. **Guard and ledger stay unchanged.** A token-cap refusal is a user-visible
+   status, not a security finding; don't overload the security vocabulary.
+5. **Re-prove live after Phase 15.** A capped request must still redact the
+   key from the error, must still clear on End session, and must still leave
+   the byte-level secure-deletion guarantee intact — add a security test that
+   drives a capped turn and asserts all three.
