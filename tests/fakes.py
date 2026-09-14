@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import re
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from providers.base import ProviderError
+from providers.base import ProviderError, ProviderResponse
 
 
 @dataclass
@@ -200,6 +202,116 @@ class FakeLLMProvider:
 
         self.requests.append(messages)
         return ProviderResponse(text=self.text, model=self.config.model, usage={"total_tokens": 4})
+
+
+class RecordingProvider:
+    """Provider double for the Phase 9 generation tests.
+
+    Records every request (messages *and* the keyword arguments) so a test can
+    assert that a controlled experiment sent identical sampling parameters, and
+    returns a configurable, deterministic response. ``report_model`` can differ
+    from the requested model on purpose: a gateway that routes elsewhere is
+    exactly the drift the controlled-comparison check has to catch.
+    """
+
+    def __init__(
+        self,
+        *,
+        text: str = "Recorded answer.",
+        report_model: str | None = None,
+        usage: Mapping[str, int] | None = None,
+        fail: str | None = None,
+    ) -> None:
+        self.text = text
+        self.report_model = report_model
+        self.usage = dict(usage) if usage is not None else {
+            "prompt_tokens": 12,
+            "completion_tokens": 3,
+            "total_tokens": 15,
+        }
+        self.fail = fail
+        self.requests: list[dict[str, Any]] = []
+
+    def generate(self, messages: list[dict[str, str]], **kwargs: Any) -> ProviderResponse:
+        self.requests.append(
+            {
+                "messages": [dict(message) for message in messages],
+                "kwargs": dict(kwargs),
+            }
+        )
+        if self.fail:
+            raise ProviderError(self.fail)
+        return ProviderResponse(
+            text=self.respond(messages, kwargs),
+            model=self.report_model or str(kwargs.get("model", "")) or "fake-model",
+            usage=dict(self.usage),
+        )
+
+    def respond(self, messages: Sequence[Mapping[str, str]], kwargs: Mapping[str, Any]) -> str:
+        """Return the text for one request; subclasses make it prompt-dependent."""
+
+        return self.text
+
+    @property
+    def request_count(self) -> int:
+        return len(self.requests)
+
+    def settings_seen(self) -> list[dict[str, Any]]:
+        """Return the keyword arguments of every request, for invariant checks."""
+
+        return [dict(request["kwargs"]) for request in self.requests]
+
+
+_BULLET_RE = re.compile(r"^- ", re.MULTILINE)
+_WORD_RE = re.compile(r"[a-z0-9]+")
+#: Words too common to identify a question's subject.
+_STOPWORDS = frozenset(
+    {
+        "the", "and", "for", "does", "did", "what", "which", "where", "when", "who",
+        "how", "why", "is", "are", "was", "were", "use", "uses", "used", "our", "we",
+        "you", "your", "its", "it", "of", "in", "on", "to", "a", "an", "at", "by",
+        "with", "from", "that", "this", "project", "production", "current", "please",
+        "tell", "me", "about", "again", "still", "s", "t",
+    }
+)
+
+
+class PromptReadingProvider(RecordingProvider):
+    """Deterministic "model" that answers only from the prompt's evidence.
+
+    It is not a research model and its answers mean nothing about LLM quality.
+    It exists to prove the *pipeline*: that a mode's retrieved evidence reaches
+    the prompt, that the prompt can be turned into a graded answer, and that a
+    mode with no evidence at all cannot produce one. The reader picks the
+    evidence bullet with the largest word overlap with the question and says
+    "I don't know." when the prompt carries no evidence block.
+    """
+
+    def respond(self, messages: Sequence[Mapping[str, str]], kwargs: Mapping[str, Any]) -> str:
+        prompt = "\n".join(str(message.get("content", "")) for message in messages)
+        bullets = [
+            line for line in re.split(_BULLET_RE, prompt)[1:] if line.strip()
+        ]
+        if not bullets:
+            return "I don't know."
+        question = ""
+        for message in reversed(list(messages)):
+            if str(message.get("role", "")).lower() == "user":
+                question = str(message.get("content", ""))
+                break
+        return max(bullets, key=lambda bullet: _overlap(bullet, question)).strip()
+
+
+def _overlap(text: str, question: str) -> int:
+    """Count question words (stopwords removed) present in ``text``."""
+
+    haystack = set(_WORD_RE.findall(text.lower()))
+    needle = {
+        word
+        for word in _WORD_RE.findall(question.lower())
+        if word not in _STOPWORDS and len(word) > 2
+    }
+    return len(haystack & needle)
 
 
 class LooseFakeRuntime(FakeRuntime):

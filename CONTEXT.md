@@ -4,8 +4,8 @@
 > repository state and decisions that should be preserved between phases.
 
 **Last updated:** 2026-09-14
-**Branch:** `arena/01a09f1b-brainos-context-lab`
-**Baseline:** `ef1bef6` (`origin/main`, includes PR #8's Phase 7); this branch adds Phase 8 on top
+**Branch:** `arena/01a09f31-brainos-context-lab`
+**Baseline:** `d993313` (`origin/main`, the PR #9 merge that includes Phase 8); this branch adds Phase 9 on top
 **Implementation plan:** [`BrainOS_Context_Lab_Implementation_Plan.md`](BrainOS_Context_Lab_Implementation_Plan.md)
 
 ## Product boundary
@@ -28,9 +28,9 @@ layer that helps select historical context.
 | Phase 5 — Conversation persistence | Complete | SQLite backend behind the finalized store protocols (per-op thread-safe connections, lazy schema, upsert memory mirrors); the service persists turns best-effort with session-key redaction at the write site; `UIController` owns lifecycle deletes and a persisted-view export block; `create_app` picks the backend, so headless runs never touch disk. Landed on `main` via PR #6. 249 tests; live-validated over HTTP with real SQLite. |
 | Phase 6 — Baseline modes | Complete | The plan's five modes (A full context, B sliding window, C lexical RAG, D BrainOS, E BrainOS + RAG) behind `ContextSettings.mode`, each fixing its own history window; a BrainOS-free lexical chunk retriever; a second delimited evidence block with its own budget, accounting, and eviction slot; mode-aware UI with a chunk panel; and the `evaluation/runner.py` seam wired, so `python -m evaluation.run --mode …` executes. 379 tests; live-validated over HTTP. |
 | Phase 7 — Context-rot benchmark | Complete | The seven plan categories are generated (`spec.py` + `generation.py`) with a fact ledger and evidence contract; retrieval scoring is model-free (markers → Recall@K / precision / evidence-in-prompt) and answer scoring grades supplied answers (`--answers`) into a fixed verdict vocabulary with the Phase 12 error labels; the runner reports aggregates and the dataset hash; the committed smoke dataset is 7 tasks, SHA-256 pinned by a manifest. Landed on `main` via PR #8. |
-| **Phase 8 — Metrics** | **Complete in this turn** | The plan's quality / efficiency / robustness suite on top of the Phase 7 scorer: faithfulness (grounding, not accuracy), conflict-resolution accuracy, token savings, quality-adjusted efficiency, optional latency, `by_length` curves, and a degradation/AUC block that is `null` on a single length rather than a silent 0. Plot-ready series for the six planned figures; matplotlib stays optional. 503 tests; live-validated on the pinned runtime. |
-| Phase 9 — Controlled experiments | Pending | Same model/temperature/tasks, only the context-management strategy changes; needs a generation path and cost controls (Phase 15) before real answers replace `--answers`. |
-| Phase 10 — Statistical evaluation | Pending | Trial-level mean/SD/95% CI, paired comparisons, effect sizes, and rendered plots. Series builders exist; do not present a single run's task-level mean as a trial CI. |
+| Phase 8 — Metrics | Complete (landed via PR #9) | The plan's quality / efficiency / robustness suite on top of the Phase 7 scorer: faithfulness (grounding, not accuracy), conflict-resolution accuracy, token savings, quality-adjusted efficiency, optional latency, `by_length` curves, and a degradation/AUC block that is `null` on a single length rather than a silent 0. Plot-ready series for the six planned figures; matplotlib stays optional. 503 tests; live-validated on the pinned runtime. |
+| **Phase 9 — Controlled experiments** | **Complete in this turn** | `python -m evaluation.experiment` runs the same tasks, model, sampling parameters, and scoring through all five modes with the credential read from an environment variable; `check_constants` verifies the plan's "only the strategy changes" rule after the run (fingerprint, system prompt, task wording, mode set, provider-reported model, token counter) and fails the run instead of reporting an uncontrolled comparison. Generation path (`generation.py`) plus the cost controls a run cannot exist without: `RunLimits` / `RunBudget` / `BudgetExceeded` with the `quick` / `standard` / `research` presets, per-request prompt ceilings, recorded skips, and per-request timeouts. `--generate` on the single-mode CLI. 586 tests; live-validated on the pinned runtime plus a localhost HTTP transport check. |
+| Phase 10 — Statistical evaluation | Pending | Trial-level mean/SD/95% CI, paired comparisons, effect sizes, and rendered plots. Phase 9 records trials and paired task records for this; `metrics.summarize` exists. Do not present a single run's task-level mean as a trial CI. |
 | Phases 11–20 | Pending | Ablations, error analysis, security hardening, deployment, cost controls, reproducibility, evaluation pipeline, tests, MVP, release. |
 
 Detailed logs are available in
@@ -40,11 +40,124 @@ Detailed logs are available in
 [`docs/phase-3-context-construction.md`](docs/phase-3-context-construction.md),
 [`docs/phase-4-chat-web-ui.md`](docs/phase-4-chat-web-ui.md),
 [`docs/phase-5-conversation-persistence.md`](docs/phase-5-conversation-persistence.md),
-[`docs/phase-6-baseline-modes.md`](docs/phase-6-baseline-modes.md), and
+[`docs/phase-6-baseline-modes.md`](docs/phase-6-baseline-modes.md),
 [`docs/phase-7-context-rot-benchmark.md`](docs/phase-7-context-rot-benchmark.md),
-and [`docs/phase-8-metrics.md`](docs/phase-8-metrics.md).
+[`docs/phase-8-metrics.md`](docs/phase-8-metrics.md), and
+[`docs/phase-9-controlled-experiments.md`](docs/phase-9-controlled-experiments.md).
 
-## What was done in Phase 8 (this turn)
+## What was done in Phase 9 (this turn)
+
+The plan's rule for this phase — "keep constant: model, temperature, generation
+parameters, benchmark examples, task wording, evaluation procedure; only change
+the context-management strategy" — is not left to discipline. A run checks it
+afterwards and records the outcome in `constants`, and a failed control set is an
+exit code, not a footnote.
+
+### New / changed modules
+
+| File | Purpose |
+| --- | --- |
+| [`src/evaluation/generation.py`](src/evaluation/generation.py) | Model-in-the-loop path: `GenerationSettings` (model, temperature, max_tokens, top_p, seed, timeout) with a 16-hex `fingerprint()` over exactly those fields; `GenerationResult` (text/model/requested_model/latency/usage/prompt tokens/skipped/error, `.ok`); immutable `ModelSpec` (`with_limits`, `provider_config`, `to_dict`); `count_messages` (+4 tokens per message); `budgeted_generator(...)` — every request counted, gated, timed, charged, and redacted; `api_key_from_environment`, `MissingCredentialError`, `build_provider`. `ModelSpec.api_key_env` must match `[A-Za-z_][A-Za-z0-9_]{0,127}`; the error never echoes the value. |
+| [`src/evaluation/limits.py`](src/evaluation/limits.py) | The cost controls a run cannot start without: `RunLimits` (tasks, requests, input/output/total tokens, failures, timeout), `RunBudget` (per-request prompt ceiling, request gate, reported-usage-first charging, skip recording, `snapshot`, `estimate_ceiling`), `BudgetExceeded`, and the `quick` / `standard` / `research` presets. |
+| [`src/evaluation/experiment.py`](src/evaluation/experiment.py) | `python -m evaluation.experiment`: `ExperimentPlan`, `run_controlled_experiment` (task-outer/mode-inner, fresh session per (task, mode, trial), provider failure recorded never raised, ceiling exhaustion → partial artifact + `aborted`), `check_constants`, `compare_modes_across_models`, artifact writer, summary table. Exit `0` clean / `2` constants violated / `3` aborted. |
+| [`src/evaluation/modes.py`](src/evaluation/modes.py) | `task_evaluator(..., generate=...)`: the finished prompt goes to the generator and the answer is graded in place, so the replay path and the generated path share one prompt builder. |
+| [`src/evaluation/run.py`](src/evaluation/run.py) | `--generate` (single mode with a model) and `--base-url`; the artifact gains `generation_settings` / `generation_usage` beside the unchanged Phase 6/7 schema; the summary prints `—` instead of `0.000` for accuracy/faithfulness/QAE when nothing was graded, with an explicit "no answers were graded" line. |
+| [`tests/fakes.py`](tests/fakes.py) | `RecordingProvider` (records messages *and* sampling kwargs; can report a different model than requested) and `PromptReadingProvider` (deterministic reader that answers only from the prompt's evidence, "I don't know." when there is none). |
+| Tests | [`tests/unit/test_limits.py`](tests/unit/test_limits.py) (14), [`tests/unit/test_generation.py`](tests/unit/test_generation.py) (19), [`tests/evaluation/test_experiment.py`](tests/evaluation/test_experiment.py) (25), [`tests/security/test_experiment_secrets.py`](tests/security/test_experiment_secrets.py) (6), [`tests/evaluation/test_run_cli.py`](tests/evaluation/test_run_cli.py) (5), [`tests/integration/test_controlled_experiment_live.py`](tests/integration/test_controlled_experiment_live.py) (4, pinned runtime + prompt reader), [`tests/integration/test_provider_http_live.py`](tests/integration/test_provider_http_live.py) (2, real SDK over a localhost stub). **503 → 586 tests**; `ruff check .` clean. |
+
+### Controlled-comparison contract (what later phases build on)
+
+```text
+artifact
+  plan        experiment-v1, application version, benchmark version, modes,
+              trials, session_isolation, dataset path + sha256
+  model       provider, model, temperature, max_tokens, top_p, seed, timeout,
+              base_url, api_key_env, settings_fingerprint
+  limits      the ceilings the run was allowed to spend
+  constants   checked: modes, task_set, task_wording, system_instructions,
+              generation_parameters, requested_model, token_counter
+              passed, violations[], generation_fingerprints[],
+              reported_models[], token_counters[], generated_requests
+  budget      requests, input/output/total tokens, failures, skips, remaining,
+              within_limits
+  modes[]     per (mode, trial): scored records + aggregate + a Phase 6/7
+              run-compatible dict (--runs-dir) for evaluation.compare
+  cost_estimate, headline[], warnings, dataset_issues, aborted
+```
+
+Rules:
+
+- `constants.passed == false` ⇒ not a comparison, however the headline reads
+  (the CLI exits 2 and says so);
+- `aborted` set ⇒ every number covers only the part that ran (exit 3);
+- `graded_answer_count == 0` ⇒ accuracy / faithfulness are unset (`—`), not zero;
+- `dry_run: true` ⇒ no provider was called, so no answer metric exists;
+- latency is per request and only ever comes from the generation path;
+- the model check reads the **provider-reported** model, because a gateway can
+  serve something other than what was requested.
+
+Cost controls implemented here (the part of Phase 15 a run cannot exist
+without) — `quick` 20 tasks × 3 modes × 1 trial, 60 requests, 16k/512/250k;
+`standard` all five modes × 100 × 1, 500 requests, 64k/1024/5M; `research` all
+five × 500 × 3, 7,500 requests, 200k/2048/100M. `--limit`, `--max-*`,
+`--timeout`, and `--token-counter` override them.
+
+### Measured behaviour (dry run, committed smoke dataset, no provider)
+
+```bash
+PYTHONPATH=src .venv/bin/python -m evaluation.experiment --preset quick \
+  --modes all --dry-run --output results/phase9-dry.json
+```
+
+```text
+experiment=quick dry_run=True tasks=7/7 modes=5 trials=1 requests=0
+mode            tasks  graded  accuracy  faithfulness  recall  evidence  mean_tokens  mean_ms
+full_context    7      0       —         —             0.000   1.000     1152.7       —
+sliding_window  7      0       —         —             0.000   0.000     189.4        —
+rag             7      0       —         —             1.000   1.000     270.6        —
+brainos         7      0       —         —             1.000   0.833     193.6        —
+brainos_rag     7      0       —         —             1.000   1.000     367.1        —
+No answers were graded: accuracy and faithfulness are unset, not zero.
+```
+
+The retrieval half of the comparison, on the smoke tier with the estimated
+counter: full context spends 1152.7 tokens per prompt where BrainOS spends 193.6
+(≈6× smaller), and BrainOS keeps evidence-in-prompt at 0.833 because the
+multi-hop task's evidence does not fit. **Nothing here is an answer-quality
+result** — no model was called. The live files assert the properties instead of
+numbers: one fingerprint across 35 requests, temperature 0.0, per-request
+latency and usage recorded, sliding window evidence 0.0 / BrainOS > 0, full
+context recall 0.0 with evidence 1.0, no credential anywhere in the artifact,
+and the real OpenAI SDK working over HTTP with the key in the header only.
+
+**Integration-validation observations, not research results.**
+
+### Bugs found and fixed while building it
+
+1. **`check_constants` invented a system-prompt violation** when the caller
+   configured no system instructions; the check now runs only when a prompt was
+   configured, and accepts the builder's truncation marker.
+2. **Gateway routing was invisible** — the check read `requested_model` (what was
+   asked for) instead of the provider-reported `model`.
+3. **`--api-key` abbreviated `--api-key-env`** in both CLIs, so a pasted
+   credential could be recorded as a variable name and exported; both parsers now
+   set `allow_abbrev=False`.
+4. **`api_key_env` accepted any string**; it is now regex-validated and the error
+   never echoes the value.
+
+### Findings this phase produced (carry into Phase 10)
+
+1. **A single run is not a trial.** `research` repeats three times because
+   stochastic sampling without repeats cannot support a claim; Phase 10 must use
+   the paired records and `metrics.summarize`, never one run's task-level mean.
+2. **Latency is now a real, provider-dominated number** — keep it per request and
+   do not backfill replays.
+3. **The smoke tier still cannot support a claim** (7 tasks, one length). Anything
+   reported needs `--tier standard`/`research` and `--token-counter tiktoken`.
+4. **Skips are a mode property.** Full context will exceed the input ceiling at
+   the plan's longer lengths; keep skips visible instead of trimming them away.
+
+## What was done in Phase 8 (PR #9, previous turn)
 
 ### New / changed modules
 
@@ -764,6 +877,20 @@ threshold on it would be overfitting. Threshold calibration belongs to Phases
   `comparison_report`, plot series) are derived from scored records and carry
   no credentials. Latency is omitted (`null`) rather than filled with replay
   wall-clock. A missing degradation curve is `null` with a note, not a zero.
+- **New (Phase 9):** a run reads its credential only from the environment
+  variable named by `--api-key-env`. Both CLIs set `allow_abbrev=False`, so
+  `--api-key` cannot abbreviate `--api-key-env` and a pasted secret can no
+  longer be recorded as a variable *name* and exported
+  (`tests/security/test_experiment_secrets.py` pins the flag's `dest` and the
+  rejection). `ModelSpec.api_key_env` must match
+  `[A-Za-z_][A-Za-z0-9_]{0,127}` and its `ValueError` never echoes the value;
+  both CLIs surface it as `SystemExit`. The key is handed to the generation
+  wrapper only as a redaction secret — artifacts are asserted key-free (`sk-`,
+  `"api_key":`), `ProviderConfig` still keeps it out of `repr`/`safe_dict`, and
+  the price of a run is bounded by `RunLimits` *before* the first request.
+  The controlled-comparison check records the provider-reported model, so a
+  gateway that silently serves a different model fails the run rather than
+  producing an unlabelled comparison.
 - **Restated (Phase 6):** raw history inside the recent window is replayed
   verbatim. The credential guard covers recalled memory, retrieved chunks,
   diagnostics, and persisted rows — not the transcript Mode A must send as
@@ -787,11 +914,11 @@ From the repository root:
 
 ```bash
 python3 -m venv .venv
-.venv/bin/pip install pytest ruff gradio
+.venv/bin/pip install pytest ruff gradio openai
 .venv/bin/pip install "brainos-cli @ git+https://github.com/NiravRVaghasiya/BrainOS.git@1d9eb7a0ca537e7278e29809cda4f4c5da6c1dcc"
 
 .venv/bin/pytest -q
-# 503 passed (1 skipped: Gradio)
+# 586 passed (1 skipped: Gradio)
 
 .venv/bin/ruff check .
 # All checks passed!   (whole repository, no exclusions)
@@ -810,62 +937,82 @@ PYTHONPATH=src .venv/bin/python -m evaluation.run --mode brainos \
 .venv/bin/python benchmarks/context_rot/generation.py
 .venv/bin/python benchmarks/context_rot/generation.py --tier standard --variants 2 \
   --output benchmarks/context_rot/generated/standard.jsonl
+
+# Phase 9: the controlled comparison across all five modes. A dry run builds
+# every prompt and needs no key; a real run reads the credential from the
+# environment variable named by --api-key-env and enforces the preset's ceilings.
+PYTHONPATH=src .venv/bin/python -m evaluation.experiment --preset quick --modes all \
+  --dry-run --output results/phase9-dry.json
+PYTHONPATH=src .venv/bin/python -m evaluation.experiment --preset quick \
+  --provider openai --model gpt-4o-mini --api-key-env OPENAI_API_KEY \
+  --output results/phase9-quick.json --runs-dir results/phase9-runs
+PYTHONPATH=src .venv/bin/python -m evaluation.run --mode brainos --model gpt-4o-mini \
+  --generate --output results/brainos-generated.json
+# --token-counter tiktoken needs the optional `tiktoken` package; without it the
+# default estimate_tokens counter (ceil(len/4)) bounds every ceiling.
 ```
 
-Test count went 154 → 216 (Phase 4) → 249 (Phase 5) → 379 (Phase 6) → **494**
-in this phase (115 new: 14 dataset-schema, 49 benchmark-validity, 42 scoring,
-10 live benchmark).
+Test count went 154 → 216 (Phase 4) → 249 (Phase 5) → 379 (Phase 6) → 494
+(Phase 8) → **586** in this phase (+83: 14 limits, 19 generation, 25 experiment,
+6 experiment-secrets, 5 run-CLI, 4 live controlled-experiment, 2 live provider
+HTTP, plus additions elsewhere).
 The live tests in `tests/integration/test_chat_controller_live.py`,
 `tests/integration/test_persistence_live.py`,
 `tests/integration/test_context_pipeline.py`,
-`tests/integration/test_baseline_modes_live.py`, and
-`tests/integration/test_brainos_runtime.py` run against the pinned BrainOS
-revision and skip when `brainos_runtime` is not installed; `tests/ui/` skips
-when Gradio is absent. No provider API key was used; generation is exercised
-through `FakeProvider` / `FakeLLMProvider`.
+`tests/integration/test_baseline_modes_live.py`,
+`tests/integration/test_brainos_runtime.py`, and
+`tests/integration/test_controlled_experiment_live.py` run against the pinned
+BrainOS revision and skip when `brainos_runtime` is not installed;
+`tests/integration/test_provider_http_live.py` needs the `openai` SDK and talks
+only to a stub on `127.0.0.1`; `tests/ui/` skips when Gradio is absent. No
+provider API key was used anywhere: generation is exercised through
+`FakeProvider` / `FakeLLMProvider` / `RecordingProvider` / `PromptReadingProvider`
+and the localhost stub.
 
 `.venv` is ignored and is only a local test environment.
 
 ## Next safe step
 
-Implement **Phase 9 — Controlled experiments**: the same model, temperature,
-generation parameters, and tasks, with only the context-management strategy
-changing. Then Phase 10 (trial-level statistics and rendered plots).
+Implement **Phase 10 — Statistical evaluation** (plan §16): trial-level mean, SD,
+and 95% CI, paired comparisons, effect sizes, and rendered plots. Phase 9 already
+records what Phase 10 needs (repeated trials per (task, mode), records paired by
+task, per-request latency and usage); the work is choosing the statistics and
+rendering them, not re-running the benchmark.
 
 What already exists and should be reused rather than rebuilt:
 
-* `evaluation/scoring.py` — `score_record` / `aggregate_scores` now emit the
-  full Phase 8 suite (faithfulness, conflict-resolution, QAE, `by_length`,
-  degradation). Do not replace the verdict rules.
-* `evaluation/metrics.py` — primitives including degradation/AUC and
-  `summarize` (mean/SD/95% CI). `summarize` is the trial-level building block
-  for Phase 10; a single run's task-level mean is not a trial CI.
-* `evaluation/analysis.py` / `plots.py` / `compare.py` — headline tables and
-  the six plot series. Phase 10 renders them and adds paired tests.
-* `evaluation/modes.py` — `replay_task` / `compare_modes` (with
-  `session_isolation`) run any task through any mode on the real service.
-* `evaluation/runner.py` + `evaluation/run.py` — a run already scores,
-  aggregates, records the dataset hash and notes, and writes JSON.
+* `evaluation/metrics.py` — `summarize` (mean/SD/95% CI) is the trial-level
+  building block. A single run's task-level mean is **not** a trial CI.
+* `evaluation/experiment.py` — `ExperimentRun.mode_results` / `headline_rows`
+  and the paired records. `--trials N` (or the `research` preset's 3) is the
+  input a paired test needs; `constants.passed` / `aborted` gate reportability.
+* `evaluation/analysis.py` / `plots.py` / `compare.py` / `reports.py` — headline
+  tables, the six plot series, and the JSON writers.
+* `evaluation/limits.py` — `research` (7,500 requests, 3 trials, 100M tokens) is
+  the preset a claim-bearing run uses.
 * `benchmarks/context_rot` — `--tier standard` (5k/10k/20k/40k) and
-  `--variants N` generate the length ladder into the Git-ignored
-  `generated/` directory.
+  `--variants N` generate the length ladder into the Git-ignored `generated/`.
 
-Carry these constraints into Phase 9:
+Carry these constraints into Phase 10:
 
-1. **Faithfulness, Recall@K, and evidence-in-prompt are three numbers.** They
+1. **A run is not a trial.** Repeat, then summarize; never present one run's
+   task-level mean as a confidence interval.
+2. **Never report a comparison whose `constants.passed` is false or that has an
+   `aborted` block** — the CLI exits 2/3 for exactly that reason.
+3. **Faithfulness, Recall@K, and evidence-in-prompt are three numbers.** They
    disagree on multi-hop (1.00 / 1.00 / 0.00 on Mode D); do not collapse them.
-2. **Abstention is inverted-scored on purpose.** Do not "normalise" the verdicts.
-3. **The committed smoke tier cannot support a claim**, and the degradation
-   block now says so (`auc: null`). Use `--tier standard`/`research`.
-4. **QAE is meaningless while answers are scripted.** Put a model in the loop
-   before comparing quality-adjusted efficiency across modes.
-5. **Latency stays null until generation exists.** Do not fill it with replay
-   wall-clock.
-6. **Grading needs the Phase 15 cost controls** before the Evaluation tab
-   (Phase 17) exposes a benchmark run; `--limit` is the only control today.
-7. **Use an exact token counter for research runs.** Every number in this file is
+   Abstention stays inverted-scored on purpose.
+4. **The committed smoke tier cannot support a claim** (7 tasks, one length);
+   use `--tier standard`/`research`, and `--token-counter tiktoken` (installs
+   `tiktoken`) for anything reported. Every number in this file is
    `estimate_tokens`.
+5. **Latency is per request and provider-dominated.** Do not backfill replays.
+6. **Skips are a mode property.** Keep requests that exceeded the input ceiling
+   in the denominators and in the report.
+7. **Grade with a model in the loop** (`--generate`) before comparing QAE across
+   modes; scripted answers make quality-adjusted efficiency meaningless.
 8. **Do not tune thresholds on the smoke tier** (Phase 3/4 rule, still in force).
-9. **Keep the isolated replay in the suite.**
+9. **Keep the isolated replay and the offline paths in the suite**
+   (`PromptReadingProvider` on the pinned runtime; the localhost HTTP stub).
 10. Small UI follow-up candidate, still open: surface the controller's
     "Session ended …" confirmation in the `/end_session` handler.

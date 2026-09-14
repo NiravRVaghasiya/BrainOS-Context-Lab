@@ -7,9 +7,13 @@ that from the application's own context-construction path.
 
 What this module deliberately does **not** do:
 
-* **No model calls.** A replay has no provider configured, so no generation
-  happens and no API key is needed. Answer accuracy, faithfulness, and
-  abstention need a model and belong to Phase 8.
+* **No model calls of its own.** A replay configures no provider, so no API key
+  is needed and the retrieval half of a benchmark runs credential-free. Phase 9
+  added an *optional* ``generate`` callable: when a caller supplies one (the
+  controlled experiment in :mod:`evaluation.experiment` does), the prompt this
+  module built is sent to a model and the answer comes back on the replay
+  record. The callable is a parameter, not an import, so the credential-free
+  path stays credential-free.
 * **No scoring.** It reports what each mode *put in the prompt* and what that
   cost. Calling the ``expected_answer_in_prompt`` flag an accuracy measure would
   be wrong: it says the evidence was available to the model, not that the model
@@ -36,6 +40,7 @@ from app.state import ContextSettings, SessionState
 from baselines.modes import MODE_ORDER, mode_label, resolve_mode
 
 from .datasets import BenchmarkTask
+from .generation import GenerationResult, Generator
 
 #: Type of the factory that hands a replay a fresh, session-scoped service.
 ServiceFactory = Callable[[str], ConversationService]
@@ -83,6 +88,24 @@ class ModeReplay:
     expected_answer_in_prompt: bool = False
     prompt_messages: tuple[dict[str, str], ...] = ()
     stats: dict[str, Any] = field(default_factory=dict)
+    #: Phase 9: the model's answer, present only when a generation path was
+    #: supplied. ``None`` means "no model was called", not "the model said
+    #: nothing" — an empty completion is a generation failure and scores as
+    #: ungraded rather than as a wrong answer.
+    answer: str | None = None
+    #: Phase 9: the generation record (latency, usage, settings fingerprint,
+    #: error). Kept as a plain mapping so a replay stays serializable and this
+    #: module keeps no dependency on how generation is implemented.
+    generation: dict[str, Any] | None = None
+
+    @property
+    def latency_ms(self) -> float | None:
+        """Return the generation latency, or ``None`` when nothing was generated."""
+
+        if not self.generation:
+            return None
+        value = self.generation.get("latency_ms")
+        return None if value is None else float(value)
 
     def prompt_text(self) -> str:
         """Return the prompt as one string, in message order."""
@@ -101,6 +124,9 @@ class ModeReplay:
             "mode_label": self.mode_label,
             "question": self.question,
             "expected_answer": self.expected_answer,
+            "answer": self.answer,
+            "latency_ms": self.latency_ms,
+            "generation": dict(self.generation) if self.generation else None,
             "conversation_length": self.conversation_length,
             "final_context_tokens": self.final_context_tokens,
             "full_context_reference_tokens": self.full_context_reference_tokens,
@@ -138,6 +164,7 @@ def replay_task(
     *,
     service_factory: ServiceFactory | None = None,
     session_isolation: bool = False,
+    generate: Generator | None = None,
 ) -> ModeReplay:
     """Run one benchmark task's conversation through one baseline mode.
 
@@ -154,6 +181,12 @@ def replay_task(
     ``session_isolation=True`` a fresh session starts at each boundary, which is
     how the product's session-isolation invariant is measured — the fact is then
     provably unreachable, and declining to answer is the correct behaviour.
+
+    When ``generate`` is supplied (Phase 9), the prompt built for the question is
+    sent to the model and the answer is attached to the replay. The generated
+    reply is *not* appended to the transcript: the episode ends at the question,
+    and letting a mode's own answer extend the conversation would make the next
+    task's replay depend on the previous mode's output.
     """
 
     factory = service_factory or default_service_factory
@@ -185,6 +218,9 @@ def replay_task(
     length = task.conversation_length
     if length is None:
         length = len(task.conversation)
+    generation: GenerationResult | None = None
+    if generate is not None:
+        generation = generate(turn.context_messages)
     return ModeReplay(
         task_id=task.task_id,
         category=task.category,
@@ -215,6 +251,8 @@ def replay_task(
         expected_answer_in_prompt=bool(expected) and expected in prompt,
         prompt_messages=tuple(dict(message) for message in turn.context_messages),
         stats=stats,
+        answer=generation.text if generation is not None else None,
+        generation=generation.to_dict() if generation is not None else None,
     )
 
 
@@ -224,6 +262,7 @@ def compare_modes(
     *,
     service_factory: ServiceFactory | None = None,
     session_isolation: bool = False,
+    generate: Generator | None = None,
 ) -> list[ModeReplay]:
     """Replay one task through every requested mode, in plan order.
 
@@ -237,6 +276,7 @@ def compare_modes(
             mode,
             service_factory=service_factory,
             session_isolation=session_isolation,
+            generate=generate,
         )
         for mode in modes
     ]
@@ -246,6 +286,7 @@ def task_evaluator(
     service_factory: ServiceFactory | None = None,
     *,
     session_isolation: bool = False,
+    generate: Generator | None = None,
 ) -> Callable[[BenchmarkTask, str], dict[str, Any]]:
     """Return the evaluator callable :meth:`EvaluationRunner.run` expects.
 
@@ -259,6 +300,7 @@ def task_evaluator(
             mode,
             service_factory=service_factory,
             session_isolation=session_isolation,
+            generate=generate,
         ).to_dict()
 
     return evaluate
