@@ -457,6 +457,42 @@ def test_cli_writes_per_mode_run_files(tmp_path) -> None:
     ] == MODE_BRAINOS
 
 
+def test_experiment_run_statistical_summary_with_multiple_trials() -> None:
+    provider = RecordingProvider(text="MongoDB 7")
+    plan = _plan(trials=2)
+
+    run = run_controlled_experiment(plan, TASKS, SPEC, provider, clock=_clock())
+    stat_summary = run.statistical_summary(baseline_mode=MODE_FULL_CONTEXT)
+
+    assert "trial_summaries" in stat_summary
+    assert MODE_BRAINOS in stat_summary["trial_summaries"]
+    assert MODE_FULL_CONTEXT in stat_summary["trial_summaries"]
+    assert stat_summary["trial_summaries"][MODE_BRAINOS]["trials"] == 2
+    assert "paired_comparisons" in stat_summary
+
+    payload = run.to_dict()
+    assert "statistical_summary" in payload
+    assert payload["statistical_summary"]["metrics_version"] == "metrics-v1"
+
+
+def test_cli_renders_plots_when_plots_dir_is_supplied(tmp_path) -> None:
+    plots_dir = tmp_path / "plots"
+    code = main(
+        [
+            "--dry-run",
+            "--modes",
+            f"{MODE_FULL_CONTEXT},{MODE_BRAINOS}",
+            "--output",
+            str(tmp_path / "artifact.json"),
+            "--plots-dir",
+            str(plots_dir),
+            "--quiet",
+        ]
+    )
+    assert code == 0
+    assert len(list(plots_dir.glob("*.png"))) == 6
+
+
 def _record(
     *,
     prompt: str = "You are an assistant.",

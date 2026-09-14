@@ -2,18 +2,26 @@ import pytest
 
 from evaluation.metrics import (
     METRICS_VERSION,
+    PairedDifference,
     Summary,
     accuracy_degradation,
     area_under_curve,
     area_under_degradation_curve,
+    cohens_d,
     context_reduction,
+    effect_size_magnitude,
+    hedges_g,
     mean_degradation,
+    paired_difference_test,
     precision_at_k,
     quality_adjusted_efficiency,
     rate,
     recall_at_k,
     relative_degradation,
+    sign_test_p_value,
+    student_t_p_value,
     summarize,
+    t_critical,
     token_savings,
 )
 
@@ -79,3 +87,108 @@ def test_summary_to_dict_is_json_ready() -> None:
     assert isinstance(payload["confidence_interval_95"], tuple)
     assert METRICS_VERSION == "metrics-v1"
     assert isinstance(Summary(0, 0.0, 0.0, (0.0, 0.0)), Summary)
+
+
+# --------------------------------------------------------------------------- #
+# Phase 10: Statistical Evaluation Primitives
+# --------------------------------------------------------------------------- #
+
+
+def test_t_critical_values_and_summarize_with_t() -> None:
+    # Small sample degrees of freedom (df = 2 for n = 3)
+    assert t_critical(2) == pytest.approx(4.302653, rel=1e-4)
+    assert t_critical(10) == pytest.approx(2.228139, rel=1e-4)
+    assert t_critical(100) == pytest.approx(1.984, rel=1e-2)
+    assert t_critical(0) == 1.96
+
+    summ_z = summarize([1.0, 2.0, 3.0], use_t=False)
+    summ_t = summarize([1.0, 2.0, 3.0], use_t=True)
+    assert summ_t.count == 3
+    assert summ_t.mean == 2.0
+    # t CI is wider than normal approx for small n
+    margin_z = summ_z.confidence_interval_95[1] - summ_z.mean
+    margin_t = summ_t.confidence_interval_95[1] - summ_t.mean
+    assert margin_t > margin_z
+
+    # Edge cases
+    assert summarize([]).count == 0
+    assert summarize([5.0]).confidence_interval_95 == (5.0, 5.0)
+
+
+def test_student_t_p_value_and_sign_test() -> None:
+    assert student_t_p_value(0.0, 10) == 1.0
+    assert student_t_p_value(2.0, 10) == pytest.approx(0.073388, rel=1e-3)
+    assert student_t_p_value(4.0, 10) < 0.01
+    assert student_t_p_value(1.0, 0) == 1.0
+
+    # Sign test (binomial)
+    assert sign_test_p_value(7, 0) == pytest.approx(2.0 * (0.5**7))
+    assert sign_test_p_value(5, 2) == pytest.approx(0.453125)
+    assert sign_test_p_value(0, 0) == 1.0
+
+
+def test_cohens_d_and_hedges_g() -> None:
+    a = [1.0, 0.9, 0.8, 1.0, 0.9]
+    b = [0.4, 0.5, 0.3, 0.4, 0.5]
+    d_paired = cohens_d(a, b, paired=True)
+    g_paired = hedges_g(a, b, paired=True)
+
+    assert d_paired > 0.8  # Large effect size
+    assert g_paired < d_paired  # Hedges' g applies small-sample correction (J < 1)
+    assert effect_size_magnitude(d_paired) == "large"
+    assert effect_size_magnitude(0.1) == "negligible"
+    assert effect_size_magnitude(0.3) == "small"
+    assert effect_size_magnitude(0.6) == "medium"
+
+    d_indep = cohens_d(a, b, paired=False)
+    assert d_indep > 0.8
+    assert hedges_g(a, b, paired=False) > 0.0
+
+    # Edge cases
+    assert cohens_d([], []) == 0.0
+    assert cohens_d([1.0], [1.0]) == 0.0
+    with pytest.raises(ValueError):
+        cohens_d([1.0, 2.0], [1.0], paired=True)
+
+
+def test_paired_difference_test_and_edge_cases() -> None:
+    a = [1.0, 1.0, 1.0, 1.0, 0.0]
+    b = [0.0, 0.0, 1.0, 0.0, 0.0]
+    res = paired_difference_test(a, b, metric="accuracy")
+
+    assert isinstance(res, PairedDifference)
+    assert res.metric == "accuracy"
+    assert res.sample_size == 5
+    assert res.mean_a == 0.8
+    assert res.mean_b == 0.2
+    assert res.mean_difference == pytest.approx(0.6)
+    assert res.wins == 3
+    assert res.losses == 0
+    assert res.ties == 2
+    assert res.win_rate == 0.6
+    assert res.t_statistic > 0.0
+    assert res.p_value < 0.10
+    assert res.cohens_d > 1.0
+    assert res.effect_size_magnitude == "large"
+
+    # Edge cases: empty, n=1, zero variance
+    empty_res = paired_difference_test([], [])
+    assert empty_res.sample_size == 0
+    assert empty_res.p_value == 1.0
+
+    single_res = paired_difference_test([1.0], [0.5])
+    assert single_res.sample_size == 1
+    assert single_res.mean_difference == 0.5
+    assert single_res.confidence_interval_95 == (0.5, 0.5)
+
+    flat_res = paired_difference_test([1.0, 1.0], [1.0, 1.0])
+    assert flat_res.mean_difference == 0.0
+    assert flat_res.p_value == 1.0
+
+    with pytest.raises(ValueError):
+        paired_difference_test([1.0], [1.0, 2.0])
+
+    payload = res.to_dict()
+    assert payload["metric"] == "accuracy"
+    assert payload["effect_size_magnitude"] == "large"
+    assert isinstance(payload["confidence_interval_95"], tuple)

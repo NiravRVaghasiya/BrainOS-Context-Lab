@@ -1,4 +1,4 @@
-"""Plotting extension points for benchmark reports.
+"""Plotting extension points for benchmark reports and statistical evaluation.
 
 Phase 8 produces the six plan-required series (accuracy vs length, tokens vs
 length, accuracy vs tokens, retrieval precision/recall, token savings,
@@ -6,8 +6,7 @@ quality-adjusted efficiency). Rendering them needs matplotlib, which is an
 optional extra; the series themselves are built in :mod:`evaluation.analysis`
 and are tested without that dependency.
 
-Phase 10 owns trial-level statistics on top of these series. This module does
-not compute a CI or an effect size.
+Phase 10 adds trial-level confidence intervals and error bars to the rendered plots.
 """
 
 from __future__ import annotations
@@ -16,7 +15,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from .analysis import plot_series
+from .analysis import plot_series, statistical_plot_series
 
 PLOT_NAMES: tuple[str, ...] = (
     "accuracy_vs_length",
@@ -39,7 +38,7 @@ def _pyplot():
 
 
 def plot_accuracy_by_length(rows: Iterable[dict[str, Any]], output: str | Path) -> Path:
-    """Create the first planned plot once plotting dependencies are installed."""
+    """Create Plot 1: Accuracy vs conversation length with error bars."""
 
     return _line_plot(
         rows,
@@ -53,6 +52,8 @@ def plot_accuracy_by_length(rows: Iterable[dict[str, Any]], output: str | Path) 
 
 
 def plot_tokens_by_length(rows: Iterable[dict[str, Any]], output: str | Path) -> Path:
+    """Create Plot 2: Context tokens vs conversation length with error bars."""
+
     return _line_plot(
         rows,
         output,
@@ -65,6 +66,8 @@ def plot_tokens_by_length(rows: Iterable[dict[str, Any]], output: str | Path) ->
 
 
 def plot_accuracy_vs_tokens(rows: Iterable[dict[str, Any]], output: str | Path) -> Path:
+    """Create Plot 3: Accuracy vs context tokens."""
+
     return _line_plot(
         rows,
         output,
@@ -77,7 +80,7 @@ def plot_accuracy_vs_tokens(rows: Iterable[dict[str, Any]], output: str | Path) 
 
 
 def plot_retrieval(rows: Iterable[dict[str, Any]], output: str | Path) -> Path:
-    """Grouped bars of recall, precision, and evidence-in-prompt per mode."""
+    """Create Plot 4: Grouped bars of recall, precision, and evidence-in-prompt per mode."""
 
     return _bar_plot(
         rows,
@@ -89,6 +92,8 @@ def plot_retrieval(rows: Iterable[dict[str, Any]], output: str | Path) -> Path:
 
 
 def plot_token_savings(rows: Iterable[dict[str, Any]], output: str | Path) -> Path:
+    """Create Plot 5: Token savings vs full context."""
+
     return _bar_plot(
         rows,
         output,
@@ -101,6 +106,8 @@ def plot_token_savings(rows: Iterable[dict[str, Any]], output: str | Path) -> Pa
 def plot_quality_adjusted_efficiency(
     rows: Iterable[dict[str, Any]], output: str | Path
 ) -> Path:
+    """Create Plot 6: Quality-adjusted efficiency."""
+
     return _bar_plot(
         rows,
         output,
@@ -111,11 +118,22 @@ def plot_quality_adjusted_efficiency(
 
 
 def plot_all(
-    runs: Sequence[Mapping[str, Any]], output_dir: str | Path
+    runs_or_series: Any,
+    output_dir: str | Path,
 ) -> dict[str, Path]:
-    """Render every planned plot from exported runs into ``output_dir``."""
+    """Render every planned plot from exported runs or pre-built series into ``output_dir``."""
 
-    series = plot_series(runs)
+    if isinstance(runs_or_series, Mapping) and all(k in runs_or_series for k in PLOT_NAMES):
+        series = dict(runs_or_series)
+    else:
+        # Check if source contains trial results or multi-trial structure
+        try:
+            series = statistical_plot_series(runs_or_series)
+            if not any(series.values()):
+                series = plot_series(runs_or_series)
+        except Exception:
+            series = plot_series(runs_or_series)
+
     destination = Path(output_dir)
     destination.mkdir(parents=True, exist_ok=True)
     writers = {
@@ -150,12 +168,27 @@ def _line_plot(
     for mode in sorted({str(row.get("mode", "")) for row in rows}):
         selected = [row for row in rows if row.get("mode") == mode]
         selected.sort(key=lambda row: row.get(x, 0) or 0)
-        plt.plot(
-            [row.get(x, 0) for row in selected],
-            [row.get(y, 0.0) for row in selected],
-            marker="o",
-            label=mode or "(unknown)",
-        )
+        x_vals = [row.get(x, 0) for row in selected]
+        y_vals = [float(row.get(y, 0.0) or 0.0) for row in selected]
+        y_err_key = f"{y}_sd"
+        y_errs = [float(row.get(y_err_key, row.get("y_err", 0.0)) or 0.0) for row in selected]
+        has_err = any(err > 0.0 for err in y_errs)
+        if has_err:
+            plt.errorbar(
+                x_vals,
+                y_vals,
+                yerr=y_errs,
+                capsize=3,
+                marker="o",
+                label=mode or "(unknown)",
+            )
+        else:
+            plt.plot(
+                x_vals,
+                y_vals,
+                marker="o",
+                label=mode or "(unknown)",
+            )
     plt.xlabel(xlabel)
     plt.ylabel(ylabel)
     plt.title(title)
@@ -182,18 +215,40 @@ def _bar_plot(
     modes = [str(row.get("mode", "") or "(unknown)") for row in rows]
     plt.figure()
     if len(values) == 1:
-        plt.bar(modes, [float(row.get(values[0], 0.0) or 0.0) for row in rows])
+        val_key = values[0]
+        y_vals = [float(row.get(val_key, 0.0) or 0.0) for row in rows]
+        y_err_key = f"{val_key}_sd"
+        y_errs = [float(row.get(y_err_key, row.get("y_err", 0.0)) or 0.0) for row in rows]
+        has_err = any(err > 0.0 for err in y_errs)
+        if has_err:
+            plt.bar(modes, y_vals, yerr=y_errs, capsize=3)
+        else:
+            plt.bar(modes, y_vals)
     else:
         width = 0.8 / max(len(values), 1)
         indexes = list(range(len(rows)))
         for offset, key in enumerate(values):
             shifted = [index + offset * width for index in indexes]
-            plt.bar(
-                shifted,
-                [float(row.get(key, 0.0) or 0.0) for row in rows],
-                width=width,
-                label=key,
-            )
+            y_vals = [float(row.get(key, 0.0) or 0.0) for row in rows]
+            y_err_key = f"{key}_sd"
+            y_errs = [float(row.get(y_err_key, 0.0) or 0.0) for row in rows]
+            has_err = any(err > 0.0 for err in y_errs)
+            if has_err:
+                plt.bar(
+                    shifted,
+                    y_vals,
+                    width=width,
+                    yerr=y_errs,
+                    capsize=3,
+                    label=key,
+                )
+            else:
+                plt.bar(
+                    shifted,
+                    y_vals,
+                    width=width,
+                    label=key,
+                )
         tick_centers = [index + width * (len(values) - 1) / 2 for index in indexes]
         plt.xticks(tick_centers, modes)
         plt.legend()
