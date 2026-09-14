@@ -31,10 +31,13 @@ Two invariants the rest of the repository depends on:
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Any, Protocol, runtime_checkable
+
+from security.findings import PromptGuardReport
+from security.guard import INTENT_FAMILIES, GuardedText, neutralize
 
 from .adapter import Conflict, MemoryRecord
 from .retrieval_policy import (
@@ -42,7 +45,6 @@ from .retrieval_policy import (
     RetrievalPolicy,
     RetrievalReport,
     ScoredMemory,
-    neutralize_memory_text,
     normalize_text,
     preview_text,
     select_memories,
@@ -74,6 +76,19 @@ HISTORY_BLOCK_PREAMBLE = (
     "chosen by a lexical retriever, in relevance order, and may be out of date."
 )
 _ALLOWED_ROLES = ("system", "user", "assistant", "tool")
+#: Roles a *history* message may keep. A transcript is user and assistant
+#: content; only this application emits system messages, so a history item
+#: claiming any other role is downgraded to ``user``. That is the history route's
+#: equivalent of the memory block's role-prefix guard: neither a dataset nor a
+#: pasted transcript can promote itself above the system prompt.
+_HISTORY_ROLES = ("user", "assistant")
+#: Role names a model treats as *authoritative*. A transcript that claims one is
+#: attempting a privilege escalation rather than mistyping a label, so those
+#: downgrades are counted and surfaced in the security report; an unrecognised
+#: role is still coerced, just without the escalation claim.
+_SPEAKER_ROLES = ("system", "tool", "developer", "function")
+#: What replaces a credential inside prompt text.
+REDACTION_MARKER = "[redacted]"
 #: Guard bound for chunk text. Chunks are already bounded by the retriever's own
 #: packing limit, so this only has to be generous enough never to be the binding
 #: constraint; the token budget is what actually controls chunk length.
@@ -309,6 +324,16 @@ class BuiltContext:
     #: Chunks that actually reached the prompt (Phase 6, Modes C/E), in the
     #: order they were rendered.
     selected_chunks: tuple[Any, ...] = ()
+    #: Phase 13: what the guards did while this prompt was assembled — attack
+    #: families seen, structural rewrites applied, credentials redacted, history
+    #: roles downgraded. A pure function of the inputs, so an evaluation replay
+    #: reports the same thing a live session does.
+    guard: PromptGuardReport = field(default_factory=PromptGuardReport)
+
+    def guard_dict(self) -> dict[str, Any]:
+        """The guard report as JSON-ready counts (the artifact/panel shape)."""
+
+        return self.guard.to_dict()
 
     def final_prompt(self) -> str:
         """Render the exact message list as text for UI inspection."""
@@ -341,24 +366,83 @@ class BuiltContext:
             ],
             "stats": self.stats.to_dict(),
             "report": self.report.to_dict(),
+            "guard": self.guard.to_dict(),
         }
 
 
-def _normalize_history(recent_conversation: Iterable[dict[str, Any]]) -> list[dict[str, str]]:
-    """Coerce conversation items into provider-safe role/content messages."""
+@dataclass(frozen=True)
+class HistoryGuard:
+    """What normalising the history window had to fix.
+
+    Counted rather than silent: a redaction changes the bytes the model sees,
+    so the change belongs in the accounting beside the token counts.
+    """
+
+    messages: list[dict[str, str]]
+    credentials_redacted: int = 0
+    messages_redacted: int = 0
+    roles_downgraded: int = 0
+
+
+def _redact_secrets(text: str, secrets: Sequence[str]) -> tuple[str, int]:
+    """Replace every live credential in ``text``; return the text and a count."""
+
+    result = str(text)
+    hits = 0
+    for secret in sorted({value for value in secrets if value}, key=len, reverse=True):
+        occurrences = result.count(secret)
+        if occurrences:
+            result = result.replace(secret, REDACTION_MARKER)
+            hits += occurrences
+    return result, hits
+
+
+def _normalize_history(
+    recent_conversation: Iterable[dict[str, Any]], secrets: Sequence[str] = ()
+) -> HistoryGuard:
+    """Coerce conversation items into provider-safe role/content messages.
+
+    Two guards run here, both counted:
+
+    * **Credentials.** The active session key is removed by exact match. Phase 3
+      closed this route for recalled memory and Phase 6 for retrieved chunks;
+      history was the remaining path by which a key a user pasted into a
+      conversation was replayed to the provider on every later turn — including
+      after the user pointed the session at a different endpoint. Only the live
+      credential is matched, so transcript fidelity is otherwise untouched and a
+      keyless evaluation replay is byte-identical to before.
+    * **Roles.** A history message may only be ``user`` or ``assistant``.
+      Anything else — including ``system`` — is sent as ``user``, because the
+      system prompt is the application's to write.
+    """
 
     history: list[dict[str, str]] = []
+    credentials_redacted = 0
+    messages_redacted = 0
+    roles_downgraded = 0
     for item in recent_conversation:
         if isinstance(item, MemoryRecord):  # defensive: never treat memory as history
             continue
         if not isinstance(item, dict):
             continue
         role = str(item.get("role", "user")).strip().lower()
-        if role not in _ALLOWED_ROLES:
+        if role not in _HISTORY_ROLES:
+            if role in _SPEAKER_ROLES:
+                roles_downgraded += 1
             role = "user"
         content = item.get("content", "")
-        history.append({"role": role, "content": "" if content is None else str(content)})
-    return history
+        text = "" if content is None else str(content)
+        text, hits = _redact_secrets(text, secrets)
+        if hits:
+            credentials_redacted += hits
+            messages_redacted += 1
+        history.append({"role": role, "content": text})
+    return HistoryGuard(
+        messages=history,
+        credentials_redacted=credentials_redacted,
+        messages_redacted=messages_redacted,
+        roles_downgraded=roles_downgraded,
+    )
 
 
 def _render_memory(item: ScoredMemory, policy: RetrievalPolicy) -> str:
@@ -393,7 +477,33 @@ def _build_memory_block(lines: Sequence[str]) -> str:
     )
 
 
-def _as_chunk(item: Any) -> RetrievedChunk | None:
+def _merge_chunk_audit(item: Any, audit: GuardedText) -> GuardedText:
+    """Widen a local audit with the one a retriever carried on the chunk.
+
+    :func:`baselines.rag.retrieve_chunks` neutralizes what it selects, so by the
+    time the builder sees the text the markers are already gone and a second
+    guard pass has nothing to report. Without this merge the history route would
+    look untouched in the security panel even though a delimiter breakout really
+    was removed on the way in — an absence of findings would be a lie. Anything
+    the local pass *did* find is kept, so a hand-built chunk is still audited.
+    """
+
+    families = tuple(getattr(item, "families", ()) or ())
+    intent = tuple(getattr(item, "intent", ()) or ())
+    neutralized = tuple(getattr(item, "neutralized", ()) or ())
+    carried_suspicious = bool(getattr(item, "suspicious", False))
+    if not (families or intent or neutralized or carried_suspicious):
+        return audit
+    return replace(
+        audit,
+        families=tuple(dict.fromkeys((*families, *audit.families))),
+        intent=tuple(dict.fromkeys((*intent, *audit.intent))),
+        neutralized=tuple(dict.fromkeys((*neutralized, *audit.neutralized))),
+        suspicious=audit.suspicious or carried_suspicious,
+    )
+
+
+def _as_chunk(item: Any) -> tuple[RetrievedChunk | None, GuardedText | None]:
     """Admit one retrieved chunk, guarding its text on the way in.
 
     Two defences, both deliberate:
@@ -415,17 +525,18 @@ def _as_chunk(item: Any) -> RetrievedChunk | None:
 
     text = getattr(item, "text", None)
     if not isinstance(text, str) or not normalize_text(text):
-        return None
-    guarded, suspicious = neutralize_memory_text(text, max_chars=_CHUNK_GUARD_CHARS)
+        return None, None
+    audit = _merge_chunk_audit(item, neutralize(text, max_chars=_CHUNK_GUARD_CHARS))
+    guarded, suspicious = audit.text, audit.suspicious
     if not normalize_text(guarded):
-        return None
+        return None, audit
     already = bool(getattr(item, "suspicious", False))
     if guarded == text and not (suspicious and not already):
-        return item
+        return item, audit
     try:
-        return replace(item, text=guarded, suspicious=already or suspicious)
+        return replace(item, text=guarded, suspicious=already or suspicious), audit
     except TypeError:  # not a dataclass; ``_render_chunk`` guards again
-        return item
+        return item, audit
 
 
 def _render_chunk(chunk: RetrievedChunk) -> str:
@@ -450,7 +561,7 @@ def _render_chunk(chunk: RetrievedChunk) -> str:
     if isinstance(turn, int) and not isinstance(turn, bool):
         origin += f" #{turn}"
     origin += "]"
-    text, _suspicious = neutralize_memory_text(chunk.text, max_chars=_CHUNK_GUARD_CHARS)
+    text = neutralize(chunk.text, max_chars=_CHUNK_GUARD_CHARS).text
     return f"- {origin} {text}"
 
 
@@ -515,6 +626,7 @@ def build_context(
     stale_ids: Iterable[str] = (),
     current_turn: int | None = None,
     now: datetime | None = None,
+    secrets: Sequence[str] = (),
 ) -> BuiltContext:
     """Construct a deterministic, delimited, budget-respecting message list.
 
@@ -529,6 +641,12 @@ def build_context(
     duplicates a message the history window already carries is dropped — paying
     twice for the same sentence would inflate one mode's token count for no
     informational gain.
+
+    ``secrets`` is Phase 13: credential values that must not appear in the
+    prompt (the active session key). They are removed by exact match from the
+    replayed history and from the current message, and the removals are counted
+    in :attr:`BuiltContext.guard`. An empty tuple — every evaluation replay,
+    which configures no provider — leaves the prompt byte-identical to before.
 
     Allocation priority when ``max_tokens`` is exceeded:
 
@@ -551,17 +669,29 @@ def build_context(
     counter_name = getattr(count, "__name__", "token_counter")
     overhead = max(0, active_budget.per_message_overhead)
 
+    secret_list = tuple(secrets or ())
     candidates = [record for record in memories if isinstance(record, MemoryRecord)]
-    history = _normalize_history(recent_conversation)
+    history_guard = _normalize_history(recent_conversation, secret_list)
+    history = history_guard.messages
     raw_history_tokens = sum(count(message["content"]) for message in history)
     candidate_memory_tokens = sum(count(record.text) for record in candidates)
     chunk_candidates: list[RetrievedChunk] = []
+    chunk_families: dict[str, int] = {}
+    chunk_neutralized: dict[str, int] = {}
     for item in retrieved_chunks:
-        chunk = _as_chunk(item)
-        if chunk is not None:
-            chunk_candidates.append(chunk)
+        chunk, audit = _as_chunk(item)
+        if chunk is None:
+            continue
+        chunk_candidates.append(chunk)
+        if audit is not None:
+            for family in audit.intent:
+                chunk_families[family] = chunk_families.get(family, 0) + 1
+            for category in audit.neutralized:
+                chunk_neutralized[category] = chunk_neutralized.get(category, 0) + 1
     candidate_chunk_tokens = sum(count(chunk.text) for chunk in chunk_candidates)
-    current_message = str(current_user_message or "")
+    current_message, current_redactions = _redact_secrets(
+        str(current_user_message or ""), secret_list
+    )
     current_tokens = count(current_message)
 
     selection = select_memories(
@@ -743,6 +873,16 @@ def build_context(
         exceeds_max_tokens=final_context_tokens > active_budget.max_tokens > 0,
         token_counter=counter_name,
     )
+    guard = _guard_report(
+        report=report,
+        policy=active_policy,
+        ranked=ranked,
+        kept_chunks=kept_chunks,
+        chunk_families=chunk_families,
+        chunk_neutralized=chunk_neutralized,
+        history_guard=history_guard,
+        current_redactions=current_redactions,
+    )
     return BuiltContext(
         messages=messages,
         selected_memories=[item.record for item in ranked],
@@ -750,6 +890,54 @@ def build_context(
         report=report,
         ranking=tuple(ranked),
         selected_chunks=tuple(kept_chunks),
+        guard=guard,
+    )
+
+
+def _guard_report(
+    *,
+    report: RetrievalReport,
+    policy: RetrievalPolicy,
+    ranked: Sequence[ScoredMemory],
+    kept_chunks: Sequence[Any],
+    chunk_families: Mapping[str, int],
+    chunk_neutralized: Mapping[str, int],
+    history_guard: HistoryGuard,
+    current_redactions: int,
+) -> PromptGuardReport:
+    """Collect every guard action taken while building one prompt.
+
+    The memory side is read from the retrieval report, which counts over *all*
+    candidates: a memory the relevance filter later dropped was still guarded,
+    and a quarantine only shows up as a drop reason. Structural categories are
+    reported as neutralizations and intent families as flags, which is the
+    distinction :mod:`security.guard` draws and the UI panel repeats.
+    """
+
+    memory_families = {
+        str(family): int(amount)
+        for family, amount in dict(report.guard_family_counts or {}).items()
+        if family in INTENT_FAMILIES
+    }
+    memory_neutralized = {
+        str(category): int(amount)
+        for category, amount in dict(report.guard_action_counts or {}).items()
+    }
+    quarantined = sum(1 for item in report.dropped if item.reason == "suspicious")
+    return PromptGuardReport(
+        memory_families=memory_families,
+        chunk_families=dict(chunk_families),
+        memory_neutralized=memory_neutralized,
+        chunk_neutralized=dict(chunk_neutralized),
+        suspicious_memories=sum(1 for item in ranked if item.suspicious),
+        suspicious_chunks=sum(1 for chunk in kept_chunks if getattr(chunk, "suspicious", False)),
+        quarantined_memories=quarantined,
+        flagged_candidates=int(report.suspicious_candidate_count or 0),
+        history_credentials_redacted=history_guard.credentials_redacted,
+        history_messages_redacted=history_guard.messages_redacted,
+        current_message_redacted=current_redactions,
+        history_roles_downgraded=history_guard.roles_downgraded,
+        drop_suspicious_memories=bool(policy.drop_suspicious_memories),
     )
 
 
@@ -814,6 +1002,9 @@ def _select_history(
 
 __all__ = [
     "HISTORY_BLOCK_PREAMBLE",
+    "HistoryGuard",
+    "PromptGuardReport",
+    "REDACTION_MARKER",
     "HISTORY_DELIMITER_CLOSE",
     "HISTORY_DELIMITER_OPEN",
     "MEMORY_BLOCK_PREAMBLE",

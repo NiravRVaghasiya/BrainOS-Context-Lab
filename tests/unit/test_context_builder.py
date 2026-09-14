@@ -420,6 +420,16 @@ def test_custom_token_counter_is_used_consistently() -> None:
 
 
 def test_history_roles_are_normalised() -> None:
+    """History may only be ``user`` or ``assistant``; everything else is downgraded.
+
+    Phase 13 changed this deliberately. A transcript item claiming ``SYSTEM``
+    used to be replayed *as* a system message, which let conversation content —
+    a pasted log, a dataset turn, anything a user typed — outrank the
+    application's own system prompt. Only the builder emits system messages now,
+    and the downgrade is counted in the guard report rather than happening
+    silently.
+    """
+
     result = build_context(
         system_instructions="",
         current_user_message=QUESTION,
@@ -433,7 +443,12 @@ def test_history_roles_are_normalised() -> None:
         budget=ContextBudget(max_tokens=4096),
     )
     roles = [message["role"] for message in result.messages]
-    assert roles == ["system", "user", "user", "user"]
+    assert roles == ["user", "user", "user", "user"]
+    # One of the four claimed a role the application owns; the unknown role and
+    # the missing role were already coerced to ``user`` before Phase 13 and are
+    # not reported as downgrades.
+    assert result.guard.history_roles_downgraded == 1
+    assert result.guard.to_dict()["by_action"]["downgraded"] == 1
 
 
 def test_report_and_ranking_are_attached_to_the_built_context() -> None:

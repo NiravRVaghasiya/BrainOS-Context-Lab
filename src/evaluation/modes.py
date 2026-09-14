@@ -102,6 +102,13 @@ class ModeReplay:
     #: error). Kept as a plain mapping so a replay stays serializable and this
     #: module keeps no dependency on how generation is implemented.
     generation: dict[str, Any] | None = None
+    #: Phase 13: the question turn's guard report — injection families seen,
+    #: structural rewrites, credentials redacted, history roles downgraded. It
+    #: is part of the record for two reasons: a quarantine that changed what
+    #: reached the prompt belongs beside the retrieval audit that explains the
+    #: same prompt, and an artifact that carries no guard block at all cannot
+    #: claim it held no credential.
+    security: dict[str, Any] = field(default_factory=dict)
 
     @property
     def latency_ms(self) -> float | None:
@@ -150,6 +157,7 @@ class ModeReplay:
             "prompt_messages": [dict(message) for message in self.prompt_messages],
             "stats": dict(self.stats),
             "retrieval_report": dict(self.retrieval_report),
+            "security": dict(self.security),
         }
 
 
@@ -258,6 +266,7 @@ def replay_task(
         prompt_messages=tuple(dict(message) for message in turn.context_messages),
         stats=stats,
         retrieval_report=dict(turn.context_report),
+        security=_replay_security(turn.security),
         answer=generation.text if generation is not None else None,
         generation=generation.to_dict() if generation is not None else None,
     )
@@ -311,6 +320,22 @@ def task_evaluator(
         ).to_dict()
 
     return evaluate
+
+
+def _replay_security(block: Mapping[str, Any] | None) -> dict[str, Any]:
+    """The turn's guard report, minus the replay's throwaway session id.
+
+    A replay mints a session per (task, mode) and nothing else in the artifact
+    can refer to it, so keeping the identifier would be noise that reads like
+    provenance. The counts, the bounded findings, and the caveat are what the
+    artifact needs.
+    """
+
+    if not isinstance(block, Mapping):
+        return {}
+    payload = dict(block)
+    payload.pop("session_id", None)
+    return payload
 
 
 def _message_session(message: Mapping[str, Any]) -> int:

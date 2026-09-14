@@ -500,6 +500,178 @@ def status_line(
     return line
 
 
+#: Phase 13: the security panel's table. ``Count`` and ``Turn`` come first
+#: because the question a user asks this panel is "did anything happen, and when
+#: did it happen", not "what is the taxonomy".
+SECURITY_COLUMNS: tuple[str, ...] = (
+    "Action",
+    "Category",
+    "Route",
+    "Stage",
+    "Count",
+    "Turn",
+    "Detail",
+)
+
+#: Human labels for the finding vocabulary, so the panel does not read like a
+#: schema. Unknown values fall through unchanged.
+_SECURITY_ACTION_LABELS: Mapping[str, str] = {
+    "flagged": "Flagged (kept)",
+    "quarantined": "Quarantined (dropped)",
+    "neutralized": "Neutralized",
+    "redacted": "Credential redacted",
+    "downgraded": "Role downgraded",
+}
+_SECURITY_CATEGORY_LABELS: Mapping[str, str] = {
+    "injection_pattern": "Instruction-override pattern",
+    "delimiter_breakout": "Delimiter / template breakout",
+    "role_smuggling": "Role prefix smuggling",
+    "invisible_characters": "Invisible characters",
+    "control_characters": "Control characters",
+    "credential_redacted": "Credential removed",
+    "secret_field_dropped": "Secret-named field dropped",
+    "history_role_downgraded": "History role downgraded",
+}
+
+
+def security_rows(report: Mapping[str, Any] | None) -> list[list[Any]]:
+    """Rows for the security findings table, newest last.
+
+    Reads the bounded ``recent`` list from a
+    :func:`security.findings.security_report` block. Previews are already
+    clipped and invisible-stripped by the ledger, so this function only formats.
+    """
+
+    if not isinstance(report, Mapping):
+        return []
+    recent = report.get("recent")
+    if not isinstance(recent, list):
+        return []
+    rows: list[list[Any]] = []
+    for item in recent:
+        if not isinstance(item, Mapping):
+            continue
+        action = str(item.get("action", ""))
+        category = str(item.get("category", ""))
+        detail = str(item.get("detail", ""))
+        preview = str(item.get("preview", ""))
+        families = item.get("families") or []
+        if families:
+            detail = f"{detail} [{', '.join(str(name) for name in families)}]"
+        if preview:
+            detail = f"{detail} — {preview}" if detail else preview
+        rows.append(
+            [
+                _SECURITY_ACTION_LABELS.get(action, action),
+                _SECURITY_CATEGORY_LABELS.get(category, category),
+                str(item.get("route", "")),
+                str(item.get("stage", "")),
+                format_int(item.get("count")),
+                format_int(item.get("turn")),
+                clip(detail, _MAX_CELL_CHARS),
+            ]
+        )
+    return rows
+
+
+def security_markdown(report: Mapping[str, Any] | None) -> str:
+    """Markdown summary of the session's guard activity.
+
+    The panel has to answer three questions in one screen: did anything fire,
+    what is the current policy, and what does a clean panel *not* prove. The
+    last one is printed every time, because "no findings" from a pattern-based
+    detector is not evidence that retrieved content was safe — the structural
+    guard is what makes the block inert, and it does not report when it has
+    nothing to do.
+    """
+
+    if not isinstance(report, Mapping):
+        return "_No security report available._"
+    totals = report.get("totals") if isinstance(report.get("totals"), Mapping) else {}
+    by_action = report.get("by_action") if isinstance(report.get("by_action"), Mapping) else {}
+    by_route = report.get("by_route") if isinstance(report.get("by_route"), Mapping) else {}
+    by_family = report.get("by_family") if isinstance(report.get("by_family"), Mapping) else {}
+    policy = report.get("policy") if isinstance(report.get("policy"), Mapping) else {}
+    last = report.get("last_prompt") if isinstance(report.get("last_prompt"), Mapping) else {}
+    detail = last.get("detail") if isinstance(last.get("detail"), Mapping) else {}
+
+    record_count = format_int(report.get("record_count"))
+    clean = bool(report.get("clean", not totals))
+    headline = (
+        "**No guard fired this session.**"
+        if clean
+        else f"**{record_count} guard action(s) this session.**"
+    )
+    lines = [
+        "### Security",
+        "",
+        headline,
+        "",
+        "| Measure | Value |",
+        "| --- | --- |",
+        (
+            "| Instruction-like memories | "
+            f"{format_int(by_action.get('flagged'))} kept-and-flagged, "
+            f"{format_int(by_action.get('quarantined'))} quarantined |"
+        ),
+        f"| Structural rewrites | {format_int(by_action.get('neutralized'))} |",
+        f"| Credentials redacted | {format_int(by_action.get('redacted'))} |",
+        f"| History roles downgraded | {format_int(by_action.get('downgraded'))} |",
+        (
+            "| Quarantine policy | "
+            f"`drop_suspicious_memories="
+            f"{str(bool(policy.get('drop_suspicious_memories'))).lower()}` |"
+        ),
+    ]
+    if by_route:
+        routes = ", ".join(f"{route} {count}" for route, count in sorted(by_route.items()))
+        lines += ["", f"- routes: {routes}"]
+    if by_family:
+        families = ", ".join(
+            f"`{name}` ×{count}" for name, count in sorted(by_family.items())
+        )
+        lines.append(f"- attack families detected: {families}")
+    if totals:
+        categories = ", ".join(
+            f"{_SECURITY_CATEGORY_LABELS.get(str(name), str(name))} {count}"
+            for name, count in sorted(totals.items())
+        )
+        lines.append(f"- categories: {categories}")
+    if detail:
+        lines.append("")
+        lines.append("**Last prompt**")
+        lines.append("")
+        for label, key in (
+            ("flagged memories in prompt", "suspicious_memories"),
+            ("flagged candidates at recall", "flagged_candidates"),
+            ("quarantined memories", "quarantined_memories"),
+            ("flagged transcript chunks", "suspicious_chunks"),
+            ("credentials redacted from history", "history_credentials_redacted"),
+            ("credentials redacted from the question", "current_message_redacted"),
+            ("history roles downgraded", "history_roles_downgraded"),
+        ):
+            value = format_int(detail.get(key))
+            if value != "0":
+                lines.append(f"- {label}: {value}")
+        for label, key in (
+            ("memory rewrites", "memory_neutralized"),
+            ("chunk rewrites", "chunk_neutralized"),
+        ):
+            block = detail.get(key)
+            if isinstance(block, Mapping) and block:
+                rendered = ", ".join(f"{name} {count}" for name, count in sorted(block.items()))
+                lines.append(f"- {label}: {rendered}")
+    lines += [
+        "",
+        "> Retrieved memory and transcript chunks render inside delimiters, "
+        "introduced as untrusted data. A clean panel means no *pattern* matched; "
+        "detection is English-only and best-effort, and the structural guard — "
+        "not the detector — is what keeps retrieved text from becoming an "
+        "instruction.",
+    ]
+    return "\n".join(lines)
+
+
 def export_payload(payload: Mapping[str, Any]) -> str:
     """Render an export payload as indented JSON text."""
 
@@ -523,6 +695,7 @@ def _reason_counts(report: Mapping[str, Any]) -> list[tuple[str, int]]:
 
 __all__ = [
     "CHUNK_COLUMNS",
+    "SECURITY_COLUMNS",
     "CONFLICT_COLUMNS",
     "DROPPED_MEMORY_COLUMNS",
     "RETRIEVED_MEMORY_COLUMNS",
@@ -539,6 +712,8 @@ __all__ = [
     "render_prompt",
     "retrieved_rows",
     "round_value",
+    "security_markdown",
+    "security_rows",
     "short_timestamp",
     "status_line",
     "token_breakdown",

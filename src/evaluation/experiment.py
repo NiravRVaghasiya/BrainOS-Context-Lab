@@ -87,6 +87,7 @@ from brain.tokenizers import (
     estimate_tokens,
     tiktoken_counter,
 )
+from security.findings import summarize_security
 
 from .datasets import BenchmarkTask, dataset_issues, load_jsonl
 from .generation import (
@@ -262,6 +263,16 @@ class ModeResult:
             if (record.get("generation") or {}).get("skipped")
         )
 
+    def security_summary(self) -> dict[str, Any]:
+        """Phase 13: the guard audit for this mode's trial.
+
+        Summed from the per-task blocks the replays already carry, so a mode
+        whose prompts were assembled with quarantines or redactions says so next
+        to its metrics instead of only inside its task records.
+        """
+
+        return summarize_security(record.get("security") for record in self.task_results)
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "mode": self.mode,
@@ -270,6 +281,7 @@ class ModeResult:
             "complete": self.complete,
             "aggregate_metrics": self.aggregate_metrics,
             "generation_usage": self.generation_usage,
+            "security": self.security_summary(),
             "skipped_task_ids": list(self.skipped_task_ids),
             "task_results": [dict(record) for record in self.task_results],
             "scores": [dict(score) for score in self.scores],
@@ -289,6 +301,7 @@ class ModeResult:
             "config": dict(self.config),
             "task_results": [dict(record) for record in self.task_results],
             "aggregate_metrics": self.aggregate_metrics,
+            "security": self.security_summary(),
             "dataset_issues": list(self.config.get("dataset_issues") or []),
         }
 
@@ -399,6 +412,11 @@ class ExperimentRun:
             "cost_estimate": self.cost_estimate,
             "aborted": self.aborted,
             "modes": [result.to_dict() for result in self.mode_results],
+            "security": summarize_security(
+                record.get("security")
+                for result in self.mode_results
+                for record in result.task_results
+            ),
             "headline": self.headline_rows(),
             "baseline_mode": self.baseline_mode,
             "statistical_summary": self.statistical_summary(),
