@@ -74,7 +74,13 @@ from typing import Any
 from uuid import uuid4
 
 from app.service import DEFAULT_SYSTEM_INSTRUCTIONS
-from baselines.modes import MODE_ORDER, mode_label, resolve_mode
+from baselines.modes import (
+    ABLATION_ORDER,
+    MODE_BRAINOS,
+    MODE_ORDER,
+    mode_label,
+    resolve_mode,
+)
 from brain.tokenizers import (
     TokenCounter,
     TokenizerUnavailableError,
@@ -306,6 +312,10 @@ class ExperimentRun:
     tasks_available: int
     dry_run: bool
     aborted: dict[str, Any] | None = None
+    #: Baseline for the paired comparisons in ``statistical_summary``. Ablation
+    #: runs compare against the full system (``brainos``); the five-mode
+    #: comparison keeps the full-context reference.
+    baseline_mode: str = "full_context"
 
     @property
     def passed(self) -> bool:
@@ -349,12 +359,16 @@ class ExperimentRun:
             )
         return rows
 
-    def statistical_summary(self, *, baseline_mode: str = "full_context") -> dict[str, Any]:
+    def statistical_summary(
+        self, *, baseline_mode: str | None = None
+    ) -> dict[str, Any]:
         """Compute the Phase 10 statistical analysis across trials and paired tasks."""
 
         from .analysis import statistical_analysis
 
-        return statistical_analysis(self, baseline_mode=baseline_mode)
+        return statistical_analysis(
+            self, baseline_mode=baseline_mode or self.baseline_mode
+        )
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -386,6 +400,7 @@ class ExperimentRun:
             "aborted": self.aborted,
             "modes": [result.to_dict() for result in self.mode_results],
             "headline": self.headline_rows(),
+            "baseline_mode": self.baseline_mode,
             "statistical_summary": self.statistical_summary(),
         }
 
@@ -401,6 +416,7 @@ def run_controlled_experiment(
     clock: Callable[[], float] = time.perf_counter,
     secrets: tuple[str, ...] = (),
     system_instructions: str = DEFAULT_SYSTEM_INSTRUCTIONS,
+    baseline_mode: str = "full_context",
 ) -> ExperimentRun:
     """Run every mode of ``plan`` over ``tasks`` with one model and one budget.
 
@@ -543,6 +559,7 @@ def run_controlled_experiment(
         tasks_available=available,
         dry_run=model is None,
         aborted=aborted,
+        baseline_mode=baseline_mode,
     )
 
 
@@ -895,7 +912,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--preset", choices=sorted(PRESETS), default="quick")
     parser.add_argument(
         "--modes",
-        help="Comma-separated mode selectors, overriding the preset's selection.",
+        help=(
+            "Comma-separated mode selectors, overriding the preset's selection. "
+            "'all' runs the five baselines; 'ablations' runs BrainOS plus the "
+            "four Phase 11 ablations."
+        ),
     )
     parser.add_argument("--trials", type=int, help="Repeated trials per (task, mode).")
     parser.add_argument("--dataset", type=Path, default=DEFAULT_DATASET)
@@ -956,17 +977,34 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         help="Directory to save the six evaluation plots.",
     )
+    parser.add_argument(
+        "--baseline-mode",
+        default="full_context",
+        help=(
+            "Baseline for the paired comparisons in the statistical summary "
+            "(use 'brainos' for Phase 11 ablation runs)."
+        ),
+    )
     parser.add_argument("--quiet", action="store_true", help="Suppress the summary table.")
     return parser
 
 
 def _parse_modes(value: str | None) -> tuple[str, ...] | None:
-    """Parse ``--modes``: unset means the preset's selection, ``all`` means five."""
+    """Parse ``--modes``.
+
+    Unset means the preset's selection, ``all`` means the five baselines, and
+    ``ablations`` means the full system plus the four Phase 11 ablations (an
+    ablation without its full reference is not interpretable, so the keyword
+    always includes ``brainos``).
+    """
 
     if value is None:
         return None
-    if value.strip().lower() == "all":
+    keyword = value.strip().lower()
+    if keyword == "all":
         return MODE_ORDER
+    if keyword == "ablations":
+        return (MODE_BRAINOS, *ABLATION_ORDER)
     return tuple(part.strip() for part in value.split(",") if part.strip())
 
 
@@ -1016,6 +1054,7 @@ def main(argv: list[str] | None = None) -> int:
             **_limit_overrides(args),
         )
         plan.resolved_modes()
+        resolve_mode(args.baseline_mode)
     except ValueError as exc:
         raise SystemExit(str(exc)) from None
     plan = replace(plan, session_isolation=bool(args.session_isolation))
@@ -1067,6 +1106,7 @@ def main(argv: list[str] | None = None) -> int:
             token_counter=counter,
             counter_name=counter_name,
             secrets=(api_key,) if api_key else (),
+            baseline_mode=args.baseline_mode,
         )
     except ExperimentError as exc:
         raise SystemExit(str(exc)) from None

@@ -31,6 +31,7 @@ import json
 import sys
 from pathlib import Path
 
+from baselines.modes import ABLATION_ORDER, MODE_ORDER
 from brain.tokenizers import TokenizerUnavailableError, estimate_tokens, tiktoken_counter
 
 from .datasets import load_jsonl
@@ -89,7 +90,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--mode",
         required=True,
-        choices=["full_context", "sliding_window", "rag", "brainos", "brainos_rag"],
+        choices=list(MODE_ORDER) + list(ABLATION_ORDER),
+        help=(
+            "Baseline mode or Phase 11 ablation "
+            f"({', '.join(ABLATION_ORDER)})."
+        ),
     )
     parser.add_argument("--benchmark", default="context_rot")
     parser.add_argument("--dataset", type=Path, default=DEFAULT_DATASET)

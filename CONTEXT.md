@@ -4,8 +4,8 @@
 > repository state and decisions that should be preserved between phases.
 
 **Last updated:** 2026-09-14
-**Branch:** `arena/01a09f4f-brainos-context-lab`
-**Baseline:** `d993313` (`origin/main`, the PR #9 merge that includes Phase 8); this branch adds Phase 9 on top
+**Branch:** `arena/01a09f7a-brainos-context-lab`
+**Baseline:** `8fe2ec8` (`origin/main`, the PR #11 merge that includes Phase 10); this branch adds Phase 11 on top
 **Implementation plan:** [`BrainOS_Context_Lab_Implementation_Plan.md`](BrainOS_Context_Lab_Implementation_Plan.md)
 
 ## Product boundary
@@ -30,8 +30,9 @@ layer that helps select historical context.
 | Phase 7 — Context-rot benchmark | Complete | The seven plan categories are generated (`spec.py` + `generation.py`) with a fact ledger and evidence contract; retrieval scoring is model-free (markers → Recall@K / precision / evidence-in-prompt) and answer scoring grades supplied answers (`--answers`) into a fixed verdict vocabulary with the Phase 12 error labels; the runner reports aggregates and the dataset hash; the committed smoke dataset is 7 tasks, SHA-256 pinned by a manifest. Landed on `main` via PR #8. |
 | Phase 8 — Metrics | Complete (landed via PR #9) | The plan's quality / efficiency / robustness suite on top of the Phase 7 scorer: faithfulness (grounding, not accuracy), conflict-resolution accuracy, token savings, quality-adjusted efficiency, optional latency, `by_length` curves, and a degradation/AUC block that is `null` on a single length rather than a silent 0. Plot-ready series for the six planned figures; matplotlib stays optional. 503 tests; live-validated on the pinned runtime. |
 | Phase 9 — Controlled experiments | Complete (landed via PR #10) | `python -m evaluation.experiment` runs the same tasks, model, sampling parameters, and scoring through all five modes with the credential read from an environment variable; `check_constants` verifies the plan's "only the strategy changes" rule after the run (fingerprint, system prompt, task wording, mode set, provider-reported model, token counter) and fails the run instead of reporting an uncontrolled comparison. Generation path (`generation.py`) plus the cost controls a run cannot exist without: `RunLimits` / `RunBudget` / `BudgetExceeded` with the `quick` / `standard` / `research` presets, per-request prompt ceilings, recorded skips, and per-request timeouts. `--generate` on the single-mode CLI. 586 tests; live-validated on the pinned runtime plus a localhost HTTP transport check. |
-| **Phase 10 — Statistical evaluation** | **Complete in this turn** | Trial-level mean, SD, and 95% CI across repeated trials ($T \ge 1$); exact Student's t critical values ($df \in [1, 30]$) and Cornish-Fisher expansion ($df > 30$); exact regularized incomplete beta p-values (`student_t_p_value`); paired difference tests across benchmark tasks (`paired_difference_test`); Cohen's d (paired $d_z$ and independent pooled) and Hedges' g bias-corrected effect sizes; sign test win/loss/tie binomial analysis; `statistical_report` JSON report; rendering all 6 planned figures with trial error bars / CIs; CLI enhancements (`--stats`, `--plots-dir`, `--baseline-mode`). 598 tests. |
-| Phases 11–20 | Pending | Ablations, error analysis, security hardening, deployment, cost controls, reproducibility, evaluation pipeline, tests, MVP, release. |
+| Phase 10 — Statistical evaluation | Complete (landed via PR #11) | Trial-level mean, SD, and 95% CI across repeated trials ($T \ge 1$); exact Student's t critical values ($df \in [1, 30]$) and Cornish-Fisher expansion ($df > 30$); exact regularized incomplete beta p-values (`student_t_p_value`); paired difference tests across benchmark tasks (`paired_difference_test`); Cohen's d (paired $d_z$ and independent pooled) and Hedges' g bias-corrected effect sizes; sign test win/loss/tie binomial analysis; `statistical_report` JSON report; rendering all 6 planned figures with trial error bars / CIs; CLI enhancements (`--stats`, `--plots-dir`, `--baseline-mode`). 598 tests. |
+| **Phase 11 — Ablation study** | **Complete in this turn** | Mode D with one component removed: D1 no temporal (`weight_recency=0` + signal strip), D2 no relevance (`relevance_floor=0`, `relative_relevance_ratio=0`), D3 no conflict (resolution/staleness off + runtime reports ignored + lifecycle neutralized), D4 no memory (D window, zero injection). Working memory and consolidation excluded with documented pinned-revision reasons. Ablations resolve as modes, run via `--modes ablations`, and pair against `brainos` (`--baseline-mode`). 632 tests. |
+| Phases 12–20 | Pending | Error analysis, security hardening, deployment, cost controls, reproducibility, evaluation pipeline, tests, MVP, release. |
 
 Detailed logs are available in
 [`docs/phase-0-research-baseline.md`](docs/phase-0-research-baseline.md),
@@ -42,11 +43,110 @@ Detailed logs are available in
 [`docs/phase-5-conversation-persistence.md`](docs/phase-5-conversation-persistence.md),
 [`docs/phase-6-baseline-modes.md`](docs/phase-6-baseline-modes.md),
 [`docs/phase-7-context-rot-benchmark.md`](docs/phase-7-context-rot-benchmark.md),
-[`docs/phase-8-metrics.md`](docs/phase-8-metrics.md), and
-[`docs/phase-9-controlled-experiments.md`](docs/phase-9-controlled-experiments.md), and
-[`docs/phase-10-statistical-evaluation.md`](docs/phase-10-statistical-evaluation.md).
+[`docs/phase-8-metrics.md`](docs/phase-8-metrics.md),
+[`docs/phase-9-controlled-experiments.md`](docs/phase-9-controlled-experiments.md),
+[`docs/phase-10-statistical-evaluation.md`](docs/phase-10-statistical-evaluation.md), and
+[`docs/phase-11-ablation-study.md`](docs/phase-11-ablation-study.md).
 
-## What was done in Phase 10 (this turn)
+## What was done in Phase 11 (this turn)
+
+Phase 11 answers the plan's "which components are responsible?" by running
+Mode D with exactly one component removed at a time — through the same
+service, builder, scorer, controlled comparison, and paired statistics as the
+baselines, so a measured gap is attributable to the removed component rather
+than to prompt volume.
+
+### New / changed modules
+
+| File | Purpose |
+| --- | --- |
+| [`src/baselines/ablations.py`](src/baselines/ablations.py) (new) | The four runnable `AblationProfile` records (removal, hypothesis, policy overrides, runtime-report and record-stripping flags); `EXCLUDED_ABLATIONS` with the pinned-revision reason each plan component is *not* run; `prepare_records` / `strip_temporal_signals` / `strip_lifecycle`; `ablation_pairs` (every ablation vs `brainos`); `POLICY_KNOB_FIELDS` for knob restoration. |
+| [`src/baselines/modes.py`](src/baselines/modes.py) | Four `BaselineMode` entries (letters D1–D4) sharing Mode D's window and evidence budget; `ABLATION_ORDER`; `resolve_mode` accepts ablations; `mode_choices()` stays the five baselines (ablations are evaluation-only) plus a new `ablation_choices()`. |
+| [`src/app/state.py`](src/app/state.py) | `ContextSettings` gains `relative_relevance_ratio` (0.55) and `heuristic_conflict_detection` (True) with pass-through to `retrieval_policy()`; `with_mode_defaults` applies an ablation's policy overrides on entry and restores the overridden knobs to defaults when leaving an ablation for a baseline (baseline-to-baseline switches still keep tuning). |
+| [`src/app/service.py`](src/app/service.py) | `_build_context` honours the active ablation: runtime contradiction/stale reports can be ignored and temporal/lifecycle record preparation applied before the builder runs. Baselines pass through unchanged. |
+| [`src/evaluation/run.py`](src/evaluation/run.py) | `--mode` accepts the four ablation ids. |
+| [`src/evaluation/experiment.py`](src/evaluation/experiment.py) | `--modes ablations` runs the full system plus the four ablations (the keyword always includes `brainos`); `--baseline-mode` (recorded on the artifact as `baseline_mode`) selects the paired-comparison reference. `ExperimentRun.statistical_summary()` defaults to it. |
+| [`src/evaluation/analysis.py`](src/evaluation/analysis.py) | Trial summaries order ablations after the baselines; `pairwise_comparisons` targets ablations and always pairs each present ablation against `brainos`, whatever baseline the caller chose. |
+| Tests | `tests/unit/test_ablations.py` (19), `tests/evaluation/test_ablation_modes.py` (8, fakes + monkeypatched experiment/CLI), `tests/integration/test_ablation_live.py` (7, pinned runtime, no key). **598 → 632 tests**; `ruff check .` clean. |
+
+### The ablation contract (what later phases build on)
+
+```text
+brainos               Mode D, the full reference every ablation is compared to
+brainos_no_temporal   D1  weight_recency=0 + runtime recency/temporal_relevance stripped
+brainos_no_relevance  D2  relevance_floor=0 + relative_relevance_ratio=0
+brainos_no_conflict   D3  resolve/drop_stale/heuristic off + runtime reports ignored
+                          + status/valid_until neutralized
+brainos_no_memory     D4  Mode D's window with no memory injected
+```
+
+Rules:
+
+- Every ablation keeps Mode D's window and evidence budget, keeps observing,
+  and is compared against `brainos`, never against another ablation.
+- Leaving an ablation restores the overridden policy knobs to defaults; the
+  knobs *are* the ablation, so carrying them into `brainos` would silently
+  run a different system than the label claims.
+- The runtime's internal top-k pre-ranking still uses temporal signals under
+  D1 (the pinned revision exposes no retrieval-weight configuration); the
+  ablation removes temporal influence from the application's selection stage,
+  where the prompt is decided.
+- Working memory and consolidation are **excluded with documented reasons**,
+  not run as null ablations: retrieval never reads working memory back, and
+  the application never invokes `consolidate()`. A live test pins the related
+  premise that the observe path leaves the runtime's contradiction/stale
+  reports empty, so D3 removes the application's heuristic.
+
+### Measured behaviour (dry run, committed smoke dataset, live pinned runtime)
+
+```bash
+PYTHONPATH=src .venv/bin/python -m evaluation.experiment --preset quick \
+  --modes ablations --dry-run --output results/phase11-dry.json \
+  --baseline-mode brainos
+PYTHONPATH=src .venv/bin/python -m evaluation.compare results/phase11-dry.json \
+  --stats --baseline-mode brainos --output results/phase11-stat-report.json
+```
+
+```text
+mode                  recall  evidence  mean_tokens
+brainos               1.000   0.833     193.6
+brainos_no_temporal   1.000   0.833     193.6     (byte-identical to full, all 7 tasks)
+brainos_no_relevance  1.000   1.000     215.7     (multi-hop repaired: 1→3 memories, 0→1 evidence)
+brainos_no_conflict   1.000   0.833     193.6     (byte-identical to full, all 7 tasks)
+brainos_no_memory     0.000   0.000     97.0      (nothing selected anywhere)
+
+paired vs brainos (7 tasks):
+  D2 evidence +0.143 (p=0.36, d=0.38, 1/0/6) — one task moves, as designed
+  D2 tokens   +22.14 (p=0.016, d=1.25, 5/0/2) — the precision cost of no filter
+  D4 evidence −0.714 (p=0.008, d=−1.46, 0/5/2); recall −0.857 (p=0.001)
+  D1/D3 every metric +0.000, p=1.0, 0/0/7 — unexercised by the smoke tier
+```
+
+Scripted-answer plumbing (same convention as Phase 8): full faithfulness
+0.857 → D2 1.000 (the multi-hop guess becomes grounded); D4 accuracy stays
+1.0 while faithfulness collapses to 0.143 (six correct guesses, no evidence)
+— and D4's quality-adjusted efficiency is meaninglessly high, which is why
+QAE needs real generations.
+
+**Integration-validation observations, not research results.**
+
+### Findings this phase produced (carry into Phase 12)
+
+1. **The multi-hop failure is the relevance filter, confirmed by removal.**
+   The Phase 7/10 suspect is now measured: disabling the floor and tail trim
+   restores the second hop for +22 tokens.
+2. **D1/D3 nulls are dataset gaps, not component verdicts.** One short
+   session gives recency nothing to decide and retrieval-stage conflicts
+   nothing to resolve; the crafted live tests prove both removals fire when
+   the condition exists. Longer, multi-session tiers first.
+3. **D4 bounds the memory contribution: all of it, on this dataset**
+   (evidence 0.83 → 0.0, window held constant). Any future window change must
+   re-run D4 rather than assume the split.
+4. **Phase 12's error taxonomy should separate `over_compression` (the
+   filter dropped needed evidence) from `missed_memory` (never recalled)** —
+   they now have different owners and different fixes.
+
+## What was done in Phase 10 (PR #11, previous turn)
 
 Phase 10 completes the statistical evaluation layer defined in Plan §16:
 trial-level descriptive statistics across repeated stochastic trials, paired
@@ -998,7 +1098,7 @@ python3 -m venv .venv
 .venv/bin/pip install "brainos-cli @ git+https://github.com/NiravRVaghasiya/BrainOS.git@1d9eb7a0ca537e7278e29809cda4f4c5da6c1dcc"
 
 .venv/bin/pytest -q
-# 586 passed (1 skipped: Gradio)
+# 632 passed
 
 .venv/bin/ruff check .
 # All checks passed!   (whole repository, no exclusions)
@@ -1030,19 +1130,30 @@ PYTHONPATH=src .venv/bin/python -m evaluation.run --mode brainos --model gpt-4o-
   --generate --output results/brainos-generated.json
 # --token-counter tiktoken needs the optional `tiktoken` package; without it the
 # default estimate_tokens counter (ceil(len/4)) bounds every ceiling.
+
+# Phase 11: the ablation study — Mode D with one component removed, paired
+# against the full system. A dry run needs no key.
+PYTHONPATH=src .venv/bin/python -m evaluation.experiment --preset quick \
+  --modes ablations --dry-run --baseline-mode brainos \
+  --output results/phase11-dry.json
+PYTHONPATH=src .venv/bin/python -m evaluation.compare results/phase11-dry.json \
+  --stats --baseline-mode brainos --output results/phase11-stat-report.json
+PYTHONPATH=src .venv/bin/python -m evaluation.run --mode brainos_no_relevance \
+  --output results/run.json
 ```
 
 Test count went 154 → 216 (Phase 4) → 249 (Phase 5) → 379 (Phase 6) → 494
-(Phase 8) → 586 (Phase 9) → **598** in this phase (+12: 4 metrics, 5 analysis/plots,
-2 experiment, 1 live statistical integration). (+83: 14 limits, 19 generation, 25 experiment,
-6 experiment-secrets, 5 run-CLI, 4 live controlled-experiment, 2 live provider
-HTTP, plus additions elsewhere).
+(Phase 8) → 586 (Phase 9) → 598 (Phase 10) → **632** in this phase (+34: 19
+ablation registry/settings, 8 ablation replay/experiment/CLI, 7 live
+ablation). (+12 in Phase 10: 4 metrics, 5 analysis/plots, 2 experiment, 1
+live statistical integration.)
 The live tests in `tests/integration/test_chat_controller_live.py`,
 `tests/integration/test_persistence_live.py`,
 `tests/integration/test_context_pipeline.py`,
 `tests/integration/test_baseline_modes_live.py`,
-`tests/integration/test_brainos_runtime.py`, and
-`tests/integration/test_controlled_experiment_live.py` run against the pinned
+`tests/integration/test_brainos_runtime.py`,
+`tests/integration/test_controlled_experiment_live.py`, and
+`tests/integration/test_ablation_live.py` run against the pinned
 BrainOS revision and skip when `brainos_runtime` is not installed;
 `tests/integration/test_provider_http_live.py` needs the `openai` SDK and talks
 only to a stub on `127.0.0.1`; `tests/ui/` skips when Gradio is absent. No
@@ -1054,18 +1165,30 @@ and the localhost stub.
 
 ## Next safe step
 
-Implement **Phase 11 — Ablation study** (plan §17): isolate which specific BrainOS
-components are responsible for observed improvements by evaluating ablations:
-- `BrainOS full`
-- `no temporal signal`
-- `no working memory`
-- `no consolidation`
-- `no relevance filtering`
-- `no conflict handling`
-- `no memory`
+Implement **Phase 12 — Error analysis** (plan §18): turn the scored records
+the harness already produces into a structured failure taxonomy —
+`missed_memory`, `wrong_memory`, `stale_memory`, `conflicting_memory`,
+`irrelevant_memory`, `hallucination`, `over_compression`,
+`under_compression`, `wrong_abstention` — with one JSON record per failure
+carrying task id, mode, conversation length, expected vs. retrieved memories,
+answer, and failure type.
 
-Carry these constraints into Phase 11:
-1. **Ablations slot in as modes**: configure explicit ablation profiles under `ContextSettings` and `baselines/modes.py` so they seamlessly integrate with `run_controlled_experiment` and `statistical_analysis`.
-2. **Only ablate components actually available and stable in the pinned BrainOS revision**.
-3. **Measure both retrieval quality and prompt tokens**: an ablation that saves compute but loses recall (e.g. no relevance filtering) must be transparently reported across the standard metrics.
-4. **Maintain paired task analysis and effect sizes**: use Phase 10's paired difference tests to evaluate whether each component's contribution is statistically significant.
+Carry these constraints into Phase 12:
+1. **Build on the existing seams, not a second scorer**: `score_record`
+   already emits verdicts and the Phase 12 error labels, and
+   `RetrievalReport.dropped` already carries audit reasons with a documented
+   reason → taxonomy mapping. Phase 12 aggregates and reports; it must not
+   re-grade.
+2. **Separate `over_compression` from `missed_memory`.** Phase 11 proved they
+   have different owners: the relevance filter dropping needed evidence
+   (multi-hop, repaired by D2) vs. evidence never recalled at all. The
+   taxonomy must keep them distinct so each maps to its fix.
+3. **Keep the metric split load-bearing.** Accuracy, Recall@K,
+   evidence-in-prompt, and faithfulness are four different numbers; an error
+   record must carry all four contexts (verdict, retrieval, prompt evidence,
+   grounding) so a failure can be attributed to the right stage.
+4. **Aggregate by mode, category, and length.** The report must show *where*
+   each failure type concentrates (e.g. stale/conflicting on temporal and
+   conflict categories, over-compression on multi-hop) across baselines *and*
+   ablations — D2's extra selections and D4's empty prompts are error
+   distributions of their own.
