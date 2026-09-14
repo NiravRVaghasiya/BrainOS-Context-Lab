@@ -8,7 +8,7 @@ This repository integrates BrainOS as an upstream dependency. It does **not** mo
 
 ## Current status
 
-Phases 1–12 are complete and validated against the pinned BrainOS runtime. The
+Phases 1–13 are complete and validated against the pinned BrainOS runtime. The
 app persists conversations and memory mirrors to SQLite with hard session
 isolation, offers the full data-control set (clear conversation, clear memory,
 export session, end/delete session), can run the same conversation through all
@@ -18,7 +18,9 @@ robustness metric suite (including faithfulness and a degradation curve that
 stays unset until more than one length is present), runs controlled
 multi-mode experiments with cost budgets, summarizes trials with paired
 statistics and effect sizes, ablates the BrainOS pipeline one component at a
-time, and turns the scored records into a structured failure taxonomy.
+time, turns the scored records into a structured failure taxonomy, and guards
+every route untrusted text takes into a prompt — with the guard's own findings
+reported in the UI, in exports, and in evaluation artifacts.
 
 - **Phase 1** maps the provider abstraction (OpenAI and OpenAI-compatible)
   behind `LLMProvider`, with secret-safe errors and diagnostics.
@@ -77,10 +79,22 @@ time, and turns the scored records into a structured failure taxonomy.
   re-grades — and `labels_vs_scorer.unexpected` is printed on every run and must
   stay zero.
 
+- **Phase 13** hardens the whole path: one shared injection guard (seven
+  families, split into *intent* — which flags and can quarantine — and
+  *structural* — delimiter and chat-template breakouts, role prefixes, invisible
+  and control characters, which are rewritten), credential redaction on the two
+  routes that were still open (replayed history and the current message), role
+  containment so a pasted transcript cannot speak as the system, a per-session
+  findings ledger rendered in a **Security** tab, `PRAGMA secure_delete=ON` plus
+  `VACUUM` so a delete removes bytes and not just rows, and
+  `python -m security.scan` to answer "is there a credential in this artifact?"
+  over any directory. A quarantine is a security finding, not a tenth error
+  label, so `labels_vs_scorer.unexpected` stays zero.
+
 A session-scoped `ConversationService` combines the adapter, the retrieval
 policy, the context builder, and the provider factory. Deterministic fakes cover
 the whole pipeline without BrainOS installed; optional live tests exercise the
-pinned runtime. 696 tests pass and `ruff check .` is clean repository-wide.
+pinned runtime. 1004 tests pass and `ruff check .` is clean repository-wide.
 
 Chat is usable without an API key: BrainOS still observes and retrieves memory,
 and the panels show exactly what the model *would* have been sent. See
@@ -176,13 +190,17 @@ src/
   brain/                       # BrainOS adapter, retrieval policy, context
                                #   builder, memory policy, tokenizers, traces
   providers/                   # LLM provider interfaces and adapters
+  security/                    # Phase 13: the shared injection guard, the
+                               #   findings vocabulary and per-session ledger,
+                               #   and the artifact credential scanner (CLI)
   storage/                     # Conversation and evaluation persistence
   evaluation/                  # Benchmark runners, mode strategies, metrics,
                                #   reports, and the Phase 12 error taxonomy
 benchmarks/
   context_rot/                 # Phase 7 generator, spec, scored dataset, manifest
   fixtures/                    # Deterministic fixtures (Phase 12 scripted answers)
-docs/                          # Architecture, integration, evaluation, and security notes
+docs/                          # Architecture, integration, evaluation, threat
+                               #   model, security controls, and per-phase logs
 tests/                         # Unit, integration, security, and evaluation tests
 results/                       # Generated results (not committed by default)
 ```
@@ -282,6 +300,10 @@ python -m evaluation.errors results/phase11-dry.json \
 python -m evaluation.run --mode brainos \
   --answers benchmarks/fixtures/scripted_answers.jsonl --output results/run.json
 python -m evaluation.errors results/run.json --examples 1
+
+# Phase 13: is there a credential in anything a run wrote?
+# --secrets-env names an environment variable, so the value is never an argument.
+python -m security.scan results/ data/brainos_lab.sqlite3 --secrets-env OPENAI_API_KEY
 ```
 
 `--session-isolation` replays each transcript session separately, which is how
@@ -297,16 +319,39 @@ as a first cost control; the full Phase 15 budgets are still to come.
   against it.
 - Conversation and memory data are isolated by session, persisted only with
   credentials redacted at the write site, and deleted from disk by the clear
-  and end-session controls.
-- Retrieved memory is data, not a higher-priority instruction: it is delimited,
-  stripped of delimiter breakouts and role prefixes, and flagged when it matches
-  an instruction-override pattern.
+  and end-session controls — where "deleted" means the bytes are zeroed
+  (`secure_delete`) and the freed pages are rewritten away (`VACUUM`), not merely
+  unlinked.
+- Retrieved memory and retrieved transcript chunks are data, not higher-priority
+  instructions: both render inside their own delimiters, introduced as untrusted,
+  with structural breakouts rewritten and intent-bearing patterns flagged (and
+  quarantined under `drop_suspicious_memories`).
 - The active session key is redacted by exact match from browser-visible
-  diagnostics and from recalled memory text before it can reach a prompt.
-- Evaluation artifacts never contain provider credentials.
+  diagnostics, from recalled memory text, from retrieved chunks, from replayed
+  conversation history, and from the current message before any of them can reach
+  a prompt.
+- A replayed transcript cannot claim a role the application owns: history
+  arriving as `system`, `tool`, `developer`, or `function` is sent as `user`, and
+  the coercion is counted.
+- Every guard action is reported in one vocabulary (category / action / route /
+  stage / families) in the **Security** tab, in the session export, and in
+  evaluation artifacts — as counts and masked previews, never as the payload or
+  the credential it caught.
+- Evaluation artifacts never contain provider credentials, and
+  `python -m security.scan results/ data/brainos_lab.sqlite3` checks that
+  claim over whatever a run actually produced (exit `0` clean, `1` findings,
+  `2` nothing could be scanned).
+- Detection is pattern-based and English-only, and the reports say so: a clean
+  report means nothing matched, not that the content was safe. The structural
+  controls — delimiters, the untrusted-data preamble, and the rewrites — are what
+  do not depend on recognising an attack.
 - Users remain responsible for usage and costs charged by their provider account.
 
-See [`docs/security.md`](docs/security.md) for the intended threat model and [`docs/architecture.md`](docs/architecture.md) for the system boundaries.
+See [`docs/threat-model.md`](docs/threat-model.md) for the assets, actors, routes,
+and residual risk, [`docs/security.md`](docs/security.md) for the maintained
+controls, [`docs/phase-13-security.md`](docs/phase-13-security.md) for how they
+were built and measured, and [`docs/architecture.md`](docs/architecture.md) for
+the system boundaries.
 
 ## Research positioning
 

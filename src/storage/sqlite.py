@@ -10,6 +10,13 @@ Design rules:
   from every metadata/payload blob before it is written, as defence in depth
   over the service-layer sanitization. Callers additionally redact the active
   session key from message/memory text before persisting.
+* **A deletion removes the bytes, not just the rows.** Every connection sets
+  ``PRAGMA secure_delete=ON``, so freed content is zeroed rather than left in
+  the file for a later reader, and the session-level deletes are followed by a
+  ``VACUUM`` that rewrites the file without the freed pages. Phase 5 documented
+  this as a hardening candidate; Phase 13 closes it, because "delete session"
+  that leaves the transcript recoverable from the file is not the control the
+  UI promises.
 * **Runtime data stays out of Git.** The default path lives under ``data/``
   and the ``*.sqlite3`` ignore rule covers it; ``BRAINOS_LAB_DB`` overrides
   the location (HF Spaces deployments point it at a writable directory).
@@ -146,9 +153,49 @@ class SqliteStore:
             parent.mkdir(parents=True, exist_ok=True)
         connection = sqlite3.connect(str(self.database_path), timeout=30.0)
         connection.row_factory = sqlite3.Row
+        # Phase 13: zero deleted content instead of merely unlinking the rows.
+        # ``secure_delete`` is per-connection, so it has to be set on every one;
+        # a connection that forgets it would leave recoverable bytes behind.
+        connection.execute("PRAGMA secure_delete=ON")
         for statement in self._ddl:
             connection.execute(statement)
         return connection
+
+    def secure_delete_enabled(self) -> bool:
+        """Whether this database file reports ``secure_delete`` as on.
+
+        Exposed for tests and for the security report: the pragma is a property
+        of a connection, so the honest check is to open one and ask.
+        """
+
+        with self._connect() as connection:
+            row = connection.execute("PRAGMA secure_delete").fetchone()
+        return bool(row[0]) if row is not None else False
+
+    def vacuum(self) -> bool:
+        """Rewrite the database file without its freed pages.
+
+        Called after a user-data deletion so the file on disk stops containing
+        the removed content, not just the rows that pointed at it. Best-effort
+        by contract: it cannot run inside an open transaction, and a failure
+        here must never break the delete that prompted it, so the result is a
+        boolean the caller may log rather than an exception.
+        """
+
+        if not self.database_path.exists():
+            return False
+        connection = None
+        try:
+            connection = sqlite3.connect(str(self.database_path), timeout=30.0)
+            connection.isolation_level = None
+            connection.execute("PRAGMA secure_delete=ON")
+            connection.execute("VACUUM")
+            return True
+        except sqlite3.Error:
+            return False
+        finally:
+            if connection is not None:
+                connection.close()
 
 
 class SqliteConversationStore(SqliteStore):
@@ -336,6 +383,7 @@ class SqliteEvaluationStore(SqliteStore):
 
 __all__ = [
     "DEFAULT_DATABASE_ENV",
+    "DEFAULT_DATABASE_PATH",
     "SqliteConversationStore",
     "SqliteEvaluationStore",
     "SqliteMemoryStore",

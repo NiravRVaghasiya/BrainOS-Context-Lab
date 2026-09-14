@@ -10,6 +10,13 @@ session survives a page reload and the exported JSON reflects what the runtime
 actually holds. Persistence is strictly best-effort — a storage failure never
 fails a conversation turn — and credentials are redacted before anything is
 written.
+
+Phase 13 makes the guards *report*. Every credential redaction, injection
+family, structural rewrite, and history-role downgrade this service causes is
+counted in a per-session :class:`~security.findings.SecurityLedger`, which the
+UI panel, the session export, the diagnostics block, and the evaluation
+artifacts all read. A guard that acts silently cannot be audited, and an audit
+that only exists in tests cannot be checked against a live run.
 """
 
 from __future__ import annotations
@@ -32,6 +39,16 @@ from brain.memory_policy import MemoryPolicy, extract_candidates
 from brain.trace import sanitize_trace, sanitize_value
 from providers import ProviderError, ProviderResponse, create_provider
 from providers.base import ProviderConfig
+from security.findings import (
+    ROUTE_CHUNK,
+    ROUTE_MEMORY,
+    ROUTE_PERSISTENCE,
+    STAGE_PERSISTENCE,
+    STAGE_RECALL,
+    STAGE_SELECTION,
+    SecurityLedger,
+    security_report,
+)
 from storage.conversations import ConversationMessage
 
 from .state import SessionState
@@ -74,6 +91,9 @@ class ConversationTurn:
     trace: tuple[dict[str, str], ...] = ()
     generated: bool = False
     error: str | None = None
+    #: Phase 13: what the guards did while this turn's prompt was assembled, in
+    #: the same shape the session-level report uses.
+    security: dict[str, Any] = field(default_factory=dict)
 
 
 class ConversationService:
@@ -114,6 +134,12 @@ class ConversationService:
         self.state = state
         self.policy = policy or MemoryPolicy()
         self.system_instructions = system_instructions
+        #: Session-cumulative audit of every guard action this service caused.
+        #: It survives ``clear_conversation()`` deliberately: it is an audit
+        #: trail of what the guards caught, not conversation content, and the
+        #: user-data controls delete data rather than evidence. ``end_session``
+        #: drops it with the session.
+        self.security = SecurityLedger(session_id=state.session_id)
         self._provider = provider
         self._adapter_injected = adapter is not None
         self._provider_injected = provider is not None
@@ -181,6 +207,7 @@ class ConversationService:
         """Run the BrainOS-backed turn and optionally call the configured provider."""
 
         user_text = text.strip()
+        self.security.set_turn(len(self.state.messages) + 1)
         self.state.messages.append({"role": "user", "content": user_text})
         self._persist_message("user", user_text)
         stored = self.observe_text(user_text, role="user")
@@ -207,6 +234,7 @@ class ConversationService:
         self._persist_memories()
 
         self.state.last_context = [dict(message) for message in built.messages]
+        self.state.last_guard = built.guard.to_dict()
         turn = ConversationTurn(
             user_message=user_text,
             reply=reply,
@@ -222,6 +250,7 @@ class ConversationService:
             trace=tuple(sanitize_trace(self.adapter.trace(), secrets=self._secrets())),
             generated=generated,
             error=error,
+            security=self.security.snapshot(),
         )
         self.state.diagnostics = self._diagnostics(turn)
         return turn
@@ -271,7 +300,30 @@ class ConversationService:
                 "diagnostics": dict(self.state.diagnostics),
                 "provider": self.state.provider.safe_dict(),
                 "trace": sanitize_trace(self.adapter.trace(), secrets=self._secrets()),
+                "security": self.security_report(),
             }
+        )
+
+    def security_report(self) -> dict[str, Any]:
+        """The session's guard audit: cumulative counts plus the last prompt.
+
+        Rendered in the UI's Security tab, embedded in diagnostics, and written
+        into the session export. The block is produced by
+        :func:`security.findings.security_report` and sanitized like everything
+        else the service returns, so a finding preview can never republish the
+        credential it was raised against.
+        """
+
+        policy = self.state.context.retrieval_policy()
+        return self._sanitize(
+            security_report(
+                self.security,
+                last_prompt=getattr(self.state, "last_guard", None),
+                policy={
+                    "drop_suspicious_memories": policy.drop_suspicious_memories,
+                    "neutralize_text": policy.neutralize_text,
+                },
+            )
         )
 
     def clear_conversation(self) -> None:
@@ -315,9 +367,22 @@ class ConversationService:
         surfaces, not to the persisted record.
         """
 
+        redactions = 0
         for secret in self._secrets():
-            if secret and secret in text:
+            if not secret:
+                continue
+            occurrences = text.count(secret)
+            if occurrences:
                 text = text.replace(secret, "[redacted]")
+                redactions += occurrences
+        if redactions:
+            self.security.record_credential_redaction(
+                ROUTE_PERSISTENCE,
+                stage=STAGE_PERSISTENCE,
+                count=redactions,
+                secret=self._secrets()[0],
+                detail="session credential removed before the transcript reached storage",
+            )
         return text
 
     def _persist_message(self, role: str, content: str) -> None:
@@ -406,13 +471,24 @@ class ConversationService:
         secrets = self._secrets()
         if secrets:
             guarded: list[HistoryChunk] = []
+            redactions = 0
             for chunk in candidates:
                 text = chunk.text
                 for secret in secrets:
-                    if secret in text:
+                    occurrences = text.count(secret)
+                    if occurrences:
                         text = text.replace(secret, "[redacted]")
+                        redactions += occurrences
                 guarded.append(replace(chunk, text=text) if text != chunk.text else chunk)
             candidates = guarded
+            if redactions:
+                self.security.record_credential_redaction(
+                    ROUTE_CHUNK,
+                    stage=STAGE_SELECTION,
+                    count=redactions,
+                    secret=secrets[0],
+                    detail="session credential removed from a retrieved transcript chunk",
+                )
         return retrieve_chunks(user_text, candidates, top_k=settings.rag_top_k)
 
     def _build_context(self, user_text: str, memories: list[MemoryRecord]) -> BuiltContext:
@@ -436,7 +512,7 @@ class ConversationService:
         settings = self.state.context
         ablation = ABLATIONS.get(settings.mode)
         history = [message for message in self.state.messages[:-1] if isinstance(message, dict)]
-        return build_context(
+        built = build_context(
             system_instructions=self.system_instructions,
             current_user_message=user_text,
             recent_conversation=history,
@@ -453,7 +529,10 @@ class ConversationService:
                 else self._safe_stale_ids()
             ),
             current_turn=len(self.state.messages),
+            secrets=self._secrets(),
         )
+        self.security.record_many(built.guard.findings())
+        return built
 
     def _secrets(self) -> tuple[str, ...]:
         """Return the credential values that must never leave the process.
@@ -483,12 +562,23 @@ class ConversationService:
         if not secrets:
             return records
         guarded: list[MemoryRecord] = []
+        redactions = 0
         for record in records:
             text = record.text
             for secret in secrets:
-                if secret in text:
+                occurrences = text.count(secret)
+                if occurrences:
                     text = text.replace(secret, "[redacted]")
+                    redactions += occurrences
             guarded.append(replace(record, text=text) if text != record.text else record)
+        if redactions:
+            self.security.record_credential_redaction(
+                ROUTE_MEMORY,
+                stage=STAGE_RECALL,
+                count=redactions,
+                secret=secrets[0],
+                detail="session credential removed from recalled memory text",
+            )
         return guarded
 
     def _enrich(
@@ -576,6 +666,7 @@ class ConversationService:
                 "provider": self.state.provider.safe_dict(),
                 "generated": turn.generated,
                 "error": turn.error,
+                "security": turn.security,
             }
         )
 

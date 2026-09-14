@@ -33,9 +33,9 @@ from dataclasses import dataclass, replace
 from brain.retrieval_policy import (
     content_tokens,
     document_frequencies,
+    inspect_memory_text,
     jaccard,
     lexical_score,
-    neutralize_memory_text,
     normalize_text,
     split_sentences,
     token_set,
@@ -70,6 +70,12 @@ class HistoryChunk:
     turn: int = 0
     score: float = 0.0
     suspicious: bool = False
+    #: Injection families detected in the raw text before guarding. Carried on
+    #: the chunk so the prompt builder can report what was neutralized on this
+    #: route without re-deriving it from text that is already clean.
+    families: tuple[str, ...] = ()
+    #: Neutralization categories applied to this chunk's text.
+    neutralized: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, object]:
         """Return a JSON-ready view for panels, export, and evaluation records."""
@@ -81,6 +87,8 @@ class HistoryChunk:
             "turn": self.turn,
             "score": round(self.score, 6),
             "suspicious": self.suspicious,
+            "families": list(self.families),
+            "neutralized": list(self.neutralized),
         }
 
 
@@ -176,11 +184,18 @@ def retrieve_chunks(
             jaccard(tokens, other) >= dedupe_threshold for other in taken_tokens
         ):
             continue
-        guarded, suspicious = neutralize_memory_text(chunk.text, max_chars=_GUARD_CHARS)
-        if not normalize_text(guarded):
+        guarded = inspect_memory_text(chunk.text, max_chars=_GUARD_CHARS)
+        if not normalize_text(guarded.text):
             continue
         selected.append(
-            replace(chunk, text=guarded, score=score, suspicious=suspicious)
+            replace(
+                chunk,
+                text=guarded.text,
+                score=score,
+                suspicious=guarded.suspicious,
+                families=guarded.families,
+                neutralized=guarded.neutralized,
+            )
         )
         taken_tokens.append(tokens)
     return selected

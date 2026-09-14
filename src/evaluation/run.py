@@ -11,6 +11,12 @@ the other half of a run:
 * the run always reports retrieval and context aggregates, and reports answer
   metrics only for the answers it was given.
 
+Phase 13 adds a ``security`` block beside the metrics: the aggregate of every
+guard action taken while the run's prompts were assembled (injection families
+detected, structural rewrites, credentials redacted, history roles downgraded).
+A clean block is the run's evidence that nothing was quarantined or redacted; it
+is not a claim that the dataset was benign.
+
 Phase 9 adds ``--generate``: the prompt each task built is sent to the model and
 the answer is graded in place, so a single mode can be measured with a real model
 in the loop (latency included). The credential is read from an environment
@@ -33,6 +39,7 @@ from pathlib import Path
 
 from baselines.modes import ABLATION_ORDER, MODE_ORDER
 from brain.tokenizers import TokenizerUnavailableError, estimate_tokens, tiktoken_counter
+from security.findings import summarize_security
 
 from .datasets import load_jsonl
 from .generation import (
@@ -272,6 +279,13 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit(f"Evaluation scaffold: {exc}") from exc
 
     payload = run.to_dict()
+    # Phase 13: the guard audit travels with the numbers. A run whose prompts
+    # were assembled with quarantines or credential redactions is not the same
+    # run as one whose guards never fired, and an artifact that carries no guard
+    # block cannot claim it held nothing sensitive.
+    payload["security"] = summarize_security(
+        record.get("security") for record in run.task_results
+    )
     if budget is not None and spec is not None:
         # The Phase 6/7 run schema stays as it is; the cost report is an
         # addition beside it so older consumers keep working unchanged.
@@ -306,6 +320,11 @@ def main(argv: list[str] | None = None) -> int:
             f"failures={snapshot['failures']} skips={snapshot['skips']} "
             f"tokens={snapshot['total_tokens']} within_limits={snapshot['within_limits']}"
         )
+    security = payload["security"]
+    if not security.get("clean", True):
+        totals = security.get("totals") or {}
+        summary = ", ".join(f"{name}={count}" for name, count in sorted(totals.items()))
+        print(f"security findings: {summary} (quarantined={security.get('quarantined', 0)})")
     for issue in run.dataset_issues:
         print(f"dataset issue: {issue}", file=sys.stderr)
     return 0

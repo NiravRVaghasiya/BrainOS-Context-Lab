@@ -169,3 +169,39 @@ def test_mode_selector_rewrites_the_budgets_it_governs() -> None:
     assert rag.uses_rag() and not rag.uses_memory()
     assert rag.chunk_budget > 0
     assert rag.max_recent_turns == RECENT_WINDOW_TURNS
+
+
+def test_the_security_tab_is_wired_into_every_panel_callback() -> None:
+    """Phase 13 adds three components; every panel callback must feed all three.
+
+    The declared output count is what Gradio checks at build time, so a mismatch
+    between :func:`_panel_values` and the components would break every callback
+    at once — the count is asserted against the component order, not a literal.
+    """
+
+    from app.panels import SECURITY_COLUMNS
+    from app.ui import PanelComponents, _panel_values, _silent_values
+
+    controller = _controller()
+    demo = create_app(controller)
+    sid = controller.connect(None, provider="openai", model="gpt-4o-mini", api_key=KEY).session_id
+    controller.chat(sid, f"My API key is {KEY} and we run PostgreSQL 16.")
+    view = controller.chat(sid, "What database do we run in production?")
+
+    values = _panel_values(view)
+    declared = {(len(fn.inputs), len(fn.outputs)) for fn in demo.fns.values()}
+
+    assert len(values) == len(PanelComponents.order) == 13
+    assert PanelComponents.order[-3:] == ("security", "security_rows", "security_report")
+    assert (1, len(_silent_values(view))) in declared, "panel callbacks feed all 13"
+    assert (2, len(_silent_values(view)) + 1) in declared, "the chat callback adds the box"
+
+    markdown, rows, report = values[-3:]
+    assert markdown.startswith("### Security")
+    assert "Credentials redacted" in markdown
+    assert all(len(row) == len(SECURITY_COLUMNS) for row in rows)
+    assert rows, "a session that redacted a credential must show the finding"
+    assert report["clean"] is False
+    assert report["by_route"]["history"] >= 1
+    assert report["session_id"] == sid
+    assert KEY not in str(values), "no panel value may carry the session key"

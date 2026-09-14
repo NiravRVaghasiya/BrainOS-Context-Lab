@@ -38,6 +38,8 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from typing import Any
 
+from security.guard import GuardedText, detect_injection, neutralize
+
 from .adapter import Conflict, MemoryRecord
 
 # --------------------------------------------------------------------------- #
@@ -61,21 +63,6 @@ _STOPWORDS = frozenset(
 )
 _TOKEN_RE = re.compile(r"[a-z0-9]+(?:['-][a-z0-9]+)*")
 _WHITESPACE_RE = re.compile(r"\s+")
-_CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
-_DELIMITER_RE = re.compile(
-    r"<\s*/?\s*(?:retrieved_memory|retrieved_history|memory|history|system|user|assistant)\s*>",
-    re.I,
-)
-_ROLE_PREFIX_RE = re.compile(r"^\s*(?:system|assistant|developer|tool|user)\s*:\s*", re.I)
-_INJECTION_RE = re.compile(
-    r"(?:\b(?:ignore|disregard|forget|override)\b[\s,]+(?:\w+\s+){0,3}"
-    r"\b(?:instructions?|prompts?|rules?|directives?)\b)"
-    r"|\bnew\s+system\s+prompt\b"
-    r"|\byou\s+are\s+now\b"
-    r"|\breveal\b[\s,]+(?:\w+\s+){0,3}\b(?:system\s+prompt|instructions?|secrets?|api\s+keys?)\b"
-    r"|\bact\s+as\s+(?:the\s+)?system\b",
-    re.I,
-)
 
 #: Markers that make an explicit replacement/correction claim.
 CORRECTION_MARKERS = (
@@ -173,28 +160,34 @@ def bigrams(tokens: Sequence[str]) -> set[tuple[str, str]]:
 # --------------------------------------------------------------------------- #
 
 
+def inspect_memory_text(text: str, *, max_chars: int = 600) -> GuardedText:
+    """Guard one retrieved string and return the full audit of what happened.
+
+    Phase 13 moved the mechanics into :mod:`security.guard` so one vocabulary
+    describes every route into a prompt (memory, transcript chunk, history) and
+    so a guard action can be *reported* rather than only applied. The returned
+    :class:`~security.guard.GuardedText` carries the guarded text, the attack
+    families seen in the original, and which structural categories were removed
+    — the raw material for the security findings ledger.
+    """
+
+    return neutralize(text, max_chars=max_chars)
+
+
 def neutralize_memory_text(text: str, *, max_chars: int = 600) -> tuple[str, bool]:
     """Make one retrieved memory safe to embed inside a delimited prompt block.
 
     Returns the guarded text and whether it looked like an instruction-override
     attempt. Guarding is intentionally lossless for ordinary prose: it removes
-    delimiter breakouts, control characters, and leading role labels, collapses
-    newlines so a memory renders as one bullet, and truncates pathological
-    length. Suspicious text is *flagged*, not silently deleted — dropping it is
-    a policy decision (:attr:`RetrievalPolicy.drop_suspicious_memories`) so the
-    security phase can measure both behaviours.
+    invisible characters, delimiter and chat-template breakouts, control
+    characters, and leading role labels, collapses newlines so a memory renders
+    as one bullet, and truncates pathological length. Suspicious text is
+    *flagged*, not silently deleted — dropping it is a policy decision
+    (:attr:`RetrievalPolicy.drop_suspicious_memories`) so the security phase can
+    measure both behaviours.
     """
 
-    guarded = _CONTROL_RE.sub(" ", str(text))
-    guarded = _DELIMITER_RE.sub("", guarded)
-    guarded = "\n".join(
-        _ROLE_PREFIX_RE.sub("", line) for line in guarded.replace("\r", "\n").split("\n")
-    )
-    guarded = _WHITESPACE_RE.sub(" ", guarded).strip()
-    suspicious = bool(_INJECTION_RE.search(guarded))
-    if len(guarded) > max_chars > 0:
-        guarded = guarded[:max_chars].rstrip() + " …"
-    return guarded, suspicious
+    return neutralize(text, max_chars=max_chars).as_tuple()
 
 
 # --------------------------------------------------------------------------- #
@@ -308,6 +301,12 @@ class ScoredMemory:
     contested: bool = False
     suspicious: bool = False
     position: int = 0
+    #: Phase 13: the attack families the guard saw in this memory's original
+    #: text, and the structural categories it removed. Empty for ordinary prose.
+    #: ``suspicious`` stays the single boolean the drop policy reads; these two
+    #: are what make the flag explainable in a panel and in a security report.
+    suspicious_families: tuple[str, ...] = ()
+    neutralized: tuple[str, ...] = ()
 
     @property
     def memory_id(self) -> str:
@@ -329,6 +328,8 @@ class ScoredMemory:
             "merged_ids": list(self.merged_ids),
             "contested": self.contested,
             "suspicious": self.suspicious,
+            "suspicious_families": list(self.suspicious_families),
+            "neutralized": list(self.neutralized),
         }
 
 
@@ -400,6 +401,13 @@ class RetrievalReport:
     conflicts: tuple[ConflictResolution, ...] = ()
     ranking: tuple[dict[str, Any], ...] = ()
     selected_ids: tuple[str, ...] = ()
+    #: Phase 13 guard accounting, over every *candidate* the policy scored (not
+    #: only the survivors): how many candidates matched each attack family, how
+    #: many needed each structural rewrite, and how many were flagged at all.
+    #: ``suspicious_count`` above stays the prompt-level number it always was.
+    guard_family_counts: Mapping[str, int] = field(default_factory=dict)
+    guard_action_counts: Mapping[str, int] = field(default_factory=dict)
+    suspicious_candidate_count: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -412,6 +420,9 @@ class RetrievalReport:
             "low_relevance_count": self.low_relevance_count,
             "cap_count": self.cap_count,
             "suspicious_count": self.suspicious_count,
+            "suspicious_candidate_count": self.suspicious_candidate_count,
+            "guard_family_counts": dict(sorted(self.guard_family_counts.items())),
+            "guard_action_counts": dict(sorted(self.guard_action_counts.items())),
             "selected_count": self.selected_count,
             "selected_ids": list(self.selected_ids),
             "dropped": [item.to_dict() for item in self.dropped],
@@ -976,6 +987,10 @@ def select_memories(
     materialized = list(records)
     dropped: list[DroppedMemory] = []
     resolutions: list[ConflictResolution] = []
+    # Phase 13 guard accounting, over every candidate that gets scored.
+    guard_families: dict[str, int] = {}
+    guard_actions: dict[str, int] = {}
+    suspicious_candidates = 0
 
     usable: list[tuple[int, MemoryRecord]] = []
     for position, record in enumerate(materialized):
@@ -1047,11 +1062,23 @@ def select_memories(
             recency=recency,
             policy=active_policy,
         )
-        text, suspicious = (
-            neutralize_memory_text(record.text, max_chars=active_policy.max_memory_chars)
-            if active_policy.neutralize_text
-            else (str(record.text).strip(), bool(_INJECTION_RE.search(str(record.text))))
-        )
+        if active_policy.neutralize_text:
+            guarded = inspect_memory_text(
+                record.text, max_chars=active_policy.max_memory_chars
+            )
+            text, suspicious = guarded.text, guarded.suspicious
+            families, neutralized = guarded.families, guarded.neutralized
+        else:
+            # Text is passed through untouched, but detection still runs: a
+            # policy that disables rewriting must not also disable *seeing*.
+            text = str(record.text).strip()
+            families = detect_injection(record.text)
+            suspicious, neutralized = bool(families), ()
+        for family in families:
+            guard_families[family] = guard_families.get(family, 0) + 1
+        for category in neutralized:
+            guard_actions[category] = guard_actions.get(category, 0) + 1
+        suspicious_candidates += 1 if suspicious else 0
         scored.append(
             ScoredMemory(
                 record=record,
@@ -1064,6 +1091,8 @@ def select_memories(
                 recency=recency,
                 suspicious=suspicious,
                 position=position,
+                suspicious_families=families,
+                neutralized=neutralized,
             )
         )
 
@@ -1101,6 +1130,9 @@ def select_memories(
         cap_count=sum(1 for item in dropped if item.reason in {"cap", "suspicious"}),
         suspicious_count=sum(1 for item in ranked if item.suspicious) + cap_dropped,
         selected_count=len(ranked),
+        guard_family_counts=dict(sorted(guard_families.items())),
+        guard_action_counts=dict(sorted(guard_actions.items())),
+        suspicious_candidate_count=suspicious_candidates,
         dropped=tuple(dropped),
         conflicts=tuple(resolutions),
         ranking=tuple(item.components() for item in ranked),
@@ -1436,6 +1468,7 @@ def _apply_cap(
 __all__ = [
     "CORRECTION_MARKERS",
     "ClaimConflict",
+    "GuardedText",
     "Conflict",
     "ConflictResolution",
     "DroppedMemory",
@@ -1451,6 +1484,7 @@ __all__ = [
     "extract_claims",
     "inverse_document_frequency",
     "has_correction_marker",
+    "inspect_memory_text",
     "jaccard",
     "lexical_score",
     "neutralize_memory_text",

@@ -40,6 +40,7 @@ from .panels import (
     CONFLICT_COLUMNS,
     DROPPED_MEMORY_COLUMNS,
     RETRIEVED_MEMORY_COLUMNS,
+    SECURITY_COLUMNS,
     STORED_MEMORY_COLUMNS,
 )
 
@@ -75,6 +76,17 @@ BrainOS, or BrainOS + RAG. Each mode reports the identical accounting fields, so
 the Context tab is a one-conversation version of the comparison the benchmark
 will run at scale. The context-rot benchmark itself lands in Phase 7; until
 then, use **Export session** to take a machine-readable snapshot.
+"""
+
+SECURITY_INTRO_MARKDOWN = """### Security
+
+What the guards did while building this session's prompts: instruction-like
+retrieved text, structural rewrites (delimiter breakouts, role prefixes,
+invisible characters), credentials removed from history or memory, and transcript
+messages that arrived claiming a role the application owns.
+
+Findings are **counts and clipped previews**, never the payload or the
+credential. The table is bounded; the totals are exact for the session.
 """
 
 FOOTER_MARKDOWN = (
@@ -144,6 +156,9 @@ class PanelComponents:
     prompt: Any
     trace: Any
     trace_events: Any
+    security: Any
+    security_rows: Any
+    security_report: Any
     order: tuple[str, ...] = field(
         default=(
             "stored",
@@ -156,6 +171,9 @@ class PanelComponents:
             "prompt",
             "trace",
             "trace_events",
+            "security",
+            "security_rows",
+            "security_report",
         )
     )
 
@@ -424,6 +442,16 @@ def _build_inspection(gr: Any) -> PanelComponents:
     with gr.Tab("Cognitive Trace"):
         trace = gr.Markdown("")
         trace_events = gr.JSON(label="Runtime trace events", value=[])
+    with gr.Tab("Security"):
+        security = gr.Markdown(SECURITY_INTRO_MARKDOWN)
+        security_rows = gr.Dataframe(
+            headers=list(SECURITY_COLUMNS),
+            label="Guard findings (most recent last)",
+            value=[],
+            interactive=False,
+            wrap=True,
+        )
+        security_report = gr.JSON(label="Security report", value={})
     with gr.Tab("Evaluation"):
         gr.Markdown(EVALUATION_MARKDOWN)
 
@@ -438,6 +466,9 @@ def _build_inspection(gr: Any) -> PanelComponents:
         prompt=prompt,
         trace=trace,
         trace_events=trace_events,
+        security=security,
+        security_rows=security_rows,
+        security_report=security_report,
     )
 
 
@@ -792,6 +823,9 @@ def _panel_values(view: Any) -> tuple[Any, ...]:
         view.prompt,
         view.trace,
         view.trace_events,
+        view.security,
+        view.security_rows,
+        view.security_report,
     )
 
 

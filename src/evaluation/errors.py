@@ -77,6 +77,7 @@ from pathlib import Path
 from typing import Any
 
 from baselines.modes import mode_label, mode_profile
+from security.findings import summarize_security
 
 from .analysis import extract_mode_result_items
 from .datasets import BenchmarkTask, load_jsonl
@@ -954,6 +955,50 @@ def _group_by_mode_and(
     }
 
 
+def _security_findings(items: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """Phase 13: the guard audit behind these failures, per mode and in total.
+
+    This is the surface the Phase 12 constraint asked for. ``suspicious`` stays
+    unmapped in :data:`DROP_REASON_LABELS` — an injection quarantine is not an
+    answer failure and must not become a tenth taxonomy label — so the report
+    answers "was anything quarantined or redacted while these numbers were
+    produced?" here instead, beside ``labels_vs_scorer``.
+
+    Reads the per-record ``security`` blocks the replays carry (and the per-mode
+    blocks an experiment artifact carries), so an artifact written before
+    Phase 13 sums to a clean zero rather than failing.
+    """
+
+    blocks: list[Any] = []
+    per_mode: dict[str, list[Any]] = {}
+    for item in items:
+        mode = str(item.get("mode", "") or "")
+        for record in item.get("task_results") or ():
+            if not isinstance(record, Mapping):
+                continue
+            block = record.get("security")
+            blocks.append(block)
+            per_mode.setdefault(mode, []).append(block)
+        mode_block = item.get("security")
+        if isinstance(mode_block, Mapping) and not (item.get("task_results")):
+            blocks.append(mode_block)
+            per_mode.setdefault(mode, []).append(mode_block)
+    report = summarize_security(blocks)
+    report["by_mode"] = {
+        mode: summarize_security(values) for mode, values in sorted(per_mode.items())
+    }
+    report["drop_reason_mapping"] = {
+        reason: label_for_drop_reason(reason) for reason in GUARDED_DROP_REASONS
+    }
+    report["interpretation"] = (
+        "Guarded drop reasons are reported here, never as taxonomy labels: a "
+        "quarantined memory is a security finding about the prompt, not a "
+        "failure of the answer. `drop_reason_mapping` shows the empty label that "
+        "keeps the two vocabularies apart."
+    )
+    return report
+
+
 def _labels_vs_scorer(records: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     """Check the taxonomy against the scorer's labels without re-grading.
 
@@ -1158,6 +1203,7 @@ def error_report(
                 }.items()
             )
         ),
+        "security_findings": _security_findings(items),
         "labels_vs_scorer": _labels_vs_scorer(materialized),
         "concentration": _concentration_rows(
             _group_by_mode_and(materialized, "category"), top
@@ -1308,6 +1354,17 @@ def _print_summary(
                 f"  {row['mode']:<20} {row['category']:<14} {row['failure_type']:<20} "
                 f"n={row['count']} (stage={row['stage']})"
             )
+    security = report.get("security_findings") or {}
+    if security:
+        totals = security.get("totals") or {}
+        rendered = ", ".join(f"{name}={count}" for name, count in sorted(totals.items()))
+        print(
+            f"\nsecurity findings: records={security.get('record_count', 0)} "
+            f"with_findings={security.get('records_with_findings', 0)} "
+            f"quarantined={security.get('quarantined', 0)} "
+            f"credentials_redacted={security.get('credentials_redacted', 0)}"
+            + (f" — {rendered}" if rendered else " — none (no guard fired)")
+        )
     scorer = report.get("labels_vs_scorer") or {}
     if scorer:
         print(
@@ -1363,6 +1420,7 @@ __all__ = [
     "mode_has_selection_stage",
     "mode_result_items",
     "required_fact_ids",
+    "_security_findings",
     "unneeded_prompt_fact_ids",
     "write_failure_records",
 ]

@@ -186,6 +186,10 @@ class SessionState:
     context: ContextSettings = field(default_factory=ContextSettings)
     messages: list[dict[str, Any]] = field(default_factory=list)
     last_context: list[dict[str, Any]] = field(default_factory=list)
+    #: Phase 13: the guard report for the most recently built prompt, kept so
+    #: the security panel can show "this turn" beside the session totals. It is
+    #: a count block, never the text it counted.
+    last_guard: dict[str, Any] = field(default_factory=dict)
     diagnostics: dict[str, Any] = field(default_factory=dict)
     brain: Any = field(default=None, repr=False, compare=False)
 
@@ -198,6 +202,7 @@ class SessionState:
 
         self.messages.clear()
         self.last_context.clear()
+        self.last_guard.clear()
         self.diagnostics.clear()
         self.conversation_id = new_id()
         self.brain = None

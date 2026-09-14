@@ -24,6 +24,11 @@ Two constraints shape the module:
    a key pasted into a conversation cannot be echoed back by a panel either.
 2. **BrainOS stays behind the adapter.** The controller talks to
    :class:`ConversationService` only; it never imports ``brainos_runtime``.
+
+Phase 13 adds a third: **every guard is visible**. The controller renders the
+session's security ledger into its own tab, includes it in the export, and
+follows each user-data deletion with a database ``VACUUM`` so "delete session"
+removes the bytes and not only the rows.
 """
 
 from __future__ import annotations
@@ -105,6 +110,11 @@ class TurnView:
     prompt: str = ""
     trace: str = ""
     trace_events: list[dict[str, str]] = field(default_factory=list)
+    #: Phase 13: the session's guard audit — a markdown summary, the bounded
+    #: findings table, and the raw count block for the JSON viewer.
+    security: str = ""
+    security_rows: list[list[Any]] = field(default_factory=list)
+    security_report: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -484,6 +494,7 @@ class UIController:
             state.clear_conversation()
         else:
             service.clear_conversation()
+        self._vacuum_stores()
         self._last_turn.pop(state.session_id, None)
         return self._view(
             state,
@@ -501,6 +512,7 @@ class UIController:
             state.brain = None
         else:
             service.reset_memory()
+        self._vacuum_stores()
         self._last_turn.pop(state.session_id, None)
         return self._view(
             state,
@@ -517,6 +529,7 @@ class UIController:
         self._services.pop(session_id, None)
         self._last_turn.pop(session_id, None)
         self._delete_persisted_session(session_id)
+        self._vacuum_stores()
         ended = self.sessions.end(session_id)
         state = self.sessions.start()
         return SessionView(
@@ -561,6 +574,7 @@ class UIController:
                 for record in memories
             ],
             "persistence": self._persistence_payload(state.session_id),
+            "security": self._security_report_safe(service, state),
         }
         return self._redact(payload, self._secrets(state))
 
@@ -586,6 +600,7 @@ class UIController:
         secrets = self._secrets(state)
         service = self._services.get(state.session_id)
         memories = self._stored_memories_safe(service)
+        security = self._security_report_safe(service, state)
 
         retrieved: list[MemoryRecord] = []
         chunks: list[HistoryChunk] = []
@@ -675,6 +690,9 @@ class UIController:
             trace_events=self._redact(
                 [dict(event) for event in events if isinstance(event, Mapping)], secrets
             ),
+            security=self._redact(panels.security_markdown(security), secrets),
+            security_rows=self._redact(panels.security_rows(security), secrets),
+            security_report=security,
         )
 
     # ------------------------------------------------------------------ #
@@ -767,6 +785,53 @@ class UIController:
                 self._evaluation_store.delete_session_data(session_id)
             except Exception as exc:  # noqa: BLE001 - best-effort deletion
                 _warn_storage("evaluation deletion failed", exc)
+
+    def _security_report_safe(self, service: Any, state: SessionState) -> dict[str, Any]:
+        """The session's guard audit, or an empty block when there is no service.
+
+        Best-effort like every other panel: a report that cannot be built must
+        not break the turn that asked for it.
+        """
+
+        if service is None:
+            return {
+                "security_version": "security-v1",
+                "record_count": 0,
+                "clean": True,
+                "totals": {},
+                "by_action": {},
+                "by_route": {},
+                "by_stage": {},
+                "by_family": {},
+                "recent": [],
+                "last_prompt": dict(getattr(state, "last_guard", {}) or {}),
+            }
+        try:
+            return service.security_report()
+        except Exception:  # noqa: BLE001 - the panel is best-effort
+            return {}
+
+    def _vacuum_stores(self) -> None:
+        """Rewrite the database files after a user-data deletion.
+
+        ``secure_delete`` already zeroes the removed content; ``VACUUM`` also
+        reclaims the pages, so the file shrinks and no freed page is left
+        holding a deleted transcript. Skipped silently for stores that do not
+        implement it (the in-memory test doubles), and never fatal: a vacuum
+        failure must not turn a successful delete into an error.
+        """
+
+        for store in (
+            self._conversation_store,
+            self._memory_store,
+            self._evaluation_store,
+        ):
+            vacuum = getattr(store, "vacuum", None)
+            if callable(vacuum):
+                try:
+                    vacuum()
+                except Exception as exc:  # noqa: BLE001 - best-effort hardening
+                    _warn_storage("vacuum failed", exc)
 
     def _secrets(self, state: SessionState) -> tuple[str, ...]:
         key = state.provider.api_key
