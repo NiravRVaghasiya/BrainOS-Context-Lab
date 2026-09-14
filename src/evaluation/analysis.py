@@ -15,7 +15,8 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
-from baselines.modes import MODE_ORDER, mode_label
+from baselines.ablations import ablation_pairs
+from baselines.modes import ABLATION_ORDER, MODE_ORDER, mode_label
 
 from .metrics import (
     METRICS_VERSION,
@@ -155,8 +156,8 @@ def summarize_trial_modes(runs_or_results: Any) -> dict[str, dict[str, Any]]:
             continue
         by_mode.setdefault(m, []).append(item)
 
-    ordered_modes = [m for m in MODE_ORDER if m in by_mode] + [
-        m for m in by_mode if m not in MODE_ORDER
+    ordered_modes = [m for m in (*MODE_ORDER, *ABLATION_ORDER) if m in by_mode] + [
+        m for m in by_mode if m not in MODE_ORDER and m not in ABLATION_ORDER
     ]
 
     summaries: dict[str, dict[str, Any]] = {}
@@ -352,7 +353,7 @@ def pairwise_comparisons(
     targets = (
         list(target_modes)
         if target_modes
-        else [m for m in MODE_ORDER if m in available_modes]
+        else [m for m in (*MODE_ORDER, *ABLATION_ORDER) if m in available_modes]
     )
     comparisons: list[dict[str, Any]] = []
 
@@ -368,6 +369,9 @@ def pairwise_comparisons(
         ("brainos", "rag"),
         ("brainos_rag", "brainos"),
     ]
+    # Phase 11: every ablation present is paired against the full system, so an
+    # ablation run is interpretable whatever baseline the caller chose.
+    special_pairs.extend(ablation_pairs(available_modes))
     for a, b in special_pairs:
         if a in available_modes and b in available_modes:
             # Check if not already added

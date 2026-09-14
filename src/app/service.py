@@ -19,6 +19,7 @@ from collections.abc import Callable
 from dataclasses import asdict, dataclass, field, replace
 from typing import Any
 
+from baselines.ablations import ABLATIONS, prepare_records
 from baselines.rag import HistoryChunk, chunk_history, retrieve_chunks
 from brain.adapter import (
     BrainOSAdapter,
@@ -425,20 +426,32 @@ class ConversationService:
         mode (Phase 6). The system instructions and the accounting are identical
         in every mode, so a cross-mode difference is attributable to context
         selection alone.
+
+        A Phase 11 ablation additionally removes its component here: runtime
+        contradiction/stale reports can be ignored and record preparation
+        (temporal-signal or lifecycle stripping) applied before the builder
+        sees the memories. Baselines pass through unchanged.
         """
 
         settings = self.state.context
+        ablation = ABLATIONS.get(settings.mode)
         history = [message for message in self.state.messages[:-1] if isinstance(message, dict)]
         return build_context(
             system_instructions=self.system_instructions,
             current_user_message=user_text,
             recent_conversation=history,
-            memories=memories,
+            memories=prepare_records(ablation, list(memories)),
             retrieved_chunks=self._retrieve_chunks(user_text, history),
             budget=settings.context_budget(),
             policy=settings.retrieval_policy(),
-            conflicts=self._safe_conflicts(),
-            stale_ids=self._safe_stale_ids(),
+            conflicts=(
+                [] if ablation and ablation.ignore_runtime_conflicts
+                else self._safe_conflicts()
+            ),
+            stale_ids=(
+                set() if ablation and ablation.ignore_runtime_stale
+                else self._safe_stale_ids()
+            ),
             current_turn=len(self.state.messages),
         )
 

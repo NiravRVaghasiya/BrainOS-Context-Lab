@@ -32,6 +32,12 @@ BrainOS still *observes* every turn in every mode. Observation is a
 side process, not context construction, and keeping the runtime warm means a
 user can switch modes mid-conversation without losing memory that the new mode
 would have used. What a mode controls is what reaches the prompt.
+
+Phase 11 adds four ablation ids (``ABLATION_ORDER``): Mode D with exactly one
+component removed. They share Mode D's window and evidence budget and resolve
+through :func:`resolve_mode`, so the controlled experiment runs them like any
+mode — but they stay out of ``MODE_ORDER``, which remains the plan's five
+baselines for the UI and the preset defaults.
 """
 
 from __future__ import annotations
@@ -49,6 +55,16 @@ MODE_RAG = "rag"
 MODE_BRAINOS = "brainos"
 #: Mode E — BrainOS recall plus lexical retrieval, sharing one budget.
 MODE_BRAINOS_RAG = "brainos_rag"
+
+#: Phase 11 ablations — Mode D with exactly one component removed. Each one
+#: shares Mode D's history window and evidence budget, so any measured
+#: difference against ``brainos`` is attributable to the removed component
+#: rather than to prompt volume. The behaviour each id disables lives in
+#: :mod:`baselines.ablations`; this module only owns the mode vocabulary.
+ABLATION_NO_TEMPORAL = "brainos_no_temporal"
+ABLATION_NO_RELEVANCE = "brainos_no_relevance"
+ABLATION_NO_CONFLICT = "brainos_no_conflict"
+ABLATION_NO_MEMORY = "brainos_no_memory"
 
 #: Tokens of retrieved evidence Modes C/D/E may add to the prompt. Kept equal
 #: across the three so the comparison isolates selection, not volume.
@@ -212,6 +228,64 @@ MODES: dict[str, BaselineMode] = {
         max_memories=HYBRID_EVIDENCE_ITEMS,
         rag_top_k=HYBRID_EVIDENCE_ITEMS,
     ),
+    ABLATION_NO_TEMPORAL: BaselineMode(
+        mode=ABLATION_NO_TEMPORAL,
+        letter="D1",
+        label="Ablation D1 — BrainOS without temporal signals",
+        description=(
+            "Mode D with recency removed from ranking and the runtime's "
+            "temporal signals ignored. Same window and evidence budget as D."
+        ),
+        uses_memory=True,
+        uses_rag=False,
+        max_recent_turns=RECENT_WINDOW_TURNS,
+        recent_turn_budget=RECENT_WINDOW_BUDGET,
+        memory_budget=EVIDENCE_BUDGET,
+    ),
+    ABLATION_NO_RELEVANCE: BaselineMode(
+        mode=ABLATION_NO_RELEVANCE,
+        letter="D2",
+        label="Ablation D2 — BrainOS without relevance filtering",
+        description=(
+            "Mode D with the relevance floor and tail trim disabled: every "
+            "recalled memory reaches ranking and the token budget. Same "
+            "window and evidence budget as D."
+        ),
+        uses_memory=True,
+        uses_rag=False,
+        max_recent_turns=RECENT_WINDOW_TURNS,
+        recent_turn_budget=RECENT_WINDOW_BUDGET,
+        memory_budget=EVIDENCE_BUDGET,
+    ),
+    ABLATION_NO_CONFLICT: BaselineMode(
+        mode=ABLATION_NO_CONFLICT,
+        letter="D3",
+        label="Ablation D3 — BrainOS without conflict handling",
+        description=(
+            "Mode D with conflict resolution and staleness handling disabled: "
+            "runtime contradiction/stale reports are ignored and superseded "
+            "memories are kept. Same window and evidence budget as D."
+        ),
+        uses_memory=True,
+        uses_rag=False,
+        max_recent_turns=RECENT_WINDOW_TURNS,
+        recent_turn_budget=RECENT_WINDOW_BUDGET,
+        memory_budget=EVIDENCE_BUDGET,
+    ),
+    ABLATION_NO_MEMORY: BaselineMode(
+        mode=ABLATION_NO_MEMORY,
+        letter="D4",
+        label="Ablation D4 — BrainOS window without memory",
+        description=(
+            "Mode D's small history window with no memory injected. Unlike "
+            "Mode B (which keeps eight turns), this isolates what the memory "
+            "itself contributes on top of the window."
+        ),
+        uses_memory=False,
+        uses_rag=False,
+        max_recent_turns=RECENT_WINDOW_TURNS,
+        recent_turn_budget=RECENT_WINDOW_BUDGET,
+    ),
 }
 
 #: Plan order (A→E), which is also the order the UI lists them in.
@@ -223,6 +297,17 @@ MODE_ORDER: tuple[str, ...] = (
     MODE_BRAINOS_RAG,
 )
 
+#: Phase 11 ablation order (D1→D4), in the plan's component order. Ablations
+#: are evaluation-only: they resolve through :func:`resolve_mode` so the
+#: experiment runner accepts them, but they are not part of ``MODE_ORDER``
+#: (the UI vocabulary and the preset defaults stay the plan's five modes).
+ABLATION_ORDER: tuple[str, ...] = (
+    ABLATION_NO_TEMPORAL,
+    ABLATION_NO_RELEVANCE,
+    ABLATION_NO_CONFLICT,
+    ABLATION_NO_MEMORY,
+)
+
 #: The default mode. BrainOS is the system under test, so a new session starts
 #: in the configuration the project exists to evaluate.
 DEFAULT_MODE = MODE_BRAINOS
@@ -231,6 +316,7 @@ DEFAULT_MODE = MODE_BRAINOS
 def resolve_mode(value: Any) -> str:
     """Normalize a mode selector, following legacy aliases.
 
+    Accepts the plan's five baseline modes and the Phase 11 ablation ids.
     Raises :class:`ValueError` for anything else. An unknown mode is rejected
     rather than quietly treated as BrainOS: a typo in an evaluation
     configuration must not silently produce results labelled with a strategy
@@ -243,7 +329,8 @@ def resolve_mode(value: Any) -> str:
     if text not in MODES:
         raise ValueError(
             f"Unknown baseline mode {str(value)!r}. Expected one of "
-            f"{', '.join(MODE_ORDER)}."
+            f"{', '.join(MODE_ORDER)} or an ablation "
+            f"({', '.join(ABLATION_ORDER)})."
         )
     return text
 
@@ -260,6 +347,12 @@ def mode_choices() -> tuple[tuple[str, str], ...]:
     return tuple((MODES[mode].label, mode) for mode in MODE_ORDER)
 
 
+def ablation_choices() -> tuple[tuple[str, str], ...]:
+    """Return ``(label, value)`` pairs for the Phase 11 ablations, in order."""
+
+    return tuple((MODES[mode].label, mode) for mode in ABLATION_ORDER)
+
+
 def mode_label(value: Any) -> str:
     """Return the human-readable label for a mode selector."""
 
@@ -270,6 +363,11 @@ def mode_label(value: Any) -> str:
 
 
 __all__ = [
+    "ABLATION_NO_CONFLICT",
+    "ABLATION_NO_MEMORY",
+    "ABLATION_NO_RELEVANCE",
+    "ABLATION_NO_TEMPORAL",
+    "ABLATION_ORDER",
     "DEFAULT_MODE",
     "EVIDENCE_BUDGET",
     "EVIDENCE_ITEMS",
@@ -286,6 +384,7 @@ __all__ = [
     "RECENT_WINDOW_TURNS",
     "SLIDING_WINDOW_TURNS",
     "BaselineMode",
+    "ablation_choices",
     "mode_choices",
     "mode_label",
     "mode_profile",

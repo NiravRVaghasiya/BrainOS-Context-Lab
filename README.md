@@ -8,14 +8,17 @@ This repository integrates BrainOS as an upstream dependency. It does **not** mo
 
 ## Current status
 
-Phases 1–8 are complete and validated against the pinned BrainOS runtime. The
+Phases 1–11 are complete and validated against the pinned BrainOS runtime. The
 app persists conversations and memory mirrors to SQLite with hard session
 isolation, offers the full data-control set (clear conversation, clear memory,
 export session, end/delete session), can run the same conversation through all
 five of the plan's baseline context-management modes, ships a generated
-context-rot benchmark with scoring, and reports the plan's quality / efficiency /
+context-rot benchmark with scoring, reports the plan's quality / efficiency /
 robustness metric suite (including faithfulness and a degradation curve that
-stays unset until more than one length is present).
+stays unset until more than one length is present), runs controlled
+multi-mode experiments with cost budgets, summarizes trials with paired
+statistics and effect sizes, and ablates the BrainOS pipeline one component
+at a time.
 
 - **Phase 1** maps the provider abstraction (OpenAI and OpenAI-compatible)
   behind `LLMProvider`, with secret-safe errors and diagnostics.
@@ -51,16 +54,29 @@ stays unset until more than one length is present).
   curves, and degradation/AUC that is `null` on a single length rather than a
   silent zero. Plot-ready series for the six planned figures ship without
   requiring matplotlib.
+- **Phase 9** runs the controlled comparison: the same tasks, model, sampling
+  parameters, and scoring through every mode, with the credential read from
+  the environment, run budgets (`quick` / `standard` / `research`), and a
+  post-run constants check that fails the run instead of reporting an
+  uncontrolled comparison.
+- **Phase 10** adds trial statistics (mean, SD, 95% CI with exact t critical
+  values), paired task tests with p-values, Cohen's d / Hedges' g effect
+  sizes, win/loss/tie sign tests, and the six planned plots with error bars.
+- **Phase 11** ablates Mode D one component at a time — no temporal signals,
+  no relevance filtering, no conflict handling, no memory — pairing each
+  ablation against the full system. Working memory and consolidation are
+  excluded with documented pinned-revision reasons rather than run as null
+  ablations.
 
 A session-scoped `ConversationService` combines the adapter, the retrieval
 policy, the context builder, and the provider factory. Deterministic fakes cover
 the whole pipeline without BrainOS installed; optional live tests exercise the
-pinned runtime. 503 tests pass and `ruff check .` is clean repository-wide.
+pinned runtime. 632 tests pass and `ruff check .` is clean repository-wide.
 
 Chat is usable without an API key: BrainOS still observes and retrieves memory,
 and the panels show exactly what the model *would* have been sent. See
 [`CONTEXT.md`](CONTEXT.md) for the living implementation state and the Phase
-0–8 logs in `docs/`.
+0–11 logs in `docs/`.
 
 ### Measured behaviour so far
 
@@ -118,6 +134,22 @@ accuracy, Recall@K, evidence-in-prompt, and faithfulness are four different
 numbers (1.00 / 1.00 / 0.83 / 0.86). The degradation AUC is `null` — one length
 cannot support a curve.
 
+Phase 11 ablated Mode D on the same smoke tier (dry run, no provider):
+
+| Condition | Recall@K | evidence in prompt | mean tokens |
+| --- | --- | --- | --- |
+| D full | 1.00 | 0.833 | 193.6 |
+| D1 no temporal | 1.00 | 0.833 | 193.6 |
+| D2 no relevance | 1.00 | **1.000** | 215.7 |
+| D3 no conflict | 1.00 | 0.833 | 193.6 |
+| D4 no memory | 0.00 | 0.000 | 97.0 |
+
+Removing the relevance filter repairs exactly the multi-hop gap (at +22
+tokens) — confirming the filter as the component behind the Phase 7 finding —
+while removing memory collapses evidence to zero with the window held
+constant. D1/D3 are byte-identical to full: one short session gives recency
+and retrieval-stage conflict handling nothing to decide.
+
 **Integration-validation observations, not research results**: one seed, one
 length tier, an estimated token counter, and no model in the loop — answer
 accuracy is only measurable once real generations are graded.
@@ -129,8 +161,9 @@ app.py                         # Local/Hugging Face Space entry point
 pyproject.toml                 # Package metadata and optional dependencies
 src/
   app/                         # UI, controller, session lifecycle, service, and state
-  baselines/                   # Phase 6 baseline modes A-E and the BrainOS-free
-                               #   lexical retriever Mode C/E use
+  baselines/                   # Phase 6 baseline modes A-E, the BrainOS-free
+                               #   lexical retriever Mode C/E use, and the
+                               #   Phase 11 ablation profiles (D1-D4)
   brain/                       # BrainOS adapter, retrieval policy, context
                                #   builder, memory policy, tokenizers, traces
   providers/                   # LLM provider interfaces and adapters
@@ -221,6 +254,12 @@ python -m evaluation.run --mode brainos --answers results/model_answers.jsonl \
 
 # compare runs
 python -m evaluation.compare results/full_context.json results/brainos.json
+
+# Phase 11: ablate Mode D, pairing each ablation against the full system
+python -m evaluation.experiment --preset quick --modes ablations --dry-run \
+  --baseline-mode brainos --output results/phase11-dry.json
+python -m evaluation.compare results/phase11-dry.json --stats \
+  --baseline-mode brainos --output results/phase11-stat-report.json
 ```
 
 `--session-isolation` replays each transcript session separately, which is how

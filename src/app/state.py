@@ -6,6 +6,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any
 from uuid import uuid4
 
+from baselines.ablations import ABLATIONS, POLICY_KNOB_FIELDS
 from baselines.modes import (
     DEFAULT_MODE,
     EVIDENCE_BUDGET,
@@ -69,6 +70,7 @@ class ContextSettings:
     max_memories: int = EVIDENCE_ITEMS
     rag_top_k: int = EVIDENCE_ITEMS
     relevance_floor: float = 0.12
+    relative_relevance_ratio: float = 0.55
     near_duplicate_threshold: float = 0.88
     weight_runtime_signals: float = 0.45
     weight_lexical: float = 0.35
@@ -78,6 +80,7 @@ class ContextSettings:
     annotate_memories: bool = True
     resolve_conflicts: bool = True
     drop_stale_memories: bool = True
+    heuristic_conflict_detection: bool = True
     drop_suspicious_memories: bool = False
 
     def mode_profile(self) -> BaselineMode:
@@ -112,11 +115,31 @@ class ContextSettings:
         comparison that measures nothing. The values stay editable afterwards —
         the mode sets the experiment's starting point, and the sidebar shows
         exactly what was applied.
+
+        Switching to a Phase 11 ablation additionally applies that ablation's
+        retrieval-policy overrides (the component removal), while switching
+        between the five baselines keeps the caller's policy tuning untouched.
+        Switching *away* from an ablation restores the overridden knobs to
+        their defaults: the knobs are the ablation, not user tuning, so
+        carrying them into ``brainos`` would silently run a different system
+        than the label claims.
         """
 
         resolved = resolve_mode(mode)
         profile = MODES[resolved]
-        return replace(self, mode=resolved, **profile.budget_overrides(self.max_tokens))
+        switched = replace(
+            self, mode=resolved, **profile.budget_overrides(self.max_tokens)
+        )
+        ablation = ABLATIONS.get(resolved)
+        if ablation is not None:
+            switched = replace(switched, **ablation.policy_overrides)
+        elif self.mode in ABLATIONS:
+            defaults = ContextSettings()
+            switched = replace(
+                switched,
+                **{name: getattr(defaults, name) for name in POLICY_KNOB_FIELDS},
+            )
+        return switched
 
     def context_budget(self) -> ContextBudget:
         """Return the token budget for one context construction."""
@@ -136,6 +159,7 @@ class ContextSettings:
 
         return RetrievalPolicy(
             relevance_floor=self.relevance_floor,
+            relative_relevance_ratio=self.relative_relevance_ratio,
             max_memories=self.max_memories,
             near_duplicate_threshold=self.near_duplicate_threshold,
             weight_runtime_signals=self.weight_runtime_signals,
@@ -146,6 +170,7 @@ class ContextSettings:
             annotate_memories=self.annotate_memories,
             resolve_conflicts=self.resolve_conflicts,
             drop_stale_memories=self.drop_stale_memories,
+            heuristic_conflict_detection=self.heuristic_conflict_detection,
             drop_suspicious_memories=self.drop_suspicious_memories,
         )
 
