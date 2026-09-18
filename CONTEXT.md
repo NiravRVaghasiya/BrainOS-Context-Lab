@@ -3,9 +3,9 @@
 > Living hand-off context for implementation work. This file records the
 > repository state and decisions that should be preserved between phases.
 
-**Last updated:** 2026-09-14
-**Branch:** `arena/01a0a1b9-brainos-context-lab`
-**Baseline:** `bcd6312` (`origin/main`, the PR #14 merge that includes Phase 13); this branch adds Phase 14 on top
+**Last updated:** 2026-09-18
+**Branch:** `arena/01a0b40c-brainos-context-lab`
+**Baseline:** `485d8a1` (`origin/main`, the PR #15 merge that includes Phase 14); this branch adds Phase 15 on top
 **Implementation plan:** [`BrainOS_Context_Lab_Implementation_Plan.md`](BrainOS_Context_Lab_Implementation_Plan.md)
 
 ## Product boundary
@@ -35,7 +35,8 @@ layer that helps select historical context.
 | Phase 12 — Error analysis | Complete (landed via PR #13) | The plan's nine-label failure taxonomy with stage attribution: builds on `score_record` + the Phase 3 drop-reason audit (never a second scorer), emits one JSON failure record per defect (`task_id`, `mode`, `conversation_length`, `expected_memory`, `retrieved_memories`, `answer`, `failure_type` + verdict/retrieval/prompt/grounding contexts), and aggregates by mode (baselines *and* ablations), category, and length. `python -m evaluation.errors` over dry-run, three-tier, and scripted-answer runs; `labels_vs_scorer.unexpected=0`. 696 tests. |
 | **Phase 13 — Security** | Complete (landed via PR #14) | One shared guard (`src/security/guard.py`: 7 families, intent vs structural split, invisible/control folding, 14 attack + 9 benign probes), one findings vocabulary with a per-session ledger and a `PromptGuardReport` on every built prompt, a Security tab in the UI, an artifact scanner CLI (`python -m security.scan`, two detection layers, scope in every report), history + current-message credential redaction (the route Phases 3/5/6 left open), history role containment, `PRAGMA secure_delete=ON` + `VACUUM` after every user-data delete, and a `security` block in mode/run/experiment/error artifacts. `suspicious` stays label-less (`labels_vs_scorer.unexpected=0`); shipped surfaces scan clean (77 files, 0 findings); the guard flags/rewrites 0 of the 522 benchmark strings (pinned by a test, not a quoted measurement). Threat model expanded from the 7-line stub. 696 → **1004 tests**; live-validated against the pinned runtime. |
 | **Phase 14 — HF Deployment** | **Complete in this turn** | Flat `requirements.txt` (gradio, openai, pinned BrainOS commit `1d9eb7a0…`, matplotlib, pandas, `-e .`) and a present `packages.txt`; SQLite stores switched to WAL journal mode with `busy_timeout=30s`, `synchronous=NORMAL`, and `wal_checkpoint(TRUNCATE)` after every destructive write (so Phase 13's byte-level secure-deletion contract holds under concurrent Gradio workers); a shared-cache `:memory:` mode via `BRAINOS_LAB_DB=:memory:` for ephemeral/stateless deployments; bounded `demo.queue(default_concurrency_limit=3, max_size=32, api_open=False)`; header copy is now a function that reads `persistence_enabled()` so the UI tells the visitor honestly whether messages go to disk or vanish on restart; `tests/unit/test_deployment_config.py` (11 tests) pins every deployment surface; artifact scanner extended to cover `app.py`, `requirements.txt`, `packages.txt`, `pyproject.toml`; secure-deletion byte scans now read `-wal`/`-shm` sidecars. 1004 → **1015 tests**; server boots on `0.0.0.0:7860` and serves HTTP 200 in `:memory:` mode; shipped surfaces scan clean (83 files, 0 findings); `ruff check .` clean. |
-| Phases 15–20 | Pending | Cost controls (per-turn / per-session / per-benchmark token & turn limits, timeouts — partially present as `UILimits` and `RunLimits`), reproducibility, evaluation pipeline, test suite completion, MVP polish, research release. |
+| **Phase 15 — Cost Controls** | **Complete in this turn** | `ChatLimits` (7 ceilings: `max_input_tokens`, `max_output_tokens`, `max_turns`, `max_message_chars`, `max_session_tokens`, `max_session_requests`, `request_timeout_seconds`) + `ChatBudget` (mutable session accounting with `check_turn()`, `charge()`, `record_turn()`, `record_refusal()`, `snapshot()`) + `ChatLimitExceeded` (credential-blind refusal); `UILimits` expanded from 2 to 7 fields with `chat_limits()` bridge; `update_costs()` callback wired to 4 sidebar widgets; service gains `request_timeout` wrapping the provider call in `concurrent.futures` + `_TimeoutError`; `ConversationTurn.usage` carries prompt/completion tokens, timeout, and failure flags; Usage tab added to the inspection panels; turn view carries `usage_summary`, `usage_report`, `turn_usage`; export includes `usage` block; `clear_conversation()` resets the budget. 1015 → **1048 tests**; `ruff check .` clean; 90 shipped files scan clean. |
+| Phases 16–20 | Pending | Reproducibility, evaluation pipeline in the UI, test suite completion, MVP polish, research release. |
 
 Detailed logs are available in
 [`docs/phase-0-research-baseline.md`](docs/phase-0-research-baseline.md),
@@ -54,7 +55,65 @@ Detailed logs are available in
 [`docs/phase-13-security.md`](docs/phase-13-security.md), and
 [`docs/phase-14-hf-deployment.md`](docs/phase-14-hf-deployment.md).
 
-## What was done in Phase 14 (this turn)
+## What was done in Phase 15 (this turn)
+
+Phase 15 closes the residual risk the Phase 14 log recorded: a public
+BYOK Space without per-turn token ceilings. The evaluation runner
+already had `RunLimits` / `RunBudget` (Phase 9); the chat side had only
+`UILimits.max_turns = 200` and `UILimits.max_message_chars = 8000`.
+This phase layers the plan's full cost-control surface (§15 / §21) onto
+the chat path.
+
+### New / changed modules
+
+| File | Purpose |
+| --- | --- |
+| [`src/app/limits.py`](src/app/limits.py) (new) | `ChatLimits` (7 frozen ceilings, validated), `ChatBudget` (mutable session accounting: `check_turn()`, `charge()`, `record_turn()`, `record_refusal()`, `snapshot()`), `ChatLimitExceeded` (credential-blind refusal). Parallel to `evaluation.limits.RunLimits` / `RunBudget`. |
+| [`src/app/controller.py`](src/app/controller.py) | `UILimits` expanded from 2 to 7 fields with `chat_limits()` bridge; `chat()` creates the budget on first use, checks it before the provider, counts the turn after service creation, passes `request_timeout` to the service, and charges from reported usage; `update_costs()` replaces the limits; `TurnView` gains `usage_summary`, `usage_report`, `turn_usage`; export includes `usage`; `usage_payload()` returns the session's cost report. |
+| [`src/app/service.py`](src/app/service.py) | `handle_user_message(request_timeout=)` wraps the provider call in `concurrent.futures.ThreadPoolExecutor`; `_TimeoutError` is a `ProviderError` subclass; `ConversationTurn.usage` carries prompt/completion tokens, timeout, and failure flags. |
+| [`src/app/state.py`](src/app/state.py) | `SessionState.usage` (the session's `ChatBudget`, created lazily); `clear_conversation()` resets it. |
+| [`src/app/panels.py`](src/app/panels.py) | `usage_summary()` renders the session's cost accounting as markdown. |
+| [`src/app/ui.py`](src/app/ui.py) | Cost Controls section in the sidebar (4 widgets); Usage tab in the inspection panels; `_update_costs` callback; Evaluation tab markdown updated to reference presets. |
+| [`tests/unit/test_chat_limits.py`](tests/unit/test_chat_limits.py) (new, 20) | `ChatLimits` validation, `ChatBudget` gating, charging, snapshot, refusal, credential-blind. |
+| [`tests/unit/test_chat_limits_controller.py`](tests/unit/test_chat_limits_controller.py) (new, 13) | Budget creation, usage tracking, turn view, session limits enforced, `update_costs`, export, clear-conversation reset, timeout. |
+| [`docs/phase-15-cost-controls.md`](docs/phase-15-cost-controls.md) (new) | Detailed phase log, decisions, measured behaviour, and constraints carried forward. |
+
+### Decisions later phases must not undo
+
+1. **A refusal is a status, not a security finding.** `ChatLimitExceeded`
+   renders a user-visible message; it does not enter the security ledger.
+2. **The budget is created lazily.** A session that never sends a turn
+   costs nothing to track.
+3. **Turn counting happens after service creation.** A failed BrainOS
+   adapter creation must not consume a turn from the budget.
+4. **Limits are replaced, not mutated.** `update_costs()` builds a new
+   `UILimits` and assigns it.
+5. **The timeout wraps the provider call, not the whole turn.** BrainOS
+   observe/recall/context-construction are local and fast.
+6. **`clear_conversation` resets the budget.** The ceilings protect one
+   conversation's worth of spend.
+7. **Reported usage is preferred over estimated.** The estimator fills
+   in only when the provider reports nothing.
+8. **The usage block travels into the export.**
+
+### Measured behaviour
+
+```bash
+.venv/bin/pytest -q                                          # 1048 passed
+.venv/bin/ruff check .                                       # All checks passed!
+.venv/bin/python -m security.scan <all shipped>              # 90 files, 0 findings
+```
+
+### Constraints carried into Phase 16+
+
+1. Phase 16 (reproducibility) must record the chat limits in the export.
+2. Phase 17 (evaluation pipeline in the UI) should surface the presets.
+3. Phase 18 (test suite completion) should add a timeout test with a
+   `SlowProvider` fake.
+4. Cost controls are per-session, not per-user. A multi-user deployment
+   would need per-user budgets on top of these.
+
+## What was done in Phase 14 (landed via PR #15)
 
 Phase 14 turns the working application into something that can run as a Hugging
 Face Gradio Space (or any other public, multi-visitor Gradio deployment)

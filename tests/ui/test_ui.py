@@ -41,8 +41,8 @@ def test_app_builds_and_registers_every_callback() -> None:
     demo = create_app(_controller())
 
     # 11 widget callbacks (Phase 6 adds the baseline-mode selector) plus the
-    # per-page session bootstrap.
-    assert len(demo.fns) == 12
+    # per-page session bootstrap and 4 Phase 15 cost-control widget callbacks.
+    assert len(demo.fns) == 16
     assert any(block_fn.targets == [(0, "load")] for block_fn in demo.fns.values())
     assert any(
         block_fn.targets and block_fn.targets[0][1] == "change"
@@ -191,12 +191,13 @@ def test_the_security_tab_is_wired_into_every_panel_callback() -> None:
     values = _panel_values(view)
     declared = {(len(fn.inputs), len(fn.outputs)) for fn in demo.fns.values()}
 
-    assert len(values) == len(PanelComponents.order) == 13
-    assert PanelComponents.order[-3:] == ("security", "security_rows", "security_report")
-    assert (1, len(_silent_values(view))) in declared, "panel callbacks feed all 13"
+    assert len(values) == len(PanelComponents.order) == 15
+    # Phase 15: usage components are now at the end, security is at -5 to -3
+    assert PanelComponents.order[-5:-2] == ("security", "security_rows", "security_report")
+    assert (1, len(_silent_values(view))) in declared, "panel callbacks feed all 15"
     assert (2, len(_silent_values(view)) + 1) in declared, "the chat callback adds the box"
 
-    markdown, rows, report = values[-3:]
+    markdown, rows, report = values[-5:-2]
     assert markdown.startswith("### Security")
     assert "Credentials redacted" in markdown
     assert all(len(row) == len(SECURITY_COLUMNS) for row in rows)

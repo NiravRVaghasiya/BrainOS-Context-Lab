@@ -21,6 +21,7 @@ that only exists in tests cannot be checked against a live run.
 
 from __future__ import annotations
 
+import concurrent.futures
 import sys
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field, replace
@@ -60,6 +61,22 @@ DEFAULT_SYSTEM_INSTRUCTIONS = (
 )
 
 
+class _TimeoutError(ProviderError):
+    """A provider call exceeded the configured wall-clock timeout.
+
+    Phase 15: distinguished from a generic :class:`ProviderError` so the
+    controller can record a timed-out usage entry rather than a plain failure.
+    The message is credential-blind by construction.
+    """
+
+    def __init__(self, timeout_seconds: float) -> None:
+        super().__init__(
+            f"The provider request did not complete within "
+            f"{timeout_seconds:g} seconds. Try again or raise the timeout."
+        )
+        self.timeout_seconds = timeout_seconds
+
+
 def _warn_storage(context: str, exc: Exception) -> None:
     """Report a storage failure server-side without echoing stored content.
 
@@ -94,6 +111,11 @@ class ConversationTurn:
     #: Phase 13: what the guards did while this turn's prompt was assembled, in
     #: the same shape the session-level report uses.
     security: dict[str, Any] = field(default_factory=dict)
+    #: Phase 15: what this turn cost — input/output tokens from the provider's
+    #: reported usage (or the estimator when the provider reports nothing),
+    #: whether the request timed out, and the prompt token count that was
+    #: checked against the per-request ceiling before the call.
+    usage: dict[str, Any] = field(default_factory=dict)
 
 
 class ConversationService:
@@ -203,8 +225,16 @@ class ConversationService:
         after = self._safe_list_memories()
         return [record for record in after if record.memory_id not in before]
 
-    def handle_user_message(self, text: str) -> ConversationTurn:
-        """Run the BrainOS-backed turn and optionally call the configured provider."""
+    def handle_user_message(
+        self, text: str, *, request_timeout: float | None = None
+    ) -> ConversationTurn:
+        """Run the BrainOS-backed turn and optionally call the configured provider.
+
+        Phase 15: ``request_timeout`` wraps the provider call so a slow model
+        cannot hold a Gradio worker indefinitely. When the timeout fires the
+        turn records a timed-out usage entry and the error is rendered as a
+        redacted status, exactly like any other provider failure.
+        """
 
         user_text = text.strip()
         self.security.set_turn(len(self.state.messages) + 1)
@@ -220,13 +250,34 @@ class ConversationService:
         reply: str | None = None
         generated = False
         error: str | None = None
+        usage: dict[str, Any] = {
+            "prompt_tokens": built.stats.final_context_tokens,
+            "completion_tokens": 0,
+            "timed_out": False,
+            "failed": False,
+        }
         if self._can_generate():
             try:
-                response = self._generate(built.messages)
+                response = self._generate(
+                    built.messages, timeout=request_timeout
+                )
                 reply = response.text
                 generated = True
+                reported = dict(response.usage or {})
+                usage["prompt_tokens"] = int(
+                    reported.get("prompt_tokens", built.stats.final_context_tokens)
+                )
+                usage["completion_tokens"] = int(
+                    reported.get("completion_tokens", 0)
+                )
+                usage["model"] = response.model
+            except _TimeoutError as exc:
+                error = str(exc)
+                usage["timed_out"] = True
+                usage["failed"] = True
             except ProviderError as exc:
                 error = str(exc)
+                usage["failed"] = True
         if reply:
             self.state.messages.append({"role": "assistant", "content": reply})
             self.observe_text(reply, role="assistant")
@@ -251,6 +302,7 @@ class ConversationService:
             generated=generated,
             error=error,
             security=self.security.snapshot(),
+            usage=usage,
         )
         self.state.diagnostics = self._diagnostics(turn)
         return turn
@@ -622,8 +674,34 @@ class ConversationService:
             return True
         return bool(config.api_key and config.model)
 
-    def _generate(self, messages: list[dict[str, str]]) -> ProviderResponse:
-        return self.provider().generate(messages)
+    def _generate(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        timeout: float | None = None,
+    ) -> ProviderResponse:
+        """Call the configured provider, optionally bounded by a wall-clock timeout.
+
+        Phase 15: the timeout is enforced with a thread-pool future so a slow
+        or stalled provider cannot hold a Gradio worker indefinitely. The
+        future is cancelled on timeout; the underlying provider call may still
+        be running in its own thread, but the service returns to the caller
+        and records a timed-out usage entry.
+        """
+
+        provider = self.provider()
+        if timeout is None or timeout <= 0:
+            return provider.generate(messages)
+        executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        try:
+            future = executor.submit(provider.generate, messages)
+            try:
+                return future.result(timeout=float(timeout))
+            except concurrent.futures.TimeoutError:
+                future.cancel()
+                raise _TimeoutError(float(timeout)) from None
+        finally:
+            executor.shutdown(wait=False)
 
     def _safe_list_memories(self) -> list[MemoryRecord]:
         lister = getattr(self.adapter, "list_memories", None)
@@ -667,6 +745,7 @@ class ConversationService:
                 "generated": turn.generated,
                 "error": turn.error,
                 "security": turn.security,
+                "usage": dict(turn.usage),
             }
         )
 

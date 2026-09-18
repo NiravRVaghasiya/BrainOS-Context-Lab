@@ -192,12 +192,21 @@ class SessionState:
     last_guard: dict[str, Any] = field(default_factory=dict)
     diagnostics: dict[str, Any] = field(default_factory=dict)
     brain: Any = field(default=None, repr=False, compare=False)
+    #: Phase 15: cumulative session cost accounting. The budget is created
+    #: lazily by the controller (which knows the active :class:`ChatLimits`)
+    #: so the state module does not pin a default limit set.
+    usage: Any = field(default=None, repr=False, compare=False)
 
     def clear_conversation(self) -> None:
         """Remove conversation content while retaining session configuration.
 
         The session-scoped BrainOS adapter is dropped so the next turn cannot
         reuse another conversation's runtime.
+
+        Phase 15: the usage budget is reset alongside the conversation, because
+        the ceilings protect *one* conversation's worth of spend. A cleared
+        conversation starts a fresh budget so the visitor can continue working
+        without the previous session's tokens blocking the next one.
         """
 
         self.messages.clear()
@@ -206,6 +215,7 @@ class SessionState:
         self.diagnostics.clear()
         self.conversation_id = new_id()
         self.brain = None
+        self.usage = None
 
     def clear_credentials(self) -> None:
         """Remove the active provider key from process memory."""
