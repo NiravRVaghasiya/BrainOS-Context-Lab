@@ -152,11 +152,17 @@ and concurrent SQLite workers preserve session isolation without losing rows.
   row counts and session isolation. The phase also closes the previously
   documented input-budget gap by applying `max_input_tokens` before generation
   and forwarding the effective output ceiling as `max_tokens`.
+- **Phase 19** polishes the hosted MVP: Evaluation artifacts receive a safe,
+  bounded 24-hour retention sweep for abandoned browser sessions, while
+  `End session` remains immediate deletion; the public UI defaults to the
+  explicit retrieval-only `quick` policy (20 tasks, 60 requests), with deliberate
+  environment overrides for operators; and the persistence/multi-process
+  deployment boundary is documented rather than overstated.
 
 A session-scoped `ConversationService` combines the adapter, the retrieval
 policy, the context builder, and the provider factory. Deterministic fakes cover
 the whole pipeline without BrainOS installed; optional live tests exercise the
-pinned runtime. 1183 tests pass with the optional UI/runtime dependencies
+pinned runtime. **1192 tests** pass with the optional UI/runtime dependencies
 installed, and `ruff check .` is clean repository-wide.
 
 Chat is usable without an API key: BrainOS still observes and retrieves memory,

@@ -1200,6 +1200,14 @@ Verify:
 
 # 25. Phase 19 — MVP Definition
 
+> **Implementation status (2026-09-18):** The MVP polish slice is complete. The
+> browser uses a conservative retrieval-only policy by default (`quick`, 20
+> tasks, 60 requests), and `results/ui/<session>/` receives a path-safe,
+> configurable 24-hour retention sweep for abandoned sessions. See
+> [`docs/phase-19-mvp-polish.md`](docs/phase-19-mvp-polish.md) for the
+> deployment and multi-process boundary. Phase 20 is still required for any
+> real-provider research claim.
+
 The MVP is complete when the user can:
 
 1. Open the HF Space.

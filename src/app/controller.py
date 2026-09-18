@@ -49,6 +49,7 @@ from .evaluation import (
     EvaluationPolicy,
     EvaluationRequestError,
     UIEvaluationRunner,
+    public_evaluation_policy,
 )
 from .limits import ChatBudget, ChatLimitExceeded, ChatLimits
 from .service import ConversationService, _warn_storage
@@ -232,7 +233,8 @@ class UIController:
         deployment that injects SQLite persists benchmark runs through the same
         seam. ``evaluation_policy`` is the operator's knob for what a public
         Space is willing to host (which presets, whether generation is allowed
-        at all, and the hard task/request ceilings).
+        at all, and the hard task/request ceilings); when omitted, the
+        conservative :func:`public_evaluation_policy` is used.
         """
 
         self.sessions = sessions or SessionManager()
@@ -245,7 +247,10 @@ class UIController:
         self._services: dict[str, ConversationService] = {}
         self._last_turn: dict[str, Any] = {}
         self.evaluation = evaluation_runner or UIEvaluationRunner(
-            policy=evaluation_policy or EvaluationPolicy(),
+            # A controller is a browser-facing surface by default. Callers
+            # running local or research experiments can inject an explicit
+            # EvaluationPolicy (or a runner) without changing the public guard.
+            policy=evaluation_policy or public_evaluation_policy(),
             evaluation_store=evaluation_store,
             provider_factory=self._provider_factory,
         )

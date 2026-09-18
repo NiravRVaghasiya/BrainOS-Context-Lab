@@ -36,6 +36,7 @@ from .controller import (
     PROVIDER_LABELS,
     UIController,
 )
+from .evaluation import public_evaluation_policy
 from .panels import (
     CHUNK_COLUMNS,
     CONFLICT_COLUMNS,
@@ -482,6 +483,11 @@ def create_app(controller: UIController | None = None) -> Any:
             conversation_store=SqliteConversationStore(),
             memory_store=SqliteMemoryStore(),
             evaluation_store=SqliteEvaluationStore(),
+            # The public browser surface is retrieval-only and bounded by
+            # default. Tests, local callers, and explicitly injected
+            # controllers keep their chosen policy instead of silently
+            # inheriting deployment defaults.
+            evaluation_policy=public_evaluation_policy(),
         )
 
     with gr.Blocks(title=TITLE) as demo:

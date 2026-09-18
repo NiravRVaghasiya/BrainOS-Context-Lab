@@ -344,10 +344,10 @@ scope line a real seven-stage run renders.
    research release) should tighten it for a public Space rather than editing the
    tab: `EvaluationPolicy(allowed_presets=("quick",), allow_generation=False,
    max_tasks=20, max_requests=60)` is a defensible public default.
-4. **A hosted Space accumulates `results/ui/`.** Runs are deleted with their
-   session, but an abandoned session is not ended by anyone. Phase 19 should add
-   a retention sweep (or write to a temp root) before the tab is enabled on a
-   public Space with generation on.
+4. **A hosted Space accumulates `results/ui/`.** Phase 19 now bounds this
+   accumulation with the path-safe, configurable sweep documented in
+   [`docs/phase-19-mvp-polish.md`](phase-19-mvp-polish.md); `End session` remains
+   the immediate deletion path.
 5. **Nothing here validates a model's quality.** Every number in this phase came
    from a dry run or a deterministic fake. The research claim still needs a real
    run at `--preset research` with a real key, which is Phase 20's job.

@@ -28,6 +28,7 @@ from app.evaluation import (
     EvaluationPolicy,
     EvaluationRequestError,
     UIEvaluationRunner,
+    public_evaluation_policy,
 )
 from evaluation.limits import PRESETS
 from providers.base import ProviderConfig
@@ -108,6 +109,61 @@ def test_catalogue_lists_the_committed_dataset_and_generated_tiers(
 # --------------------------------------------------------------------------- #
 # Deployment policy
 # --------------------------------------------------------------------------- #
+
+
+def test_public_policy_is_conservative_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in (
+        "BRAINOS_LAB_EVAL_PRESETS",
+        "BRAINOS_LAB_EVAL_ALLOW_GENERATION",
+        "BRAINOS_LAB_EVAL_MAX_TASKS",
+        "BRAINOS_LAB_EVAL_MAX_REQUESTS",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    policy = public_evaluation_policy()
+
+    assert policy == EvaluationPolicy(
+        allowed_presets=("quick",),
+        allow_generation=False,
+        max_tasks=20,
+        max_requests=60,
+    )
+
+
+def test_ui_controller_uses_the_public_policy_when_none_is_injected() -> None:
+    controller = UIController()
+
+    assert controller.evaluation.policy == EvaluationPolicy(
+        allowed_presets=("quick",),
+        allow_generation=False,
+        max_tasks=20,
+        max_requests=60,
+    )
+
+
+def test_public_policy_environment_overrides_are_explicit_and_safe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("BRAINOS_LAB_EVAL_PRESETS", "quick,standard")
+    monkeypatch.setenv("BRAINOS_LAB_EVAL_ALLOW_GENERATION", "yes")
+    monkeypatch.setenv("BRAINOS_LAB_EVAL_MAX_TASKS", "7")
+    monkeypatch.setenv("BRAINOS_LAB_EVAL_MAX_REQUESTS", "19")
+
+    policy = public_evaluation_policy()
+
+    assert policy.allowed_presets == ("quick", "standard")
+    assert policy.allow_generation is True
+    assert policy.max_tasks == 7
+    assert policy.max_requests == 19
+
+    monkeypatch.setenv("BRAINOS_LAB_EVAL_PRESETS", "quick,unknown")
+    monkeypatch.setenv("BRAINOS_LAB_EVAL_MAX_TASKS", "0")
+    assert public_evaluation_policy() == EvaluationPolicy(
+        allowed_presets=("quick",),
+        allow_generation=True,
+        max_tasks=20,
+        max_requests=19,
+    )
 
 
 def test_policy_marks_disallowed_presets_and_hides_them_from_the_dropdown(

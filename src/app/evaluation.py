@@ -43,10 +43,14 @@ being reachable by an anonymous visitor on a public Space:
    pipeline's redaction list, the recorded credential source is the *name* of the
    session route rather than a value, and the controller redacts every field of
    the returned view against the active key as defence in depth.
+5. **Abandoned sessions are bounded.** A startup and per-operation retention
+   sweep removes stale direct-child session roots under ``results/ui/`` without
+   following symlinks or accepting an unsafe path segment.
 """
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
 from collections.abc import Callable, Mapping, Sequence
@@ -75,6 +79,8 @@ from evaluation.pipeline import (
 from providers import create_provider
 from providers.base import ProviderConfig
 from reproducibility.run_provenance import persist_run
+
+from .retention import RetentionReport, configured_retention_seconds, sweep_session_artifacts
 
 #: Where a browser-initiated run writes, under the plan's ``results/`` root.
 #: Session-scoped so two visitors cannot overwrite each other's artifacts.
@@ -114,10 +120,12 @@ class EvaluationRequestError(ValueError):
 class EvaluationPolicy:
     """What a deployment allows the Evaluation tab to do.
 
-    The defaults are the plan's own presets — a bring-your-own-key visitor spends
-    their own money, so the preset ceilings are the honest limit. A public Space
-    operator who would rather not host 7 500-request runs tightens this object
-    once, at construction, instead of editing the tab::
+    Direct runner defaults mirror the plan's own presets — a bring-your-own-key
+    visitor spends their own money, so the preset ceilings are the honest limit.
+    The browser-facing :func:`public_evaluation_policy` is deliberately tighter
+    and is selected by :class:`app.controller.UIController` and ``create_app``.
+    A caller that wants another deployment policy tightens this object once, at
+    construction, instead of editing the tab::
 
         UIEvaluationRunner(policy=EvaluationPolicy(
             allowed_presets=("quick",), max_tasks=20, max_requests=60,
@@ -186,6 +194,58 @@ class EvaluationPolicy:
         if not overrides:
             return plan
         return replace(plan, limits=replace(limits, **overrides))
+
+
+PUBLIC_ALLOWED_PRESETS = ("quick",)
+PUBLIC_MAX_TASKS = 20
+PUBLIC_MAX_REQUESTS = 60
+
+
+def public_evaluation_policy() -> EvaluationPolicy:
+    """Return the conservative policy used by the hosted UI by default.
+
+    The CLI and an injected ``UIController`` remain able to use the complete
+    policy for local experiments. The browser entry point, where a deployment
+    operator may not want anonymous visitors to trigger model calls or large
+    benchmark jobs, starts with one retrieval-only preset and small hard caps.
+    Operators can deliberately opt into generation or adjust the ceilings with
+    environment variables; invalid values fall back to this safe baseline.
+    """
+
+    return EvaluationPolicy(
+        allowed_presets=_public_presets_from_environment(),
+        allow_generation=_environment_bool("BRAINOS_LAB_EVAL_ALLOW_GENERATION", False),
+        max_tasks=_environment_positive_int("BRAINOS_LAB_EVAL_MAX_TASKS", PUBLIC_MAX_TASKS),
+        max_requests=_environment_positive_int(
+            "BRAINOS_LAB_EVAL_MAX_REQUESTS", PUBLIC_MAX_REQUESTS
+        ),
+    )
+
+
+def _public_presets_from_environment() -> tuple[str, ...]:
+    raw = os.getenv("BRAINOS_LAB_EVAL_PRESETS", "quick")
+    requested = tuple(
+        dict.fromkeys(part.strip().lower() for part in raw.split(",") if part.strip())
+    )
+    if not requested or any(name not in PRESETS for name in requested):
+        return PUBLIC_ALLOWED_PRESETS
+    return tuple(sorted(requested))
+
+
+def _environment_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _environment_positive_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    try:
+        value = int(raw) if raw is not None else default
+    except (TypeError, ValueError):
+        return default
+    return value if value > 0 else default
 
 
 @dataclass(frozen=True)
@@ -374,13 +434,16 @@ class UIEvaluationRunner:
         policy: EvaluationPolicy | None = None,
         evaluation_store: Any = None,
         provider_factory: Callable[[ProviderConfig], Any] | None = None,
+        retention_seconds: float | int | str | None = None,
     ) -> None:
         self.results_root = Path(results_root)
         self.dataset_root = Path(dataset_root)
         self.policy = policy or EvaluationPolicy()
         self.evaluation_store = evaluation_store
         self.provider_factory = provider_factory or create_provider
+        self.retention_seconds = configured_retention_seconds(retention_seconds)
         self._runs: dict[str, list[RunRecord]] = {}
+        self._last_retention = self.sweep_stale()
 
     # ------------------------------------------------------------------ #
     # Catalogue
@@ -571,6 +634,7 @@ class UIEvaluationRunner:
     ) -> CostPreview:
         """Describe a run's cost before it is allowed to cost anything."""
 
+        self.sweep_stale(protected_sessions=(str(session_id or ""),))
         plan, tasks, path = self._plan(
             session_id=session_id,
             preset_name=preset_name,
@@ -643,6 +707,11 @@ class UIEvaluationRunner:
         controller turns into the same kind of status line.
         """
 
+        # Sweep before planning so an abandoned browser cannot make the next
+        # visitor inherit an unbounded results tree. Keep the session that is
+        # actively asking for a run out of this sweep; older runs are retained
+        # until the session ends or the bounded window expires.
+        self.sweep_stale(protected_sessions=(str(session_id or ""),))
         plan, tasks, path = self._plan(
             session_id=session_id,
             preset_name=preset_name,
@@ -713,8 +782,37 @@ class UIEvaluationRunner:
         return self._view(result, persisted=persisted, output_dir=output_dir)
 
     # ------------------------------------------------------------------ #
-    # History
+    # Retention and history
     # ------------------------------------------------------------------ #
+
+    def sweep_stale(
+        self,
+        *,
+        now: float | None = None,
+        protected_sessions: Sequence[str] = (),
+    ) -> RetentionReport:
+        """Sweep abandoned UI artifacts and remember the operational receipt.
+
+        The runner only protects a session for the operation currently in
+        progress. In-memory run history is not treated as proof that a browser
+        is still present: otherwise a disconnected tab could keep its artifacts
+        forever in a long-lived process.
+        """
+
+        report = sweep_session_artifacts(
+            self.results_root,
+            retention_seconds=self.retention_seconds,
+            now=now,
+            protected_sessions=protected_sessions,
+        )
+        self._last_retention = report
+        return report
+
+    @property
+    def last_retention_report(self) -> RetentionReport:
+        """The most recent startup or per-operation retention receipt."""
+
+        return self._last_retention
 
     def runs(self, session_id: str) -> tuple[RunRecord, ...]:
         """This session's run history, newest last."""
