@@ -4,8 +4,8 @@
 > repository state and decisions that should be preserved between phases.
 
 **Last updated:** 2026-09-18
-**Branch:** `arena/01a0b437-brainos-context-lab`
-**Baseline:** `baac161` (`origin/main`, the PR #16 merge that includes Phase 15); this branch adds Phase 16 on top
+**Branch:** `arena/01a0b45a-brainos-context-lab`
+**Baseline:** `bf94792` (`origin/main`, the PR #17 merge that includes Phase 16); this branch adds Phase 17 on top
 **Implementation plan:** [`BrainOS_Context_Lab_Implementation_Plan.md`](BrainOS_Context_Lab_Implementation_Plan.md)
 
 ## Product boundary
@@ -36,8 +36,9 @@ layer that helps select historical context.
 | **Phase 13 — Security** | Complete (landed via PR #14) | One shared guard (`src/security/guard.py`: 7 families, intent vs structural split, invisible/control folding, 14 attack + 9 benign probes), one findings vocabulary with a per-session ledger and a `PromptGuardReport` on every built prompt, a Security tab in the UI, an artifact scanner CLI (`python -m security.scan`, two detection layers, scope in every report), history + current-message credential redaction (the route Phases 3/5/6 left open), history role containment, `PRAGMA secure_delete=ON` + `VACUUM` after every user-data delete, and a `security` block in mode/run/experiment/error artifacts. `suspicious` stays label-less (`labels_vs_scorer.unexpected=0`); shipped surfaces scan clean (77 files, 0 findings); the guard flags/rewrites 0 of the 522 benchmark strings (pinned by a test, not a quoted measurement). Threat model expanded from the 7-line stub. 696 → **1004 tests**; live-validated against the pinned runtime. |
 | **Phase 14 — HF Deployment** | **Complete in this turn** | Flat `requirements.txt` (gradio, openai, pinned BrainOS commit `1d9eb7a0…`, matplotlib, pandas, `-e .`) and a present `packages.txt`; SQLite stores switched to WAL journal mode with `busy_timeout=30s`, `synchronous=NORMAL`, and `wal_checkpoint(TRUNCATE)` after every destructive write (so Phase 13's byte-level secure-deletion contract holds under concurrent Gradio workers); a shared-cache `:memory:` mode via `BRAINOS_LAB_DB=:memory:` for ephemeral/stateless deployments; bounded `demo.queue(default_concurrency_limit=3, max_size=32, api_open=False)`; header copy is now a function that reads `persistence_enabled()` so the UI tells the visitor honestly whether messages go to disk or vanish on restart; `tests/unit/test_deployment_config.py` (11 tests) pins every deployment surface; artifact scanner extended to cover `app.py`, `requirements.txt`, `packages.txt`, `pyproject.toml`; secure-deletion byte scans now read `-wal`/`-shm` sidecars. 1004 → **1015 tests**; server boots on `0.0.0.0:7860` and serves HTTP 200 in `:memory:` mode; shipped surfaces scan clean (83 files, 0 findings); `ruff check .` clean. |
 | **Phase 15 — Cost Controls** | Complete | `ChatLimits` (7 ceilings: `max_input_tokens`, `max_output_tokens`, `max_turns`, `max_message_chars`, `max_session_tokens`, `max_session_requests`, `request_timeout_seconds`) + `ChatBudget` (mutable session accounting with `check_turn()`, `charge()`, `record_turn()`, `record_refusal()`, `snapshot()`) + `ChatLimitExceeded` (credential-blind refusal); `UILimits` expanded from 2 to 7 fields with `chat_limits()` bridge; `update_costs()` callback wired to 4 sidebar widgets; service gains `request_timeout` wrapping the provider call in `concurrent.futures` + `_TimeoutError`; `ConversationTurn.usage` carries prompt/completion tokens, timeout, and failure flags; Usage tab added to the inspection panels; turn view carries `usage_summary`, `usage_report`, `turn_usage`; export includes `usage` block; `clear_conversation()` resets the budget. 1015 → **1048 tests**; `ruff check .` clean; 90 shipped files scan clean. |
-| **Phase 16 — Reproducibility** | **Complete in this turn** | One `src/reproducibility/` package is the single source of the §22 vocabulary: `app_version()` (installed-metadata read with `fallback:` origin tag), `brainos_version()` (`unvalidated` / `pinned:` / live read plus the `pin:` commit), `build_manifest()` (versions + environment + config + task ids + dataset path/digest + aggregate metrics + a credential-free `--rerun` string), `rerun_command()`, `global_overrides()`, `persist_run()` (secret-stripping store write). `python -m evaluation.run` writes a top-level `repro` block **and** the fallback `config.application_version` / `config.brainos_version` / `config.benchmark_version` / `config.output` fields; `evaluation.experiment` carries a matching `repro` block and routes its `provenance` version fields through the same functions; `evaluation.errors` records the version pair in `provenance`. The chat export gains `limits` (the Phase 15 constraint), `versions`, and a `chat_history_sha256` transcript digest; `connect()` drops model ids that echo the session key. Fixed the latent split-vocabulary bug (`context_rot-v1` vs the dataset's `context-rot-v1`), unified on `context-rot-v1` and pinned by a test. 1048 → **1070 tests**; `ruff check .` clean; 87 shipped files scan clean. |
-| Phases 17–20 | Pending | Evaluation pipeline in the UI, test suite completion, MVP polish, research release. |
+| **Phase 16 — Reproducibility** | Complete (landed via PR #17) | One `src/reproducibility/` package is the single source of the §22 vocabulary: `app_version()` (installed-metadata read with `fallback:` origin tag), `brainos_version()` (`unvalidated` / `pinned:` / live read plus the `pin:` commit), `build_manifest()` (versions + environment + config + task ids + dataset path/digest + aggregate metrics + a credential-free `--rerun` string), `rerun_command()`, `global_overrides()`, `persist_run()` (secret-stripping store write). `python -m evaluation.run` writes a top-level `repro` block **and** the fallback `config.application_version` / `config.brainos_version` / `config.benchmark_version` / `config.output` fields; `evaluation.experiment` carries a matching `repro` block and routes its `provenance` version fields through the same functions; `evaluation.errors` records the version pair in `provenance`. The chat export gains `limits` (the Phase 15 constraint), `versions`, and a `chat_history_sha256` transcript digest; `connect()` drops model ids that echo the session key. Fixed the latent split-vocabulary bug (`context_rot-v1` vs the dataset's `context-rot-v1`), unified on `context-rot-v1` and pinned by a test. 1048 → **1070 tests**; `ruff check .` clean; 87 shipped files scan clean. |
+| **Phase 17 — Automated Evaluation Pipeline** | **Complete in this turn** | `python -m evaluation.pipeline` composes the seven existing stages (`experiment → raw → comparison → statistics → errors → plots → report`) into the plan's §23 `results/{raw,aggregated,plots,report}` layout in one command: `STAGE_DEPENDENCIES` + `expand_stages` add the stages a selected stage is made of, a stage with no input is *skipped with a reason*, `run_pipeline` never raises for a failing stage, and the exit code distinguishes complete (0), uncontrolled (2), ceiling-truncated (3), and incomplete-or-leaked (4). Every artifact carries the Phase 16 `repro` manifest plus a `pipeline_rerun_command`; `markdown_report` renders twelve sections with the honesty rules (`—` for ungraded answer-side metrics, `Partial pipeline` when fewer than seven stages ran, a task-ceiling "remaining" column); `analysis.compare_error_distributions` compares failure *mixes* (per-mode label shares + total variation) rather than accuracies. Two-pass credential scan (stages 1–6, then report+manifest) now **quarantines**: implicated files inside the run's own output directory are deleted, known secrets scrubbed from the in-memory artifact, the report text suppressed if `report.md` itself leaked, `QUARANTINED.txt` + a `## Quarantine` section left behind, exit 4. The browser gets the same pipeline through `app/evaluation.py` (`UIEvaluationRunner`, `EvaluationPolicy`): a full-width **Evaluation** tab with preset catalogue, `estimate_ceiling` cost preview before any spend, run, figures, report, history, session-scoped `results/ui/<session>/<run>`, generation with the sidebar key (never an environment variable), `persist_run` storage, and `End session` deleting rows *and* artifacts. Fixed an import cycle through the root `app.py` shim that also made the benchmark CLI load Gradio. 1070 → **1179 tests** (incl. 7 live pipeline tests against the pinned runtime); `ruff check .` clean; 91 shipped files scan clean. Also fixed: a full run labelling itself `Partial pipeline`, a plan whose dataset digest reached the manifest but not the run files, a report naming a distribution baseline the run never chose, and a WAL-blind credential test — `security.scan` now expands a named database's `-wal`/`-shm`/`-journal` sidecars. |
+| Phases 18–20 | Pending | Test suite completion, MVP polish, research release. |
 
 Detailed logs are available in
 [`docs/phase-0-research-baseline.md`](docs/phase-0-research-baseline.md),
@@ -55,10 +56,163 @@ Detailed logs are available in
 [`docs/phase-12-error-analysis.md`](docs/phase-12-error-analysis.md),
 [`docs/phase-13-security.md`](docs/phase-13-security.md),
 [`docs/phase-14-hf-deployment.md`](docs/phase-14-hf-deployment.md),
-[`docs/phase-15-cost-controls.md`](docs/phase-15-cost-controls.md), and
-[`docs/phase-16-reproducibility.md`](docs/phase-16-reproducibility.md).
+[`docs/phase-15-cost-controls.md`](docs/phase-15-cost-controls.md),
+[`docs/phase-16-reproducibility.md`](docs/phase-16-reproducibility.md), and
+[`docs/phase-17-automated-pipeline.md`](docs/phase-17-automated-pipeline.md).
 
-## What was done in Phase 16 (this turn)
+## What was done in Phase 17 (this turn)
+
+Phase 17 turns seven commands a researcher had to run in the right order into one,
+and puts that one in the browser. Before it, `evaluation.run`,
+`evaluation.experiment`, `evaluation.compare`, `evaluation.errors`, and
+`evaluation.plots` each produced a piece of the plan's §23 `results/` layout, and
+the **Evaluation** tab was a paragraph of prose describing commands a visitor
+could not run.
+
+### New / changed modules
+
+| File | Purpose |
+| --- | --- |
+| [`src/evaluation/pipeline.py`](src/evaluation/pipeline.py) (new, 1725) | The seven-stage pipeline (`experiment → raw → comparison → statistics → errors → plots → report`), `PipelineLayout` for the plan's four directories, `STAGE_DEPENDENCIES` + `expand_stages`, `StageResult` / `PipelineResult`, the two-pass credential scan with quarantine, exit codes 0/2/3/4, `pipeline_rerun_command`, and the CLI (`build_parser` / `main`, `allow_abbrev=False`, console script `brainos-context-pipeline`). |
+| [`src/app/evaluation.py`](src/app/evaluation.py) (new, 1196) | `UIEvaluationRunner` — the Gradio-free runner the tab drives: preset catalogue, `preview()` → `CostPreview` (planned requests, `RunBudget.estimate_ceiling`, warnings), `run()` → `EvaluationRunView`, session-scoped `results/ui/<session>/<run>`, dataset allowlist with traversal-proof containment, generation with the session key, history + `forget` / `discard`, and `persist_run`. `EvaluationPolicy` (allowed presets, generation on/off, hard task/request ceilings, runs per session; `apply()` tightens only). `EvaluationRequestError` carries visitor-readable refusals. |
+| [`src/evaluation/reports.py`](src/evaluation/reports.py) | `markdown_report(artifact)` + twelve section renderers (scope, identity, headline, statistics, failures, robustness, cost, controls, security, stages, reproducibility). `ANSWER_SIDE_*` + `_graded_by_mode` keep ungraded answer metrics `—`; `_remaining` adds a task-ceiling column; `_report_scope` discloses a partial pipeline; `write_json_report(..., default=str)`. |
+| [`src/evaluation/analysis.py`](src/evaluation/analysis.py) | `compare_error_distributions(report, baseline_mode)` — per-mode label shares and total variation against the baseline, so the report compares failure *distributions*, not accuracies. `_largest_divergence` returns `{}` at a zero gap instead of announcing a non-finding. |
+| [`src/app/panels.py`](src/app/panels.py) | `PRESET_COLUMNS`, `EVALUATION_HEADLINE_COLUMNS`, `EVALUATION_STAGE_COLUMNS`, `EVALUATION_HISTORY_COLUMNS` and six renderers. `evaluation_cost_markdown` serves both the preview ("what this run would cost") and the receipt ("what this run cost", planned / ceiling / used). |
+| [`src/app/controller.py`](src/app/controller.py) | `EvaluationView` + `evaluation_presets()`, `evaluation_preview()`, `run_evaluation()`, `evaluation_history()`; `_evaluation_provider` refuses generation with no sidebar key; `_redact_evaluation` runs every rendered field through `sanitize_value` against the session key; `end_session` calls `discard` and reports the file count; `export_session` gains `evaluation_runs`. |
+| [`src/app/ui.py`](src/app/ui.py) | `EvaluationComponents` + `_build_evaluation` (full-width tab: run form, cost panel, preset/headline/stage/history tables, figure gallery, report, artifact and reproducibility panels, downloads, JSON payload), three callbacks (`preview` / `run` share one 9-value form), `_evaluation_values`, and a rewritten `EVALUATION_MARKDOWN`. Registered callbacks 16 → 19. |
+| [`app.py`](app.py) | The `app.ui` import moved under `if __name__ == "__main__"` (bug 1 below). |
+| [`pyproject.toml`](pyproject.toml) · [`.gitignore`](.gitignore) | `brainos-context-pipeline` script · `results/ui/*`. |
+| [`tests/evaluation/test_pipeline.py`](tests/evaluation/test_pipeline.py) (new, 30) | Layout, a dry run's artifacts, per-file `repro` blocks, figures, report sections, manifest contents, stage selection/expansion, a failing stage, a skipped dependent stage, CLI paths and refusals, re-run commands. |
+| [`tests/unit/test_evaluation_ui.py`](tests/unit/test_evaluation_ui.py) (new, 48) | Catalogue, policy (presets, generation, per-session ceiling, tighten-only), path safety (session id, dataset traversal), preview honesty, runs, history, `discard`, and the controller surface including refusals and redaction. |
+| [`tests/security/test_pipeline_secrets.py`](tests/security/test_pipeline_secrets.py) (new, 14) | Provider errors carrying a key, both scan passes, quarantine (including a credential the scan was never told about), quarantine's blast radius, the CLI's environment key, the browser route, persisted rows, rendered fields. |
+| [`tests/integration/test_automated_pipeline_live.py`](tests/integration/test_automated_pipeline_live.py) (new, 7) | The phase's live proof against the pinned runtime: all five modes over the committed benchmark in one `run_pipeline` call — layout and stage completeness, one request per (task, mode), the same dataset digest and a rerun command in every artifact, the four aggregates describing one run, the report claiming only what the run supports, the token/evidence ordering between modes, and no credential in any file. |
+| [`tests/ui/test_ui.py`](tests/ui/test_ui.py) (+8) | Callback count 19, the tab's declared shapes, preview/run/history callbacks, refusals, and the key never reaching a rendered value. |
+| [`src/security/scan.py`](src/security/scan.py) | `SQLITE_SIDECAR_SUFFIXES` + `_database_sidecars`: naming a database file scans its WAL/SHM/journal too (bug 15). |
+| [`tests/security/test_storage_secrets.py`](tests/security/test_storage_secrets.py) · [`tests/integration/test_security_live.py`](tests/integration/test_security_live.py) | WAL-aware raw-byte reads (`database_bytes` checkpoints, then reads main + sidecars) and the scanner's sidecar rule pinned in both files. |
+| [`docs/phase-17-automated-pipeline.md`](docs/phase-17-automated-pipeline.md) (new) | Detailed phase log, decisions, measured behaviour, constraints carried forward. |
+
+### Decisions later phases must not undo
+
+1. **The tab and the CLI share one entry point.** `app.evaluation` calls
+   `evaluation.pipeline.run_pipeline`; it does not re-implement staging,
+   artifacts, or the manifest, so a browser run and a terminal run stay
+   comparable in shape.
+2. **One identifier per run.** `run_pipeline(run_id=…)` lets the caller name the
+   run, so the output directory, the manifest's `run_id`, the history row, and the
+   re-run command are the same string.
+3. **Recording provenance never fails a run.** `pipeline_rerun_command` spells a
+   non-preset plan's budget out flag by flag instead of raising, and
+   `write_json_report` passes `default=str`. Both bugs lost a *finished* run.
+4. **Detection is not remediation.** A credential finding deletes the implicated
+   files inside the run's own output directory, scrubs known secrets from the
+   in-memory artifact, suppresses the report text if `report.md` itself leaked,
+   leaves `QUARANTINED.txt` and a `## Quarantine` section, and exits 4.
+5. **Unset is not zero, in the report too.** `_graded_by_mode` is the single place
+   that decides; `ANSWER_SIDE_*` names the columns it governs.
+6. **A partial run says it is partial.** Fewer than seven stages renders
+   `Partial pipeline — Only these stages ran: …` in the scope section.
+7. **Session-scoped artifacts are session data.** `end_session` deletes them.
+8. **Panels render, the runner computes.** `EvaluationRunView` carries data;
+   `app.panels` owns every cell.
+9. **The root `app.py` shim stays import-light.** `src/evaluation` imports
+   `app.service` because a benchmark must run the application's real context
+   builder; a module-scope `app.ui` import in the shim makes the benchmark CLI
+   load Gradio and closes a cycle.
+10. **`EvaluationPolicy` is the deployment knob.** Narrow what a public Space
+    offers there, not by editing the tab.
+
+### Bugs and gaps found while building it
+
+1. **An import cycle through the repository's own entry point.**
+   `evaluation.experiment` → `app.service` → root `app.py` → `app.ui` →
+   `app.controller` → `app.evaluation` → `evaluation.experiment` (partially
+   initialized) → `ImportError`. It also meant `python -m evaluation.pipeline`
+   imported Gradio, an optional dependency.
+2. **`pipeline_rerun_command` raised `Unknown limit preset` for any hand-built
+   plan** — while assembling the manifest, after the run had finished.
+3. **`write_json_report` crashed on a `PosixPath`** (`ExperimentPlan(dataset=Path(…))`).
+4. **The report printed `0.000` for ungraded modes**, reading as "every answer was
+   wrong" for a run that asked no model anything.
+5. **A divergence finding that said nothing** (`TV 0.000 — largest gap on
+   conflicting_memory (0.0% → 0.0%)`).
+6. **The credential scan found 30 findings and left the files on disk.** A
+   provider echoing a key into an answer is enough: failure examples quote
+   answers, so it reached `raw/*.json`, `aggregated/errors.json`, and the manifest.
+7. **`python -m evaluation.pipeline` exited 0 and printed nothing** — no
+   `__main__` guard.
+8. **The report implied completeness** for `--stages report`.
+9. **The output directory and the manifest disagreed about the run id.**
+10. **`End session` deleted rows and kept files**, on a Space forever.
+11. **Per-request and run-level ceilings shared one column** in the cost table, so
+    a 1536-token output ceiling appeared capped at 512.
+12. **A complete run reported itself as a partial pipeline.** The report renders
+    from an artifact holding stages 1–6 (stage 7's row is added when the manifest
+    is written), and the scope line inferred completeness from `len(stages) < 7`,
+    so every full run printed the one warning a reader must be able to trust. The
+    artifact now records the *selection* (`stages_selected`, `partial`) and the
+    report reads that.
+13. **One run described its own dataset two ways.** `build_manifest` hashes the
+    dataset when the plan left `dataset_sha256` empty, so `pipeline.json`'s
+    `repro.dataset.sha256` carried a digest while `plan.dataset_sha256`,
+    `raw/*.json`, and `aggregated/experiment.json` carried `""`. The UI runner hit
+    this on every run. `run_pipeline` now hashes once, before stage 1.
+14. **The report named a baseline the run had not chosen.** A mode with no failure
+    records cannot anchor a distribution, so Phase 12 falls back and records why
+    in `baseline_selection` — the report printed only the effective name, and
+    every total-variation distance is relative to that choice. The missing mode is
+    usually `full_context`: the fallback fires exactly when the reference was
+    clean. The report now discloses the substitution and the reason.
+15. **A credential-freedom test read only part of the database.** Phase 14 put
+    SQLite in WAL mode, so committed rows can sit in `<db>-wal` while the main
+    file is one page long.
+    `test_raw_database_bytes_never_contain_the_session_key` read `db.read_bytes()`
+    and asserted both "no key" and "`[redacted]` present", which made it depend on
+    when the last connection closed: green alone, red after unrelated tests, with
+    the redaction correct in both cases. It now checkpoints and reads the main
+    file plus sidecars — and `security.scan.iter_files` now expands a *named*
+    database's `-wal` / `-shm` / `-journal` sidecars, because the documented
+    `python -m security.scan data/brainos_lab.sqlite3` scanned one file and could
+    report clean while the newest rows sat beside it.
+
+### Measured behaviour
+
+```bash
+PYTHONPATH=src .venv/bin/python -m evaluation.pipeline --dry-run --limit 2 \
+  --output-dir /tmp/p17
+# pipeline=pipeline-v1 preset=quick run=3e6611ef-… tasks=2/7 modes=3 trials=1
+# experiment ok · raw ok (3 run files) · comparison ok (3 rows, 6 series)
+# statistics ok (12 paired comparisons) · errors ok (unexpected=0)
+# plots ok (6 figures) · report ok (15347 characters)
+#   full_context  graded=0 accuracy=— tokens=1226.5 reduction=0.000
+#   rag           graded=0 accuracy=— tokens=281.0  reduction=0.771
+#   brainos       graded=0 accuracy=— tokens=191.0  reduction=0.843
+# credential scan: files=16 findings=0 clean=True · exit_code=0
+
+PYTHONPATH=src .venv/bin/python -m security.scan /tmp/p17
+# scan_version=scan-v1 files=16 bytes=478105 findings=0 clean=True
+```
+
+Through the tab with `FakeLLMProvider` and a session key (2 tasks × 3 modes,
+generation on): 6 requests, 3433 tokens, `graded=2` per mode so accuracy is a
+number rather than `—`, scan clean over 10 files, one persisted row, and the key
+absent from every artifact, rendered field, and environment variable.
+
+Live, against the pinned runtime and `PromptReadingProvider` (7 tasks × 5 modes,
+one request each, no network): all seven stages `ok`, exit `0`, 5 raw run files,
+6 figures, `labels_vs_scorer.unexpected=0`, 56 paired comparisons in 8 metrics,
+and `security.scan` clean over the whole run directory. That run is where bugs
+12–14 were caught — a unit test builds its own artifact and so never renders the
+scope line a real seven-stage run renders.
+
+No provider key was used anywhere in this phase: generation is exercised through
+`RecordingProvider`, `FakeLLMProvider`, and `PromptReadingProvider`. **No number
+in this phase validates a model's quality** — the research claim still needs a
+real `--preset research` run, which is Phase 20's job.
+
+See [`docs/phase-17-automated-pipeline.md`](docs/phase-17-automated-pipeline.md)
+for the full log.
+
+## What was done in Phase 16 (landed via PR #17)
 
 Phase 16 closes the last deferred item the Phase 15 log named: reproducibility.
 Before it, every evaluation artifact carried *some* provenance — an experiment
@@ -1777,7 +1931,7 @@ python3 -m venv .venv
 .venv/bin/pip install "brainos-cli @ git+https://github.com/NiravRVaghasiya/BrainOS.git@1d9eb7a0ca537e7278e29809cda4f4c5da6c1dcc"
 
 .venv/bin/pytest -q
-# 1015 passed (936 non-live + 79 live integration / UI)
+# 1179 passed (Phase 17)
 
 .venv/bin/ruff check .
 # All checks passed!   (whole repository, no exclusions)
@@ -1786,10 +1940,10 @@ python3 -m venv .venv
 # shipped surfaces, which are asserted clean in tests/security/test_artifact_scan.py).
 # Phase 14 extends SHIPPED_PATHS to include app.py / requirements.txt /
 # packages.txt / pyproject.toml.
-.venv/bin/python -m security.scan src docs README.md CONTEXT.md benchmarks \
-    app.py requirements.txt packages.txt pyproject.toml \
+PYTHONPATH=src .venv/bin/python -m security.scan src docs README.md CONTEXT.md \
+    benchmarks app.py requirements.txt packages.txt pyproject.toml \
     BrainOS_Context_Lab_Implementation_Plan.md
-# scan_version=scan-v1 files=83 findings=0 clean=True
+# scan_version=scan-v1 files=91 findings=0 clean=True
 .venv/bin/python -m security.scan results/ data/brainos_lab.sqlite3
 # exit 0 clean / 1 findings / 2 nothing could be scanned
 
@@ -1857,21 +2011,44 @@ PYTHONPATH=src .venv/bin/python -m evaluation.errors results/phase12/run-brainos
 # The length dimension: a generated second tier (writes its own manifest).
 PYTHONPATH=src .venv/bin/python benchmarks/context_rot/generation.py --tier quick \
   --variants 1 --output benchmarks/context_rot/generated/phase12-quick.jsonl
+
+# Phase 17: the whole §23 layout in one command. A dry run needs no key; it
+# builds every prompt, measures tokens, runs retrieval, compares, classifies
+# failures, renders six figures, and writes report/report.md + report/pipeline.json.
+PYTHONPATH=src .venv/bin/python -m evaluation.pipeline --dry-run --limit 2 \
+  --output-dir results/phase17-dry
+# exit 0 · 16 files · credential scan clean
+PYTHONPATH=src .venv/bin/python -m evaluation.pipeline --preset research --modes all \
+  --provider openai --model gpt-4o-mini --api-key-env OPENAI_API_KEY \
+  --baseline-mode full_context --output-dir results/phase17-research
+# A stage subset pulls in its own dependencies; a partial run says so in the report.
+PYTHONPATH=src .venv/bin/python -m evaluation.pipeline --dry-run --stages report \
+  --output-dir results/phase17-report
+# Exit codes: 0 complete · 2 uncontrolled comparison · 3 stopped at a ceiling ·
+# 4 incomplete (a stage failed) or a credential reached an artifact (quarantined).
+
+# The same pipeline in the browser: the Evaluation tab. Retrieval-only by
+# default; "Call my model" spends the sidebar key. Artifacts land in
+# results/ui/<session>/<run>/ and are deleted by End session.
+PYTHONPATH=src .venv/bin/python app.py
 ```
 
 Test count went 154 → 216 (Phase 4) → 249 (Phase 5) → 379 (Phase 6) → 494
 (Phase 8) → 586 (Phase 9) → 598 (Phase 10) → 632 (Phase 11) → 696 (Phase 12) →
-1004 (Phase 13, +308) → **1015** in this phase (+11 deployment-config tests,
-secure-deletion byte coverage extended to -wal/-shm sidecars, and the
-artifact-scan paths expanded to cover the new deployment files).
+1004 (Phase 13) → 1015 (Phase 14) → 1048 (Phase 15) → 1070 (Phase 16) →
+**1179** in this phase (+31 pipeline, +48 UI-runner, +14 pipeline-security,
++7 live-pipeline, +8 Evaluation-tab, +1 scanner sidecar; the registered-callback
+count in `tests/ui/test_ui.py` is now 19). Two consecutive full-suite runs are
+green, which matters because bug 15 was an order-dependent failure.
 The live tests in `tests/integration/test_chat_controller_live.py`,
 `tests/integration/test_persistence_live.py`,
 `tests/integration/test_context_pipeline.py`,
 `tests/integration/test_baseline_modes_live.py`,
 `tests/integration/test_brainos_runtime.py`,
 `tests/integration/test_controlled_experiment_live.py`,
-`tests/integration/test_ablation_live.py`, and
-`tests/integration/test_error_analysis_live.py`, and
+`tests/integration/test_ablation_live.py`,
+`tests/integration/test_error_analysis_live.py`,
+`tests/integration/test_automated_pipeline_live.py`, and
 `tests/integration/test_security_live.py` run against the pinned
 BrainOS revision and skip when `brainos_runtime` is not installed;
 `tests/integration/test_provider_http_live.py` needs the `openai` SDK and talks
@@ -1884,37 +2061,43 @@ and the localhost stub.
 
 ## Next safe step
 
-Phase 14 is complete and validated (1015 tests, `ruff check .` clean, 83
-shipped files scan clean, server boots and serves HTTP 200 in both disk and
-`:memory:` mode). The suggested next phase is **Phase 15 — Cost Controls**
-(plan §15 / §21):
+Phase 17 is complete and validated (1179 tests, `ruff check .` clean, 91 shipped
+files scan clean, the pipeline writes the plan's whole §23 `results/` layout in
+one command and the Evaluation tab drives the same entry point). The suggested
+next phase is **Phase 18 — Test Suite** (plan §24), which is now mostly a
+completion-and-hardening pass over a suite that already covers the plan's list:
 
-* per-request input/output token ceilings for the chat path (the evaluation
-  runner's `RunLimits` / `RunBudget` do not apply to chat yet),
-* per-session turn caps (a refinement of the existing `UILimits.max_turns=200`
-  ceiling, with a user-visible "limit reached" state),
-* request timeouts beyond whatever the provider SDK imposes,
-* benchmark preset wiring (`quick` / `standard` / `research`) in the Evaluation
-  tab once Phase 17 surfaces the runner there,
-* estimated usage / cost display alongside the Context statistics,
-* clear disclosure on the Space landing page ("your key, your bill; the demo
-  enforces these ceilings but cannot cap what your provider charges").
+* **Unit:** provider adapters, API key redaction, context builder, token
+  budgeting, memory filtering, session isolation, conflict handling — all present
+  (`tests/unit/`), but §24 asks for them to be *exhaustive*, not representative.
+* **Integration:** `user input → observe → recall → context → provider → response
+  → memory update` is covered end to end by
+  `tests/integration/test_context_pipeline.py` and the live suites.
+* **Evaluation:** §24's "deterministic mock models to verify that benchmark
+  calculations are correct" now has a one-call home —
+  `run_pipeline(plan, tasks, ModelSpec(...), RecordingProvider(...))` — so
+  metric arithmetic can be pinned end to end rather than per module.
+* **Security:** §24's four pins exist (key never in logs/artifacts, session
+  isolation, retrieved memory cannot override system instructions, no user data
+  in diagnostics) and Phase 17 added the pipeline's own.
 
-Carry these constraints into Phase 15:
-1. **Cost controls apply to both chat and evaluation.** The runner's budgets
-   exist; chat needs the same hard ceilings, exposed through the same
-   `UILimits` surface so a misbehaving visitor on the public Space cannot
-   burn the operator's (BYOK — the visitor's own) quota.
-2. **Concurrency is bounded, not serialized.** The queue from Phase 14 is a
-   traffic shaper, not a cost control; token and turn caps must apply per
-   session, not globally.
-3. **Do not ship a public BYOK Space without Phase 15.** Phase 14 enables
-   deployment; a public Space without per-turn token ceilings is the residual
-   risk the Phase 14 log records. If Phase 14 is deployed to HF before Phase
-   15 ships, document the gap in the Space README.
-4. **Guard and ledger stay unchanged.** A token-cap refusal is a user-visible
-   status, not a security finding; don't overload the security vocabulary.
-5. **Re-prove live after Phase 15.** A capped request must still redact the
-   key from the error, must still clear on End session, and must still leave
-   the byte-level secure-deletion guarantee intact — add a security test that
-   drives a capped turn and asserts all three.
+Carry these constraints into Phase 18:
+
+1. **Do not weaken Phase 17's pins.** The credential-freedom and quarantine tests
+   in `tests/security/test_pipeline_secrets.py`, the `—`-not-`0.000` honesty rules,
+   and the registered-callback count (19) in `tests/ui/test_ui.py` are load-bearing.
+2. **The two gaps Phase 17 named are still open.** (a) A `SlowProvider` timeout
+   test and a multi-threaded stress test (deferred since Phase 16). (b) Retention
+   for `results/ui/`: runs are deleted with their session, but an *abandoned*
+   session is ended by nobody, so a public Space accumulates artifacts. Phase 19
+   should add a sweep (or a temp root) before the tab is enabled publicly with
+   generation on.
+3. **Tighten `EvaluationPolicy` for a public Space rather than editing the tab:**
+   `EvaluationPolicy(allowed_presets=("quick",), allow_generation=False,
+   max_tasks=20, max_requests=60)` is a defensible default.
+4. **Live re-proof after any change to the generation path.** A generated run must
+   still keep the session key out of every artifact, out of the environment, and
+   out of every rendered field — and must still quarantine if a provider echoes it.
+5. **No number produced so far validates a model.** Every measurement in this
+   repository came from dry runs or deterministic fakes. The research claim needs
+   a real `--preset research` run with a real key, which is Phase 20's job.

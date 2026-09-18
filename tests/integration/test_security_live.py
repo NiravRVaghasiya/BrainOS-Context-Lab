@@ -27,7 +27,7 @@ import pytest
 from app.controller import UIController
 from brain.context_builder import MEMORY_DELIMITER_CLOSE, MEMORY_DELIMITER_OPEN
 from evaluation.errors import DROP_REASON_LABELS, GUARDED_DROP_REASONS, PLAN_ERROR_TYPES
-from security.scan import scan_paths
+from security.scan import SQLITE_SIDECAR_SUFFIXES, iter_files, scan_paths
 from tests.fakes import FakeLLMProvider
 
 pytest.importorskip("brainos_runtime")
@@ -260,9 +260,24 @@ def test_live_artifacts_scan_clean_after_a_session_that_held_a_key(
 
     report = scan_paths([db_path, export_path])
 
-    assert report.files_scanned == 2
+    # Naming the database scans its WAL/SHM sidecars too (Phase 14 runs SQLite in
+    # WAL mode, so the newest rows can be in the sidecar and not yet in the main
+    # file). The count is therefore "whatever this database owns, plus the
+    # export", asserted as a set of names rather than a magic number.
+    scanned = {Path(path).name for path in iter_files([db_path, export_path])}
+    assert {db_path.name, export_path.name} <= scanned
+    assert f"{db_path.name}-wal" in scanned, "the WAL holds the newest rows"
+    # Nothing else is pulled in: the database, its sidecars, and the export.
+    assert scanned <= {
+        db_path.name,
+        export_path.name,
+        *(f"{db_path.name}{suffix}" for suffix in SQLITE_SIDECAR_SUFFIXES),
+    }
+    assert report.files_scanned == len(scanned)
     assert report.findings == (), [finding.to_dict() for finding in report.findings]
     assert report.clean is True
+    # Every byte the database owns is credential-free, not just its main file.
+    assert KEY.encode() not in _raw(db_path)
 
 
 def test_live_end_session_removes_the_bytes_not_just_the_rows(
@@ -284,8 +299,9 @@ def test_live_end_session_removes_the_bytes_not_just_the_rows(
 
     assert SqliteConversationStore(db_path).list_conversations(session_id) == []
     assert SqliteMemoryStore(db_path).list_memories(session_id) == []
-    # scan_paths needs to scan sidecar files too; use the file parent so the
-    # scanner picks up the WAL and SHM alongside the main database.
+    # Naming the database is enough now: the scanner expands its WAL/SHM
+    # sidecars itself. The directory scan stays as the deployment-shaped check.
+    assert scan_paths([db_path]).clean is True
     assert scan_paths([db_path.parent]).clean is True
 
 

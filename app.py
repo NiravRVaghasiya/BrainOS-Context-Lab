@@ -18,7 +18,14 @@ if str(src_dir) not in sys.path:
 if __name__ == "app":
     __path__ = [str(src_dir / "app")]  # type: ignore[name-defined]
 
-from app.ui import main  # noqa: E402  (path bootstrap must happen first)
-
 if __name__ == "__main__":
+    # Imported here, not at module scope, on purpose. ``src/evaluation`` imports
+    # ``app.service`` (a benchmark must run the application's real context
+    # builder), and this file *is* the ``app`` module in a source checkout — so
+    # an import of the UI at module scope would make ``python -m
+    # evaluation.pipeline`` load Gradio and the controller, and would close a
+    # cycle the moment the controller imports anything from ``evaluation``.
+    # The UI is only needed by the process that serves it.
+    from app.ui import main  # noqa: PLC0415  (path bootstrap must happen first)
+
     main()

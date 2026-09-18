@@ -20,6 +20,7 @@ from __future__ import annotations
 import os
 import tempfile
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from baselines.modes import (
@@ -39,9 +40,14 @@ from .panels import (
     CHUNK_COLUMNS,
     CONFLICT_COLUMNS,
     DROPPED_MEMORY_COLUMNS,
+    EVALUATION_HEADLINE_COLUMNS,
+    EVALUATION_HISTORY_COLUMNS,
+    EVALUATION_STAGE_COLUMNS,
+    PRESET_COLUMNS,
     RETRIEVED_MEMORY_COLUMNS,
     SECURITY_COLUMNS,
     STORED_MEMORY_COLUMNS,
+    evaluation_cost_markdown,
 )
 
 TITLE = "BrainOS Context Lab"
@@ -86,28 +92,31 @@ in server memory for the active session only and are never written to disk.
 {persistence_line}
 """
 
-EVALUATION_MARKDOWN = """### Evaluation
+EVALUATION_MARKDOWN = """### Evaluation pipeline
 
-Benchmark runs are driven from the command line (`python -m evaluation.run`,
-`python -m evaluation.experiment`). The Evaluation tab surfaces the presets
-and the session's usage so a visitor can see what a run *would* cost.
+Run the Context Rot benchmark from the browser. This tab drives the same
+automated pipeline as the command line (`python -m evaluation.pipeline`), so a
+run here and a run in a terminal write the same artifacts and the same
+reproducibility manifest.
 
-| Preset | Tasks | Modes | Trials | Max requests | Max total tokens |
-| --- | --- | --- | --- | --- | --- |
-| Quick | 20 | 3 | 1 | 60 | 250,000 |
-| Standard | 100 | 5 | 1 | 500 | 5,000,000 |
-| Research | 500 | 5 | 3 | 7,500 | 100,000,000 |
+**Retrieval-only by default.** With **Call my model** off, the pipeline builds
+every mode's prompt, measures its tokens, runs retrieval, and compares the
+context assembly — without sending anything anywhere. That is free, and it is
+the honest way to see what BrainOS does to a prompt. Turn generation on and the
+run uses **the API key you entered in the sidebar**: your provider account is
+billed directly, and the ceilings below are enforced, not advisory.
 
-The chat above already produces the raw material for benchmark runs: every
-turn records raw history tokens, selected history tokens, retrieved memory
-tokens, retrieved chunk tokens, system tokens, final context tokens, and a
-per-item audit trail of everything the retrieval policy removed.
+**Preview before you spend.** Every number in the cost table is a ceiling the
+runner enforces. A prompt larger than the per-request ceiling is *skipped*,
+never truncated and never sent; a run that hits a ceiling stops and says so.
 
-Baseline modes (Phase 6) are live — pick one in the sidebar under **Context**
-to run the same conversation through Full Context, Sliding Window, Lexical
-RAG, BrainOS, or BrainOS + RAG. Each mode reports the identical accounting
-fields, so the **Usage** tab is a one-session version of the cost report a
-benchmark run produces at scale.
+**Unset is not zero.** A retrieval-only run grades no answers, so accuracy,
+faithfulness, and quality-adjusted efficiency show `—` — never `0.000`, which
+would read as "every answer was wrong".
+
+Artifacts land in `results/raw/`, `results/aggregated/`, `results/plots/`, and
+`results/report/` for a CLI run, and in a session-scoped `results/ui/<session>/`
+directory here. **End session** deletes this session's rows *and* its artifacts.
 """
 
 USAGE_INTRO_MARKDOWN = """### Usage
@@ -236,6 +245,212 @@ class PanelComponents:
         return [getattr(self, name) for name in self.order]
 
 
+@dataclass
+class EvaluationComponents:
+    """Evaluation tab widgets, in the order :func:`_evaluation_values` emits them.
+
+    The run form and the preview form share one input list. A visitor who has
+    filled in a baseline mode and a token counter and then presses **Preview
+    cost** should not have to wonder why two of their controls were ignored —
+    so both callbacks read the whole form, and the preview simply does not act
+    on the parts that only matter once a run starts.
+    """
+
+    preset: Any
+    modes: Any
+    limit: Any
+    dataset: Any
+    baseline: Any
+    counter: Any
+    generate: Any
+    render_plots: Any
+    preview_btn: Any
+    run_btn: Any
+    history_btn: Any
+    status: Any
+    cost: Any
+    presets_table: Any
+    headline: Any
+    stages: Any
+    gallery: Any
+    report: Any
+    artifacts: Any
+    repro: Any
+    history_table: Any
+    downloads: Any
+    payload: Any
+    order: tuple[str, ...] = field(
+        default=(
+            "status",
+            "cost",
+            "presets_table",
+            "headline",
+            "stages",
+            "gallery",
+            "report",
+            "artifacts",
+            "repro",
+            "history_table",
+            "downloads",
+            "payload",
+        )
+    )
+
+    def as_outputs(self) -> list[Any]:
+        return [getattr(self, name) for name in self.order]
+
+    def as_inputs(self) -> list[Any]:
+        """The run form, in the order the callbacks read it."""
+
+        return [
+            self.preset,
+            self.modes,
+            self.limit,
+            self.dataset,
+            self.generate,
+            self.render_plots,
+            self.baseline,
+            self.counter,
+        ]
+
+
+def _build_evaluation(gr: Any, controller: UIController) -> EvaluationComponents:
+    """The Evaluation tab: the benchmark workbench (Phase 17).
+
+    Full width rather than squeezed into the inspection column, because the
+    pipeline's output is a matrix — one row per mode and trial, one column per
+    metric — and a table that scrolls sideways in a 340px column is a table
+    nobody reads.
+    """
+
+    runner = controller.evaluation
+    catalogue = controller.evaluation_presets()
+    preset_choices = list(runner.preset_choices())
+    dataset_choices = list(runner.dataset_choices())
+    with gr.Tab("Evaluation"):
+        gr.Markdown(EVALUATION_MARKDOWN)
+        with gr.Row():
+            with gr.Column(scale=1, min_width=300):
+                gr.Markdown("#### Run configuration")
+                preset = gr.Dropdown(
+                    choices=preset_choices,
+                    value=str(preset_choices[0][1]) if preset_choices else "quick",
+                    label="Preset (budget ceilings)",
+                )
+                modes = gr.Dropdown(
+                    choices=list(runner.mode_choices()),
+                    value=[],
+                    multiselect=True,
+                    label="Modes (empty = the preset's modes)",
+                )
+                limit = gr.Number(
+                    value=0, precision=0, label="Task limit (0 = the preset's ceiling)"
+                )
+                dataset = gr.Dropdown(
+                    choices=dataset_choices,
+                    value=str(dataset_choices[0]),
+                    allow_custom_value=True,
+                    label="Dataset (inside `benchmarks/` only)",
+                )
+                baseline = gr.Dropdown(
+                    choices=list(runner.baseline_choices()),
+                    value="full_context",
+                    label="Paired-comparison baseline",
+                )
+                counter = gr.Radio(
+                    choices=[
+                        ("Estimate (no network)", "estimate"),
+                        ("tiktoken (exact, slower)", "tiktoken"),
+                    ],
+                    value="estimate",
+                    label="Token counter",
+                )
+                generate = gr.Checkbox(
+                    value=False,
+                    label="Call my model (spends my sidebar API key)",
+                )
+                render_plots = gr.Checkbox(value=True, label="Render figures")
+                with gr.Row():
+                    preview_btn = gr.Button("Preview cost")
+                    run_btn = gr.Button("Run benchmark", variant="primary")
+                    history_btn = gr.Button("History")
+            with gr.Column(scale=2, min_width=420):
+                status = gr.Markdown(catalogue.status)
+                cost = gr.Markdown(evaluation_cost_markdown({}))
+                presets_table = gr.Dataframe(
+                    headers=list(PRESET_COLUMNS),
+                    label="Preset ceilings",
+                    value=catalogue.preset_rows,
+                    interactive=False,
+                    wrap=True,
+                )
+        gr.Markdown("#### Results")
+        headline = gr.Dataframe(
+            headers=list(EVALUATION_HEADLINE_COLUMNS),
+            label="Evaluation matrix (one row per mode and trial)",
+            value=[],
+            interactive=False,
+            wrap=True,
+        )
+        with gr.Row():
+            with gr.Column(scale=2, min_width=380):
+                stages = gr.Dataframe(
+                    headers=list(EVALUATION_STAGE_COLUMNS),
+                    label="Pipeline stages",
+                    value=[],
+                    interactive=False,
+                    wrap=True,
+                )
+                history_table = gr.Dataframe(
+                    headers=list(EVALUATION_HISTORY_COLUMNS),
+                    label="This session's runs",
+                    value=[],
+                    interactive=False,
+                    wrap=True,
+                )
+            with gr.Column(scale=1, min_width=280):
+                gallery = gr.Gallery(
+                    label="Figures (`results/plots/`)",
+                    columns=2,
+                    height=260,
+                    interactive=False,
+                )
+                downloads = gr.File(label="Report, manifest, and figures")
+        report = gr.Markdown("")
+        with gr.Row():
+            with gr.Column(scale=1, min_width=300):
+                artifacts = gr.Markdown("")
+            with gr.Column(scale=1, min_width=300):
+                repro = gr.Markdown("")
+        payload = gr.JSON(label="Run summary", value={})
+
+    return EvaluationComponents(
+        preset=preset,
+        modes=modes,
+        limit=limit,
+        dataset=dataset,
+        baseline=baseline,
+        counter=counter,
+        generate=generate,
+        render_plots=render_plots,
+        preview_btn=preview_btn,
+        run_btn=run_btn,
+        history_btn=history_btn,
+        status=status,
+        cost=cost,
+        presets_table=presets_table,
+        headline=headline,
+        stages=stages,
+        gallery=gallery,
+        report=report,
+        artifacts=artifacts,
+        repro=repro,
+        history_table=history_table,
+        downloads=downloads,
+        payload=payload,
+    )
+
+
 def create_app(controller: UIController | None = None) -> Any:
     """Build and return the Gradio application.
 
@@ -281,9 +496,13 @@ def create_app(controller: UIController | None = None) -> Any:
             with gr.Column(scale=1, min_width=340):
                 panels = _build_inspection(gr)
 
+        # Phase 17: the benchmark workbench is its own full-width tab, below the
+        # chat/inspection row it reports on.
+        evaluation = _build_evaluation(gr, controller)
+
         gr.Markdown(FOOTER_MARKDOWN)
 
-        _wire(gr, controller, session_state, sidebar, chat, panels)
+        _wire(gr, controller, session_state, sidebar, chat, panels, evaluation)
         # A fresh browser tab gets a fresh session. The controller also
         # self-heals if this never fires (API clients, restored pages).
         demo.load(
@@ -547,8 +766,6 @@ def _build_inspection(gr: Any) -> PanelComponents:
     with gr.Tab("Usage"):
         usage_summary = gr.Markdown(USAGE_INTRO_MARKDOWN)
         usage_report = gr.JSON(label="Session usage", value={})
-    with gr.Tab("Evaluation"):
-        gr.Markdown(EVALUATION_MARKDOWN)
 
     return PanelComponents(
         stored=stored,
@@ -581,6 +798,7 @@ def _wire(
     sidebar: SidebarComponents,
     chat: ChatComponents,
     panels: PanelComponents,
+    evaluation: EvaluationComponents,
 ) -> None:
     """Attach the controller to the widgets.
 
@@ -692,6 +910,26 @@ def _wire(
     chat.export_btn.click(
         _export(controller), inputs=[session_state], outputs=[chat.export_btn]
     )
+    # Phase 17: the Evaluation tab. Preview and run share one input list so a
+    # visitor's form is read whole either way; history re-reads the session's
+    # runs without touching the form.
+    evaluation_outputs = [*evaluation.as_outputs(), session_state]
+    evaluation.preview_btn.click(
+        _evaluation_preview(controller),
+        inputs=[*evaluation.as_inputs(), session_state],
+        outputs=evaluation_outputs,
+    )
+    evaluation.run_btn.click(
+        _evaluation_run(controller),
+        inputs=[*evaluation.as_inputs(), session_state],
+        outputs=evaluation_outputs,
+    )
+    evaluation.history_btn.click(
+        _evaluation_history(controller),
+        inputs=[session_state],
+        outputs=evaluation_outputs,
+    )
+
     # Phase 15: cost control widgets update the controller's limits on change.
     for widget in (
         sidebar.chat_max_input_tokens,
@@ -945,6 +1183,112 @@ def _export(controller: UIController) -> Any:
         return gr.update(value=path, visible=True)
 
     return export_session
+
+
+def _evaluation_preview(controller: UIController) -> Any:
+    def preview_cost(
+        preset: Any,
+        modes: Any,
+        limit: Any,
+        dataset: Any,
+        generate: Any,
+        # Read whole, acted on only by a run: figures, paired baselines, and the
+        # token counter have nothing to preview.
+        render_plots: Any,
+        baseline: Any,
+        counter: Any,
+        session_id: str | None,
+    ) -> tuple[Any, ...]:
+        view = controller.evaluation_preview(
+            session_id,
+            preset=str(preset or "quick"),
+            modes=_selected_modes(modes),
+            limit=_optional_int(limit) or 0,
+            dataset=_optional_text(dataset),
+            generate=bool(generate),
+        )
+        return (*_evaluation_values(view), view.session_id)
+
+    return preview_cost
+
+
+def _evaluation_run(controller: UIController) -> Any:
+    def run_benchmark(
+        preset: Any,
+        modes: Any,
+        limit: Any,
+        dataset: Any,
+        generate: Any,
+        render_plots: Any,
+        baseline: Any,
+        counter: Any,
+        session_id: str | None,
+    ) -> tuple[Any, ...]:
+        view = controller.run_evaluation(
+            session_id,
+            preset=str(preset or "quick"),
+            modes=_selected_modes(modes),
+            limit=_optional_int(limit) or 0,
+            dataset=_optional_text(dataset),
+            generate=bool(generate),
+            render_plots=bool(render_plots),
+            baseline_mode=str(baseline or "full_context"),
+            token_counter=str(counter or "estimate"),
+        )
+        return (*_evaluation_values(view), view.session_id)
+
+    return run_benchmark
+
+
+def _evaluation_history(controller: UIController) -> Any:
+    def evaluation_history(session_id: str | None) -> tuple[Any, ...]:
+        view = controller.evaluation_history(session_id)
+        return (*_evaluation_values(view), view.session_id)
+
+    return evaluation_history
+
+
+def _selected_modes(value: Any) -> list[str] | None:
+    """The multiselect's modes, or ``None`` for "the preset's own modes"."""
+
+    if value is None:
+        return None
+    selected = [str(mode) for mode in value if str(mode).strip()]
+    return selected or None
+
+
+def _optional_text(value: Any) -> str | None:
+    text = str(value or "").strip()
+    return text or None
+
+
+def _evaluation_values(view: Any) -> tuple[Any, ...]:
+    """Evaluation tab values, in :class:`EvaluationComponents` order.
+
+    Downloads are filtered to files that exist: a refused or aborted run has no
+    report, and handing Gradio a path that is not there turns a readable refusal
+    into a broken widget.
+    """
+
+    downloads = [
+        path
+        for path in (view.report_path, view.artifact_path, *view.plots)
+        if path and Path(str(path)).is_file()
+    ]
+    return (
+        view.status,
+        view.cost_markdown,
+        view.preset_rows,
+        view.headline_rows,
+        view.stage_rows,
+        [path for path in view.plots if Path(str(path)).is_file()],
+        view.report_markdown,
+        view.artifacts_markdown,
+        view.repro_markdown,
+        view.history_rows,
+        downloads,
+        view.summary or view.cost_payload or {},
+    )
 
 
 def _panel_values(view: Any) -> tuple[Any, ...]:

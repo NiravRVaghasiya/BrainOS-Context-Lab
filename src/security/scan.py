@@ -295,6 +295,25 @@ def _scan_bytes(data: bytes, *, pointer: str, path: str) -> list[ScanFinding]:
 #: reporting them would double every finding without covering anything new.
 SKIPPED_DIRECTORIES: frozenset[str] = frozenset({".git", "__pycache__"})
 
+#: SQLite sidecars. Phase 14 puts the database in WAL mode, so the newest
+#: committed rows live in ``<db>-wal`` until a checkpoint merges them: scanning
+#: ``data/brainos_lab.sqlite3`` alone can report clean while the freshest content
+#: sits beside it — and a copy of the directory ships the WAL with it. Naming a
+#: database file therefore scans its sidecars too. (A directory argument already
+#: picked them up as ordinary files; this closes the single-file case the
+#: documented command uses.)
+SQLITE_SIDECAR_SUFFIXES: tuple[str, ...] = ("-journal", "-shm", "-wal")
+
+
+def _database_sidecars(path: Path) -> tuple[Path, ...]:
+    """Return ``path``'s existing SQLite sidecars, in a stable order."""
+
+    return tuple(
+        sidecar
+        for sidecar in (Path(f"{path}{suffix}") for suffix in SQLITE_SIDECAR_SUFFIXES)
+        if sidecar.is_file()
+    )
+
 
 def iter_files(paths: Iterable[Path | str]) -> Iterator[Path]:
     """Yield every regular file under ``paths``, directories expanded, sorted.
@@ -312,6 +331,7 @@ def iter_files(paths: Iterable[Path | str]) -> Iterator[Path]:
             collected.extend(item for item in candidate.rglob("*") if item.is_file())
         elif candidate.exists():
             collected.append(candidate)
+            collected.extend(_database_sidecars(candidate))
     for item in sorted(set(collected)):
         if SKIPPED_DIRECTORIES.intersection(item.parts):
             continue

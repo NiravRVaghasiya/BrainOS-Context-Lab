@@ -40,6 +40,7 @@ integration = [
 [project.scripts]
 brainos-context-lab = "app.ui:main"
 brainos-context-evaluate = "evaluation.run:main"
+brainos-context-pipeline = "evaluation.pipeline:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
