@@ -342,6 +342,32 @@ def test_version_control_and_bytecode_copies_are_not_scanned(tmp_path: Path) -> 
     assert {".git", "__pycache__"} <= SKIPPED_DIRECTORIES
 
 
+def test_naming_a_database_also_scans_its_write_ahead_log(tmp_path: Path) -> None:
+    """WAL mode keeps the newest rows beside the database file.
+
+    Phase 14 put the store in WAL mode, so ``lab.sqlite3-wal`` can hold content
+    the main file does not have yet. The documented command names one file
+    (``python -m security.scan results/ data/brainos_lab.sqlite3``); a credential
+    in the WAL must not slip past it.
+    """
+
+    database = tmp_path / "lab.sqlite3"
+    database.write_bytes(b"schema page")
+    (tmp_path / "lab.sqlite3-wal").write_bytes(b"sk-wal-only-1234567890abcdef")
+    (tmp_path / "lab.sqlite3-shm").write_bytes(b"\x00" * 32)
+    (tmp_path / "unrelated.json").write_text("{}", encoding="utf-8")
+
+    walked = list(iter_files([database]))
+
+    assert walked == [database, tmp_path / "lab.sqlite3-shm", tmp_path / "lab.sqlite3-wal"]
+    report = scan_paths([database])
+    assert report.files_scanned == 3
+    assert not report.clean
+    assert any("lab.sqlite3-wal" in finding.path for finding in report.findings)
+    # A database with no sidecars scans as one file, unchanged.
+    assert len(list(iter_files([tmp_path / "unrelated.json"]))) == 1
+
+
 def test_a_path_that_does_not_exist_contributes_nothing(tmp_path: Path) -> None:
     assert list(iter_files([tmp_path / "no-such-dir", tmp_path / "nope.json"])) == []
 

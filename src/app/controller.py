@@ -34,7 +34,7 @@ removes the bytes and not only the rows.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
 from typing import Any
 
 from baselines.modes import mode_choices, mode_label, resolve_mode
@@ -45,6 +45,11 @@ from providers import ProviderError, create_provider
 from providers.base import ProviderConfig, ProviderConfigurationError
 
 from . import panels
+from .evaluation import (
+    EvaluationPolicy,
+    EvaluationRequestError,
+    UIEvaluationRunner,
+)
 from .limits import ChatBudget, ChatLimitExceeded, ChatLimits
 from .service import ConversationService, _warn_storage
 from .session import SessionManager
@@ -156,6 +161,45 @@ class SessionView:
     session_id: str = ""
 
 
+@dataclass(frozen=True)
+class EvaluationView:
+    """Everything the Evaluation tab renders after a preview or a run.
+
+    Phase 17: the tab drives the same automated pipeline the CLI does, so this
+    view is the browser-safe projection of a pipeline result — the status line,
+    the cost disclosure, the headline and stage tables, the figures, the rendered
+    report, and the reproducibility manifest.
+
+    Every field is produced by :mod:`app.panels` from data the runner returned,
+    and the whole object is redacted once more against the active session key
+    before it leaves the controller (:meth:`UIController._redact_evaluation`).
+    ``ran`` distinguishes "nothing has run yet" from "a run produced nothing",
+    so an empty table is never mistaken for an empty result.
+    """
+
+    session_id: str = ""
+    status: str = ""
+    ok: bool = False
+    ran: bool = False
+    #: Cost disclosure — markdown for the visitor, payload for the JSON viewer.
+    cost_markdown: str = ""
+    cost_payload: dict[str, Any] = field(default_factory=dict)
+    preset_rows: list[list[Any]] = field(default_factory=list)
+    headline_rows: list[list[Any]] = field(default_factory=list)
+    stage_rows: list[list[Any]] = field(default_factory=list)
+    history_rows: list[list[Any]] = field(default_factory=list)
+    plots: list[str] = field(default_factory=list)
+    report_markdown: str = ""
+    artifacts_markdown: str = ""
+    repro_markdown: str = ""
+    repro: dict[str, Any] = field(default_factory=dict)
+    rerun_command: str = ""
+    report_path: str = ""
+    artifact_path: str = ""
+    #: What the last run produced, for the JSON viewer and the session export.
+    summary: dict[str, Any] = field(default_factory=dict)
+
+
 class UIController:
     """Own the mapping between UI actions and the application service layer."""
 
@@ -169,6 +213,8 @@ class UIController:
         conversation_store: Any | None = None,
         memory_store: Any | None = None,
         evaluation_store: Any | None = None,
+        evaluation_runner: Any | None = None,
+        evaluation_policy: EvaluationPolicy | None = None,
     ) -> None:
         """Create a controller.
 
@@ -179,6 +225,14 @@ class UIController:
         The controller forwards them to each session's
         :class:`ConversationService` and uses them for session-level deletion
         and export; it never lets a storage failure break a UI action.
+
+        Phase 17 adds the Evaluation tab's runner. It defaults to one wired to
+        *this* controller's evaluation store and provider factory, so a test
+        that injects fakes gets the fakes in the benchmark path too, and a
+        deployment that injects SQLite persists benchmark runs through the same
+        seam. ``evaluation_policy`` is the operator's knob for what a public
+        Space is willing to host (which presets, whether generation is allowed
+        at all, and the hard task/request ceilings).
         """
 
         self.sessions = sessions or SessionManager()
@@ -190,6 +244,11 @@ class UIController:
         self._evaluation_store = evaluation_store
         self._services: dict[str, ConversationService] = {}
         self._last_turn: dict[str, Any] = {}
+        self.evaluation = evaluation_runner or UIEvaluationRunner(
+            policy=evaluation_policy or EvaluationPolicy(),
+            evaluation_store=evaluation_store,
+            provider_factory=self._provider_factory,
+        )
 
     # ------------------------------------------------------------------ #
     # Sessions
@@ -661,19 +720,257 @@ class UIController:
             return SessionView(status="No active session.", session_id="")
         self._services.pop(session_id, None)
         self._last_turn.pop(session_id, None)
+        # Phase 17: the persisted run rows go with the rest of the session's
+        # data, and so do the run artifacts and the in-memory index of them — a
+        # history (or a report on disk) that outlives the session it describes
+        # would survive the delete it is supposed to honour.
+        discarded = self.evaluation.discard(session_id)
         self._delete_persisted_session(session_id)
         self._vacuum_stores()
         ended = self.sessions.end(session_id)
         state = self.sessions.start()
+        artifacts = (
+            f" {discarded} benchmark artifact file(s) deleted." if discarded else ""
+        )
         return SessionView(
             status=(
                 "Session ended — key, transcript, memory, and all persisted "
-                "session rows dropped."
+                f"session rows dropped.{artifacts}"
                 if ended
                 else "No active session."
             ),
             session_id=state.session_id,
         )
+
+    # ------------------------------------------------------------------ #
+    # Evaluation (Phase 17)
+    # ------------------------------------------------------------------ #
+
+    def evaluation_presets(self) -> EvaluationView:
+        """The tab's opening state: the preset catalogue and the policy limits.
+
+        Cheap and side-effect free — it reads the budget presets, so it can be
+        called every time the tab is built or the page loads.
+        """
+
+        views = self.evaluation.preset_views()
+        notices = list(self.evaluation.policy_notice())
+        return EvaluationView(
+            ok=True,
+            status=(
+                "**Evaluation presets** — every number below is a ceiling the "
+                "runner enforces, not a prediction.\n\n"
+                + "\n".join(f"- {notice}" for notice in notices)
+            ),
+            preset_rows=panels.evaluation_preset_rows([view.to_dict() for view in views]),
+        )
+
+    def evaluation_preview(
+        self,
+        session_id: str | None,
+        *,
+        preset: str = "quick",
+        modes: Sequence[str] | None = None,
+        limit: int = 0,
+        dataset: str | None = None,
+        generate: bool = False,
+    ) -> EvaluationView:
+        """Show what the requested run *would* cost — no provider call, no writes.
+
+        This is the plan's carried Phase 15 constraint landing in the browser:
+        ``RunBudget.estimate_ceiling`` is rendered before the visitor can spend
+        anything. Retrieval-only, so it is safe to call as often as a visitor
+        changes a control.
+        """
+
+        state = self.ensure_session(session_id)
+        try:
+            preview = self.evaluation.preview(
+                session_id=state.session_id,
+                preset_name=preset,
+                modes=modes,
+                limit=limit,
+                dataset=dataset,
+                generate=generate,
+                provider=self._evaluation_provider(state, generate),
+            )
+        except EvaluationRequestError as exc:
+            return self._evaluation_refusal(state, str(exc))
+        secrets = self._secrets(state)
+        payload = self._redact(preview.to_dict(), secrets)
+        return self._redact_evaluation(
+            EvaluationView(
+                session_id=state.session_id,
+                ok=True,
+                status=(
+                    "**Preview** — nothing was run, nothing was written"
+                    + ("" if generate else ", and no model was called (retrieval only)")
+                    + "."
+                ),
+                cost_markdown=panels.evaluation_cost_markdown(payload),
+                cost_payload=payload,
+                preset_rows=self.evaluation_presets().preset_rows,
+                history_rows=self._evaluation_history_rows(state.session_id),
+            ),
+            secrets,
+        )
+
+    def run_evaluation(
+        self,
+        session_id: str | None,
+        *,
+        preset: str = "quick",
+        modes: Sequence[str] | None = None,
+        limit: int = 0,
+        dataset: str | None = None,
+        generate: bool = False,
+        render_plots: bool = True,
+        baseline_mode: str = "full_context",
+        token_counter: str = "estimate",
+    ) -> EvaluationView:
+        """Run the automated pipeline for this session and render its result.
+
+        Phase 17: the tab drives :func:`evaluation.pipeline.run_pipeline`, the
+        same entry point the CLI uses, so a browser run and a terminal run
+        produce the same artifacts and the same manifest. Generation uses the
+        visitor's session key (never an environment variable), and the run is
+        persisted through the same ``persist_run`` seam as the rest of the app.
+
+        A misconfigured request comes back as a readable status line rather than
+        an exception: a refusal is a normal outcome of a public tab.
+        """
+
+        state = self.ensure_session(session_id)
+        try:
+            result = self.evaluation.run(
+                session_id=state.session_id,
+                preset_name=preset,
+                modes=modes,
+                limit=limit,
+                dataset=dataset,
+                generate=generate,
+                render_plots=render_plots,
+                baseline_mode=baseline_mode,
+                token_counter=token_counter,
+                provider=self._evaluation_provider(state, generate),
+            )
+        except EvaluationRequestError as exc:
+            return self._evaluation_refusal(state, str(exc), ran=False)
+        payload = result.to_dict()
+        # The report is rendered separately (it is long); everything else in the
+        # payload is what the artifact/reproducibility panels read.
+        payload.pop("report_markdown", None)
+        secrets = self._secrets(state)
+        safe = self._redact(payload, secrets)
+        return self._redact_evaluation(
+            EvaluationView(
+                session_id=state.session_id,
+                status=result.status,
+                ok=result.ok,
+                ran=True,
+                cost_markdown=panels.evaluation_cost_markdown(
+                    self._redact(result.cost, secrets)
+                ),
+                preset_rows=self.evaluation_presets().preset_rows,
+                headline_rows=panels.evaluation_headline_rows(result.headline),
+                stage_rows=panels.evaluation_stage_rows(result.stages),
+                history_rows=self._evaluation_history_rows(state.session_id),
+                plots=list(result.plots),
+                report_markdown=result.report_markdown,
+                artifacts_markdown=panels.evaluation_artifact_markdown(safe),
+                repro_markdown=panels.evaluation_repro_markdown(safe),
+                repro=self._redact(result.repro, secrets),
+                rerun_command=result.pipeline_rerun_command,
+                report_path=result.report_path,
+                artifact_path=result.artifact_path,
+                summary=self._redact(payload.get("summary", {}), secrets),
+            ),
+            secrets,
+        )
+
+    def evaluation_history(self, session_id: str | None) -> EvaluationView:
+        """This session's runs, newest last (summaries only, never artifacts)."""
+
+        state = self.ensure_session(session_id)
+        records = self.evaluation.runs(state.session_id)
+        return EvaluationView(
+            session_id=state.session_id,
+            ok=True,
+            status=(
+                f"**{len(records)} run(s) in this session.** Press **End "
+                "session** to delete them with the rest of the session's data."
+                if records
+                else "No benchmark run in this session yet."
+            ),
+            history_rows=self._evaluation_history_rows(state.session_id),
+        )
+
+    def _evaluation_provider(
+        self, state: SessionState, generate: bool
+    ) -> ProviderConfig | None:
+        """The config a generated run uses — or ``None`` for retrieval-only.
+
+        Generation spends the visitor's own money, so it needs the key they
+        already entered for chat. Refusing here (rather than sending an
+        unauthenticated request) keeps the failure message about the missing
+        key, not about a provider's 401.
+        """
+
+        if not generate:
+            return None
+        provider = state.provider
+        if not str(provider.api_key or "").strip():
+            raise EvaluationRequestError(
+                "Generation needs an API key — enter one in the sidebar first, "
+                "or leave **Call my model** off for a retrieval-only run that "
+                "measures prompts, tokens, and retrieval without any spend."
+            )
+        return provider
+
+    def _evaluation_history_rows(self, session_id: str) -> list[list[Any]]:
+        return panels.evaluation_history_rows(
+            [record.to_dict() for record in self.evaluation.runs(session_id)]
+        )
+
+    def _evaluation_refusal(
+        self, state: SessionState, message: str, *, ran: bool = False
+    ) -> EvaluationView:
+        """A readable refusal, with the history still rendered.
+
+        The message is the runner's own (written for a visitor, never a path
+        outside the allowed roots or a credential), redacted once more here
+        because it is about to be shown in a browser.
+        """
+
+        return self._redact_evaluation(
+            EvaluationView(
+                session_id=state.session_id,
+                status=f"**Not run** — {message}",
+                ok=False,
+                ran=ran,
+                preset_rows=self.evaluation_presets().preset_rows,
+                history_rows=self._evaluation_history_rows(state.session_id),
+            ),
+            self._secrets(state),
+        )
+
+    def _redact_evaluation(
+        self, view: EvaluationView, secrets: tuple[str, ...]
+    ) -> EvaluationView:
+        """Belt-and-braces redaction of a rendered evaluation view.
+
+        The pipeline scans its own artifacts and the runner never puts a key in
+        one, but this object is what actually reaches the browser, so it goes
+        through the same ``sanitize_value`` pass as every other payload. Only
+        known fields are carried over: a value the sanitizer dropped stays
+        dropped rather than falling back to the unredacted original.
+        """
+
+        if not secrets:
+            return view
+        safe = sanitize_value(asdict(view), secrets=secrets)
+        known = {name for name in asdict(view)}
+        return EvaluationView(**{k: v for k, v in safe.items() if k in known})
 
     # ------------------------------------------------------------------ #
     # Export
@@ -716,6 +1013,12 @@ class UIController:
             "persistence": self._persistence_payload(state.session_id),
             "security": self._security_report_safe(service, state),
             "usage": self.usage_payload(state.session_id),
+            # Phase 17: a session that ran benchmarks exports their summaries —
+            # run ids, budgets, exit codes, artifact paths. Never a prompt, an
+            # answer, or a credential.
+            "evaluation_runs": [
+                record.to_dict() for record in self.evaluation.runs(state.session_id)
+            ],
         }
         return self._redact(payload, self._secrets(state))
 

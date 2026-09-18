@@ -11,12 +11,14 @@ backends and fake provider/runtime seams.
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
 
 import pytest
 
 from app.controller import UIController
 from brain.adapter import BrainOSAdapter
+from security.scan import SQLITE_SIDECAR_SUFFIXES
 from storage.conversations import ConversationMessage
 from storage.sqlite import SqliteConversationStore, SqliteMemoryStore
 from tests.fakes import FakeLLMProvider, FakeRuntime
@@ -48,6 +50,28 @@ def make_sqlite_controller(db: Path, api_key: str) -> tuple[UIController, str]:
     return controller, session_id
 
 
+def database_bytes(db: Path) -> bytes:
+    """Every byte this database owns: the file plus its WAL/journal sidecars.
+
+    Phase 14 runs SQLite in WAL mode, so committed rows can still be sitting in
+    ``<db>-wal`` and the main file can be one page long. Reading only the main
+    file made this test depend on *when the last connection happened to close*
+    (an auto-checkpoint merges the WAL then): it passed alone and failed after
+    unrelated tests, while the redaction it checks was correct in both cases.
+    Checkpointing first and reading the sidecars too removes the ordering
+    dependency and makes the claim stronger — no credential in any file this
+    database writes, which is also what ``security.scan`` now covers.
+    """
+
+    connection = sqlite3.connect(db)
+    try:
+        connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    finally:
+        connection.close()
+    files = [db, *(Path(f"{db}{suffix}") for suffix in SQLITE_SIDECAR_SUFFIXES)]
+    return b"".join(path.read_bytes() for path in files if path.exists())
+
+
 def test_raw_database_bytes_never_contain_the_session_key(db: Path) -> None:
     key = "sk-session-do-not-persist-777"
     controller, session_id = make_sqlite_controller(db, key)
@@ -56,7 +80,7 @@ def test_raw_database_bytes_never_contain_the_session_key(db: Path) -> None:
     controller.chat(session_id, f"My provider credential is {key} for this account.")
     controller.chat(session_id, "What is my provider credential?")
 
-    raw = db.read_bytes()
+    raw = database_bytes(db)
     assert key.encode() not in raw
     assert b"[redacted]" in raw  # the transcript stays, the key does not
 

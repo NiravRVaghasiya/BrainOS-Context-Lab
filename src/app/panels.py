@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping, Sequence
+from pathlib import Path
 from typing import Any
 
 from brain.adapter import MemoryRecord
@@ -51,6 +52,52 @@ RETRIEVED_MEMORY_COLUMNS: tuple[str, ...] = (
     "Flags",
 )
 DROPPED_MEMORY_COLUMNS: tuple[str, ...] = ("Reason", "Memory", "Score", "Detail")
+#: Phase 17: the Evaluation tab's tables. The preset table is the visitor's cost
+#: disclosure; the headline table is the plan's evaluation matrix, one row per
+#: (mode, trial); the stage table is what the automated pipeline actually did.
+PRESET_COLUMNS: tuple[str, ...] = (
+    "Preset",
+    "Max tasks",
+    "Modes",
+    "Trials",
+    "Planned requests",
+    "Max requests",
+    "Max input tokens",
+    "Max total tokens",
+    "Allowed",
+)
+EVALUATION_HEADLINE_COLUMNS: tuple[str, ...] = (
+    "Mode",
+    "Tasks",
+    "Graded",
+    "Accuracy",
+    "Recall@K",
+    "Evidence in prompt",
+    "Mean tokens",
+    "Reduction",
+    "Failures",
+    "Skips",
+)
+EVALUATION_STAGE_COLUMNS: tuple[str, ...] = (
+    "Stage",
+    "Status",
+    "Seconds",
+    "Artifacts",
+    "Detail",
+)
+EVALUATION_HISTORY_COLUMNS: tuple[str, ...] = (
+    "Run",
+    "Started (UTC)",
+    "Preset",
+    "Modes",
+    "Trials",
+    "Kind",
+    "Tasks",
+    "Requests",
+    "Tokens",
+    "Exit",
+    "Persisted",
+)
 #: Phase 6: the transcript chunks a non-BrainOS retriever put in the prompt
 #: (baseline Modes C/E). Shown separately from memory because they are a
 #: different kind of evidence — verbatim conversation, no supersession
@@ -753,6 +800,368 @@ def usage_summary(report: Mapping[str, Any]) -> str:
     return "\n".join(lines)
 
 
+# --------------------------------------------------------------------------- #
+# Phase 17: the Evaluation tab
+# --------------------------------------------------------------------------- #
+
+
+def evaluation_preset_rows(views: Sequence[Mapping[str, Any]]) -> list[list[Any]]:
+    """Rows for the run-preset table (what each budget allows, and whether it is).
+
+    Reads :meth:`app.evaluation.PresetView.to_dict` shapes. A ceiling of ``None``
+    renders as ``none`` rather than a blank cell, because "no ceiling" and "not
+    recorded" are different facts about a cost control.
+    """
+
+    rows: list[list[Any]] = []
+    for view in views:
+        if not isinstance(view, Mapping):
+            continue
+        limits = view.get("limits") if isinstance(view.get("limits"), Mapping) else {}
+        planned = view.get("planned_requests")
+        rows.append(
+            [
+                clip(str(view.get("label") or view.get("name") or ""), 40),
+                _int_or_text(limits.get("max_tasks")),
+                format_int(len(list(view.get("modes") or ()))),
+                format_int(view.get("trials")),
+                "unbounded" if planned is None else format_int(planned),
+                _int_or_text(limits.get("max_requests")),
+                _int_or_text(limits.get("max_input_tokens")),
+                _int_or_text(limits.get("max_total_tokens")),
+                "yes" if view.get("allowed", True) else "disabled by policy",
+            ]
+        )
+    return rows
+
+
+def evaluation_cost_markdown(preview: Mapping[str, Any] | None) -> str:
+    """What a run would cost, or — once it has run — what it did cost.
+
+    One renderer serves both, because they are the same table at two moments:
+    the preview shows the ``estimate_ceiling`` (Phase 15's carried constraint:
+    the ceiling is visible *before* anything is spent), and the receipt shows the
+    used numbers beside it. Keeping planned next to used is what lets a visitor
+    tell "this run was cheap" from "this run was cut short by a ceiling".
+
+    Input tokens are honestly unknown before the prompts are built; the preview
+    says so instead of guessing low, since a guessed number is the one a visitor
+    would hold the deployment to.
+    """
+
+    if not isinstance(preview, Mapping) or not preview:
+        return "_Choose a preset and press **Preview cost** to see what a run would spend._"
+
+    estimate = preview.get("estimate") if isinstance(preview.get("estimate"), Mapping) else {}
+    limits = preview.get("limits") if isinstance(preview.get("limits"), Mapping) else {}
+    used = preview.get("used") if isinstance(preview.get("used"), Mapping) else {}
+    executed = bool(preview.get("executed")) or bool(used)
+    labels = list(preview.get("mode_labels") or [])
+    generate = bool(preview.get("generate"))
+    heading = "### What this run cost" if executed else "### What this run would cost"
+    model_calls = (
+        "yes — with your session key" if generate else "no — retrieval only"
+    )
+    lines = [
+        heading,
+        "",
+        f"**{preview.get('label', '')}** — {preview.get('description', '')}",
+        "",
+        "| | Planned | Ceiling | Used |" if executed else "| | |",
+        "| --- | --- | --- | --- |" if executed else "| --- | --- |",
+    ]
+
+    def row(label: str, planned: Any, ceiling: Any = "—", spent: Any = "—") -> str:
+        if not executed:
+            return f"| {label} | {_cell(planned)} |"
+        return f"| {label} | {_cell(planned)} | {_cell(ceiling)} | {_cell(spent)} |"
+
+    lines.extend(
+        [
+            row("Tasks", preview.get("tasks_selected"), limits.get("max_tasks")),
+            row(
+                "Provider requests",
+                preview.get("planned_requests"),
+                limits.get("max_requests"),
+                used.get("requests"),
+            ),
+            # The input ceiling is per request — it is the one that makes a run
+            # *skip* a prompt — so it is labelled as such rather than sitting in
+            # the same column as run-level totals and reading like one.
+            row(
+                "Input tokens",
+                estimate.get("input_tokens"),
+                _per_request(limits.get("max_input_tokens")),
+                used.get("input_tokens"),
+            ),
+            row(
+                "Output tokens",
+                estimate.get("output_token_ceiling"),
+                None,
+                used.get("output_tokens"),
+            ),
+            row(
+                "Total tokens",
+                "—",
+                limits.get("max_total_tokens"),
+                used.get("total_tokens"),
+            ),
+            f"| Modes | {', '.join(str(label) for label in labels) or '—'} |",
+            f"| Trials | {format_int(preview.get('trials'))} |",
+            f"| Dataset | `{preview.get('dataset') or '—'}` |",
+            (
+                f"| Model calls | {model_calls} |"
+                if not executed
+                else f"| Credential | {preview.get('credential_source') or '—'} |"
+            ),
+            f"| Writes to | `{preview.get('output_dir', '—')}` |",
+            "",
+        ]
+    )
+    if executed:
+        within = bool(used.get("within_limits", True))
+        left_requests = format_int(used.get("remaining_requests"))
+        left_tokens = format_int(used.get("remaining_total_tokens"))
+        lines.extend(
+            [
+                (
+                    f"**Finished inside every ceiling** — {left_requests} "
+                    f"request(s) and {left_tokens} token(s) unused."
+                    if within
+                    else "**A ceiling was reached** — the run stopped early, so its "
+                    "metrics describe part of the dataset, not all of it."
+                ),
+                "",
+            ]
+        )
+        if format_int(used.get("skips")):
+            lines.append(
+                f"- {format_int(used.get('skips'))} request(s) skipped: a prompt "
+                "larger than the per-request ceiling is skipped, never truncated "
+                "and never sent."
+            )
+    warnings = list(preview.get("warnings") or [])
+    lines.extend(f"- {warning}" for warning in warnings)
+    if warnings:
+        lines.append("")
+    if not executed:
+        lines.append(
+            "_Ceilings, not estimates: the run stops at a limit instead of "
+            "promising to reach it, and a prompt larger than the per-request "
+            "ceiling is skipped rather than sent. **Your provider account is "
+            "billed directly.**_"
+        )
+    return "\n".join(lines)
+
+
+def _per_request(value: Any) -> str:
+    """A ceiling that applies to one request, labelled so it is not read as a total."""
+
+    return "—" if value is None else f"{format_int(value)} per request"
+
+
+def _cell(value: Any) -> str:
+    """One cost-table cell: a number, ``no ceiling``, or an honest sentence."""
+
+    if value is None or value == "":
+        return "—"
+    if isinstance(value, str):
+        return value if value != "—" else "—"
+    return format_int(value)
+
+
+def evaluation_headline_rows(headline: Sequence[Mapping[str, Any]]) -> list[list[Any]]:
+    """Rows for the results table.
+
+    Answer-side columns stay unset (``—``) for a mode that graded no answer: a
+    ``0.000`` there would read as "every answer was wrong" when no model was
+    asked anything, which is the convention every other surface in this
+    repository already follows.
+    """
+
+    rows: list[list[Any]] = []
+    for entry in headline:
+        if not isinstance(entry, Mapping):
+            continue
+        graded = format_int(entry.get("graded"))
+        answer_side = bool(graded)
+        trial = format_int(entry.get("trial"))
+        label = str(entry.get("mode_label") or entry.get("mode") or "")
+        if trial:
+            label = f"{label} (t{trial})"
+        rows.append(
+            [
+                clip(label, 60),
+                graded,
+                graded,
+                round_value(entry.get("accuracy")) if answer_side else "—",
+                round_value(entry.get("recall")),
+                round_value(entry.get("evidence_in_prompt")),
+                round_value(entry.get("mean_context_tokens"), digits=1),
+                format_percent(entry.get("mean_reduction"))
+                if entry.get("mean_reduction") is not None
+                else "—",
+                format_int(entry.get("failures")),
+                format_int(entry.get("skips")),
+            ]
+        )
+    return rows
+
+
+def evaluation_stage_rows(stages: Sequence[Mapping[str, Any]]) -> list[list[Any]]:
+    """Rows for the pipeline-stage table, including skipped and failed stages."""
+
+    rows: list[list[Any]] = []
+    for stage in stages:
+        if not isinstance(stage, Mapping):
+            continue
+        artifacts = [Path(str(item)).name for item in stage.get("artifacts") or ()]
+        rows.append(
+            [
+                str(stage.get("name", "")),
+                str(stage.get("status", "")),
+                round_value(stage.get("duration_seconds"), digits=2),
+                clip(", ".join(artifacts) or "—", 160),
+                clip(str(stage.get("detail") or stage.get("error") or ""), _MAX_CELL_CHARS),
+            ]
+        )
+    return rows
+
+
+def evaluation_history_rows(records: Sequence[Mapping[str, Any]]) -> list[list[Any]]:
+    """Rows for this session's run history (summaries only, never artifacts).
+
+    Reads :meth:`app.evaluation.RunRecord.to_dict` shapes. The run id is clipped
+    to its first eight characters: the full id is in the manifest, and a table
+    cell is not where anyone wants to copy a UUID from.
+    """
+
+    rows: list[list[Any]] = []
+    for record in records:
+        if not isinstance(record, Mapping):
+            continue
+        rows.append(
+            [
+                str(record.get("run_id", ""))[:8],
+                short_timestamp(record.get("timestamp")),
+                str(record.get("preset", "")),
+                clip(", ".join(str(mode) for mode in record.get("modes") or ()), 80),
+                format_int(record.get("trials")),
+                "dry" if record.get("dry_run") else "generated",
+                format_int(record.get("tasks")),
+                format_int(record.get("requests")),
+                format_int(record.get("total_tokens")),
+                format_int(record.get("exit_code")),
+                "yes" if record.get("persisted") else "no",
+            ]
+        )
+    return rows
+
+
+def evaluation_artifact_markdown(payload: Mapping[str, Any] | None) -> str:
+    """Where a run wrote, what the guards said, and whether it is reproducible."""
+
+    if not isinstance(payload, Mapping) or not payload:
+        return ""
+    summary = payload.get("summary") if isinstance(payload.get("summary"), Mapping) else {}
+    layout = summary.get("layout") if isinstance(summary.get("layout"), Mapping) else {}
+    check = (
+        summary.get("credential_check")
+        if isinstance(summary.get("credential_check"), Mapping)
+        else {}
+    )
+    report_scan = check.get("report_scan") if isinstance(check.get("report_scan"), Mapping) else {}
+    security = summary.get("security") if isinstance(summary.get("security"), Mapping) else {}
+    findings = format_int(check.get("finding_count")) + format_int(report_scan.get("finding_count"))
+    scanned = format_int(check.get("files_scanned")) + format_int(report_scan.get("files_scanned"))
+    guard_totals = security.get("totals") if isinstance(security.get("totals"), Mapping) else {}
+    lines = [
+        "### Artifacts",
+        "",
+        "| Directory | Path |",
+        "| --- | --- |",
+    ]
+    for name in ("raw", "aggregated", "plots", "report"):
+        lines.append(f"| {name} | `{layout.get(name) or '—'}` |")
+    lines.extend(
+        [
+            "",
+            f"Report: `{payload.get('report_path') or '—'}` · manifest: "
+            f"`{payload.get('artifact_path') or '—'}`",
+            "",
+            f"Prompt guard: {format_int(security.get('record_count'))} record(s), "
+            f"{format_int(security.get('records_with_findings'))} with findings, "
+            f"{format_int(security.get('quarantined'))} quarantined"
+            + (
+                " (" + ", ".join(f"{k}={v}" for k, v in sorted(guard_totals.items())) + ")"
+                if guard_totals
+                else " — no guard fired"
+            ),
+            "",
+            f"Artifact credential scan: {scanned} file(s), {findings} finding(s).",
+            "",
+            (
+                "Persisted to this session's evaluation store — **End session** "
+                "deletes it."
+                if payload.get("persisted")
+                else "Not persisted (this deployment has no evaluation store)."
+            ),
+        ]
+    )
+    return "\n".join(lines)
+
+
+def evaluation_repro_markdown(payload: Mapping[str, Any] | None) -> str:
+    """The manifest, rendered as "how to re-run this" (Phase 16's constraint)."""
+
+    if not isinstance(payload, Mapping) or not payload:
+        return ""
+    repro = payload.get("repro") if isinstance(payload.get("repro"), Mapping) else {}
+    if not repro:
+        return ""
+    dataset = repro.get("dataset") if isinstance(repro.get("dataset"), Mapping) else {}
+    lines = [
+        "### Reproducibility",
+        "",
+        "| | |",
+        "| --- | --- |",
+        f"| Application | `{repro.get('application_version') or '—'}` |",
+        f"| BrainOS | `{repro.get('brainos_version') or '—'}` |",
+        f"| Benchmark | `{repro.get('benchmark_version') or '—'}` |",
+        f"| Dataset | `{dataset.get('path') or '—'}` |",
+        f"| Dataset SHA-256 | `{str(dataset.get('sha256') or '')[:16]}…` |",
+        f"| Task ids recorded | {format_int(repro.get('task_count'))} |",
+        f"| Provider / model | `{repro.get('provider') or '—'}` / `{repro.get('model') or '—'}` |",
+        "",
+        "Re-run the whole pipeline:",
+        "",
+        "```bash",
+        str(payload.get("pipeline_rerun_command") or "# not recorded"),
+        "```",
+    ]
+    single = str(payload.get("rerun_command") or "")
+    if single:
+        lines.extend(["", "Re-derive one mode's raw run file:", "", "```bash", single, "```"])
+    lines.extend(
+        [
+            "",
+            "_No artifact contains a credential: the manifest records the name of "
+            "the credential route, never a value._",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _int_or_text(value: Any) -> str:
+    """Render a ceiling that may be a number, ``None``, or an honest sentence."""
+
+    if value is None:
+        return "no ceiling"
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return format_int(value)
+    return str(value)
+
+
 def _iter_dropped(report: Mapping[str, Any]) -> list[Mapping[str, Any]]:
     dropped = report.get("dropped") if isinstance(report, Mapping) else None
     if not isinstance(dropped, list):
@@ -773,6 +1182,10 @@ __all__ = [
     "SECURITY_COLUMNS",
     "CONFLICT_COLUMNS",
     "DROPPED_MEMORY_COLUMNS",
+    "EVALUATION_HEADLINE_COLUMNS",
+    "EVALUATION_HISTORY_COLUMNS",
+    "EVALUATION_STAGE_COLUMNS",
+    "PRESET_COLUMNS",
     "RETRIEVED_MEMORY_COLUMNS",
     "STORED_MEMORY_COLUMNS",
     "chunk_rows",
@@ -780,6 +1193,13 @@ __all__ = [
     "conflict_rows",
     "context_summary",
     "dropped_rows",
+    "evaluation_artifact_markdown",
+    "evaluation_cost_markdown",
+    "evaluation_headline_rows",
+    "evaluation_history_rows",
+    "evaluation_preset_rows",
+    "evaluation_repro_markdown",
+    "evaluation_stage_rows",
     "export_payload",
     "format_int",
     "format_percent",

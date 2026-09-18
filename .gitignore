@@ -30,6 +30,8 @@ results/raw/*
 results/aggregated/*
 results/plots/*
 results/report/*
+# Phase 17: the Evaluation tab writes session-scoped runs under results/ui/.
+results/ui/*
 !results/.gitkeep
 
 # IDE and OS files

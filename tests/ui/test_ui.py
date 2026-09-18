@@ -21,7 +21,7 @@ from app.controller import UIController
 from app.ui import create_app
 from baselines.modes import RECENT_WINDOW_TURNS
 from brain.adapter import BrainOSAdapter
-from tests.fakes import FakeLLMProvider, LooseFakeRuntime
+from tests.fakes import FakeLLMProvider, InMemoryEvaluationStore, LooseFakeRuntime
 
 KEY = "sk-ui-SECRET-0002"
 
@@ -41,8 +41,9 @@ def test_app_builds_and_registers_every_callback() -> None:
     demo = create_app(_controller())
 
     # 11 widget callbacks (Phase 6 adds the baseline-mode selector) plus the
-    # per-page session bootstrap and 4 Phase 15 cost-control widget callbacks.
-    assert len(demo.fns) == 16
+    # per-page session bootstrap, 4 Phase 15 cost-control widget callbacks, and
+    # the 3 Phase 17 Evaluation-tab callbacks (preview, run, history).
+    assert len(demo.fns) == 19
     assert any(block_fn.targets == [(0, "load")] for block_fn in demo.fns.values())
     assert any(
         block_fn.targets and block_fn.targets[0][1] == "change"
@@ -206,3 +207,208 @@ def test_the_security_tab_is_wired_into_every_panel_callback() -> None:
     assert report["by_route"]["history"] >= 1
     assert report["session_id"] == sid
     assert KEY not in str(values), "no panel value may carry the session key"
+
+
+# --------------------------------------------------------------------------- #
+# Phase 17: the Evaluation tab
+# --------------------------------------------------------------------------- #
+
+
+def _evaluation_controller(tmp_path: Path) -> UIController:
+    """A controller whose benchmark runs write into ``tmp_path``, not the repo.
+
+    The tab writes real files, so a UI test that ran one against the default
+    ``results/`` root would leave artifacts in the checkout — the same reason the
+    runner takes a ``results_root`` at all.
+    """
+
+    from app.evaluation import UIEvaluationRunner
+
+    controller = _controller()
+    controller.evaluation = UIEvaluationRunner(
+        results_root=tmp_path / "results",
+        evaluation_store=InMemoryEvaluationStore(),
+        provider_factory=FakeLLMProvider,
+    )
+    return controller
+
+
+def test_evaluation_tab_builds_with_the_preset_catalogue(tmp_path: Path) -> None:
+    from app.panels import PRESET_COLUMNS
+    from app.ui import EVALUATION_MARKDOWN, EvaluationComponents
+
+    controller = _evaluation_controller(tmp_path)
+    demo = create_app(controller)
+    catalogue = controller.evaluation_presets()
+
+    assert demo is not None
+    assert len(catalogue.preset_rows) == 3
+    assert all(len(row) == len(PRESET_COLUMNS) for row in catalogue.preset_rows)
+    assert "ceiling" in catalogue.status
+    # The tab's own copy says what the defaults are, so a visitor who never
+    # presses a button still learns that generation spends their key.
+    assert "retrieval-only" in EVALUATION_MARKDOWN.lower()
+    assert "End session" in EVALUATION_MARKDOWN
+    assert len(EvaluationComponents.order) == 12
+
+
+def _form(
+    session_id: str | None = None,
+    *,
+    preset: str = "quick",
+    modes: list[str] | None = None,
+    limit: int = 1,
+    dataset: str | None = None,
+    generate: bool = False,
+    render_plots: bool = False,
+    baseline: str = "full_context",
+    counter: str = "estimate",
+) -> tuple[object, ...]:
+    """The Evaluation tab's run form, in the order the callbacks read it.
+
+    Preview and run share this list on purpose (see
+    :class:`app.ui.EvaluationComponents`), so one helper builds both.
+    """
+
+    return (
+        preset,
+        modes or [],
+        limit,
+        dataset,
+        generate,
+        render_plots,
+        baseline,
+        counter,
+        session_id,
+    )
+
+
+def test_evaluation_callbacks_return_one_value_per_declared_output(
+    tmp_path: Path,
+) -> None:
+    from app.ui import (
+        EvaluationComponents,
+        _evaluation_history,
+        _evaluation_preview,
+        _evaluation_run,
+    )
+
+    controller = _evaluation_controller(tmp_path)
+    demo = create_app(controller)
+    declared = {(len(fn.inputs), len(fn.outputs)) for fn in demo.fns.values()}
+
+    preview = _evaluation_preview(controller)(*_form())
+    # The last value is the session id, threaded back through gr.State: with no
+    # session yet, the first callback starts one and the rest must join it
+    # rather than each starting their own.
+    session_id = preview[-1]
+    run = _evaluation_run(controller)(*_form(session_id))
+    history = _evaluation_history(controller)(session_id)
+
+    assert len(preview) == len(run) == len(history) == len(EvaluationComponents.order) + 1
+    assert (9, len(preview)) in declared
+    assert (1, len(history)) in declared
+    assert session_id
+    assert run[-1] == history[-1] == session_id
+    assert len(history[9]) == 1, "the run the previous callback made is this session's"
+
+
+def test_preview_callback_shows_a_ceiling_and_writes_nothing(tmp_path: Path) -> None:
+    from app.ui import _evaluation_preview
+
+    controller = _evaluation_controller(tmp_path)
+
+    values = _evaluation_preview(controller)(*_form(limit=2))
+
+    status, cost, presets, headline = values[0], values[1], values[2], values[3]
+    assert "Preview" in status
+    assert "What this run would cost" in cost
+    assert "Provider requests" in cost
+    assert "unknown before the prompts are built" in cost
+    assert presets and not headline
+    assert list((tmp_path / "results").rglob("*.json")) == []
+
+
+def test_run_callback_feeds_the_tables_the_figures_and_the_report(
+    tmp_path: Path,
+) -> None:
+    pytest.importorskip("matplotlib", reason="figures need matplotlib")
+    from app.panels import (
+        EVALUATION_HEADLINE_COLUMNS,
+        EVALUATION_STAGE_COLUMNS,
+    )
+    from app.ui import _evaluation_run
+
+    controller = _evaluation_controller(tmp_path)
+
+    values = _evaluation_run(controller)(
+        *_form(modes=["full_context", "rag"], render_plots=True)
+    )
+    status, cost, presets, headline, stages, gallery = values[:6]
+    report, artifacts, repro, history, downloads, payload = values[6:12]
+
+    assert "Pipeline finished" in status
+    assert "What this run cost" in cost
+    assert len(presets) == 3
+    assert all(len(row) == len(EVALUATION_HEADLINE_COLUMNS) for row in headline)
+    assert [row[0] for row in headline] == ["Mode A — Full context", "Mode C — Lexical RAG"]
+    assert all(len(row) == len(EVALUATION_STAGE_COLUMNS) for row in stages)
+    assert gallery and all(Path(path).is_file() for path in gallery)
+    assert "# BrainOS Context Lab — evaluation report" in report
+    assert "### Artifacts" in artifacts and "### Reproducibility" in repro
+    assert len(history) == 1
+    assert downloads and all(Path(path).is_file() for path in downloads)
+    assert payload["tasks_executed"] == 1
+
+
+def test_run_callback_reports_a_refusal_instead_of_raising(tmp_path: Path) -> None:
+    from app.ui import _evaluation_run
+
+    controller = _evaluation_controller(tmp_path)
+
+    values = _evaluation_run(controller)(*_form(limit=0, dataset="/etc/passwd"))
+
+    assert values[0].startswith("**Not run**")
+    assert "must stay inside" in values[0]
+    assert list(tmp_path.rglob("*.json")) == []
+
+
+def test_run_callback_refuses_generation_without_a_connected_key(tmp_path: Path) -> None:
+    from app.ui import _evaluation_run
+
+    controller = _evaluation_controller(tmp_path)
+
+    values = _evaluation_run(controller)(*_form(generate=True))
+
+    assert values[0].startswith("**Not run**")
+    assert "API key" in values[0]
+
+
+def test_history_callback_reports_a_fresh_session(tmp_path: Path) -> None:
+    from app.ui import _evaluation_history
+
+    controller = _evaluation_controller(tmp_path)
+
+    values = _evaluation_history(controller)(None)
+
+    assert "No benchmark run in this session yet." in values[0]
+    assert values[9] == []
+
+
+def test_the_evaluation_tab_never_renders_the_session_key(tmp_path: Path) -> None:
+    from app.ui import _evaluation_run
+
+    controller = _evaluation_controller(tmp_path)
+    sid = controller.connect(
+        None, provider="openai", model="gpt-4o-mini", api_key=KEY
+    ).session_id
+
+    values = _evaluation_run(controller)(*_form(sid, generate=True))
+
+    assert "Pipeline finished" in values[0]
+    assert KEY not in json.dumps(values, default=str)
+    assert KEY not in "".join(
+        Path(path).read_text(encoding="utf-8", errors="ignore")
+        for path in tmp_path.rglob("*")
+        if path.is_file()
+    )

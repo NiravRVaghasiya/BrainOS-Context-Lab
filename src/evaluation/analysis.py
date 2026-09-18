@@ -665,9 +665,213 @@ def length_curve_rows(runs: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]
     return list(plot_series(list(runs))["accuracy_vs_length"])
 
 
+# --------------------------------------------------------------------------- #
+# Phase 17: failure-distribution comparison
+# --------------------------------------------------------------------------- #
+
+
+def total_variation_distance(
+    left: Mapping[str, float], right: Mapping[str, float], vocabulary: Sequence[str]
+) -> float | None:
+    """Half the L1 distance between two distributions over ``vocabulary``.
+
+    ``0.0`` means the two mixes are identical, ``1.0`` means they share no label.
+    Returns ``None`` when either side is not a distribution (empty or negative
+    mass), because a distance to nothing is not a small distance — it is no
+    distance at all.
+
+    Shares are re-normalized over ``vocabulary`` so a label present in one mode's
+    report and absent from the other's is counted as ``0.0`` rather than ignored,
+    which is the whole point of comparing over a fixed support.
+    """
+
+    keys = [str(label) for label in vocabulary]
+    if not keys:
+        return None
+    left_total = sum(max(0.0, float(left.get(key, 0.0) or 0.0)) for key in keys)
+    right_total = sum(max(0.0, float(right.get(key, 0.0) or 0.0)) for key in keys)
+    if left_total <= 0.0 or right_total <= 0.0:
+        return None
+    distance = 0.0
+    for key in keys:
+        left_share = max(0.0, float(left.get(key, 0.0) or 0.0)) / left_total
+        right_share = max(0.0, float(right.get(key, 0.0) or 0.0)) / right_total
+        distance += abs(left_share - right_share)
+    return round(distance / 2.0, 6)
+
+
+def compare_error_distributions(
+    report: Mapping[str, Any], *, baseline_mode: str = ""
+) -> dict[str, Any]:
+    """Compare how modes fail, rather than how often (plan Phase 12 → Phase 17).
+
+    Phase 12's carried constraint for this phase is explicit: *"Phase 17 must run
+    this report over generated answers and compare distributions, not
+    accuracies."* Two modes can share an accuracy and fail in entirely different
+    ways — one losing evidence at selection, another keeping a superseded fact in
+    the prompt — and the accuracy column cannot tell them apart. This function is
+    the comparison that can.
+
+    It reads a Phase 12 :func:`evaluation.errors.error_report` artifact and never
+    re-grades anything: label counts come from ``by_mode[*].label_counts``, volume
+    from ``defect_count`` / ``graded_count`` / ``failure_rate``.
+
+    The distance is total variation over the taxonomy's own fixed vocabulary, so
+    it describes the *shape* of a mode's failures. It is deliberately **not** a
+    significance test: with a handful of failure records a distance of 0.5 says
+    "a different mix", not "a reliably different mix", and the interpretation
+    string says so.
+    """
+
+    by_mode = report.get("by_mode") if isinstance(report.get("by_mode"), Mapping) else {}
+    taxonomy = report.get("taxonomy") if isinstance(report.get("taxonomy"), Mapping) else {}
+    declared = taxonomy.get("labels")
+    seen = sorted(
+        {
+            str(label)
+            for block in by_mode.values()
+            if isinstance(block, Mapping)
+            for label in (block.get("label_counts") or {})
+        }
+    )
+    vocabulary = [str(label) for label in (declared or ())] or seen
+    # A label the taxonomy declares but no mode produced still belongs to the
+    # support: its absence is the finding, and dropping it would compare two
+    # different vocabularies.
+    vocabulary = sorted(set(vocabulary) | set(seen))
+
+    modes: dict[str, Any] = {}
+    for mode, block in sorted(by_mode.items()):
+        if not isinstance(block, Mapping):
+            continue
+        counts = {
+            str(label): int(value or 0)
+            for label, value in (block.get("label_counts") or {}).items()
+        }
+        defects = int(block.get("defect_count", 0) or 0)
+        total = sum(counts.get(label, 0) for label in vocabulary)
+        modes[str(mode)] = {
+            "mode_label": mode_label(str(mode)),
+            "defect_count": defects,
+            "graded_count": int(block.get("graded_count", 0) or 0),
+            "failure_rate": block.get("failure_rate"),
+            "observed_failure_count": int(block.get("observed_failure_count", 0) or 0),
+            "latent_defect_count": int(block.get("latent_defect_count", 0) or 0),
+            "evidence_lost_count": int(block.get("evidence_lost_count", 0) or 0),
+            "label_counts": {label: counts.get(label, 0) for label in vocabulary},
+            "shares": {
+                label: round(counts.get(label, 0) / total, 6) if total else 0.0
+                for label in vocabulary
+            },
+            "label_total": total,
+            "top_label": (
+                max(vocabulary, key=lambda label: (counts.get(label, 0), label))
+                if total
+                else None
+            ),
+        }
+
+    resolved_baseline, selection = _resolve_baseline(baseline_mode, tuple(modes))
+    pairs: list[dict[str, Any]] = []
+    baseline_counts = (modes.get(resolved_baseline) or {}).get("label_counts") or {}
+    # A baseline's distance to itself is exactly zero, not "unknown": rendering
+    # it as a gap would invite the question the number already answers.
+    if resolved_baseline in modes:
+        modes[resolved_baseline]["total_variation_vs_baseline"] = 0.0
+    for mode, block in modes.items():
+        if mode == resolved_baseline:
+            continue
+        distance = total_variation_distance(baseline_counts, block["label_counts"], vocabulary)
+        block["total_variation_vs_baseline"] = distance
+        divergent = _largest_divergence(baseline_counts, block["label_counts"], vocabulary)
+        pairs.append(
+            {
+                "mode": mode,
+                "mode_label": block["mode_label"],
+                "baseline_mode": resolved_baseline,
+                "total_variation_distance": distance,
+                "comparable": distance is not None,
+                "largest_divergence": divergent,
+                "note": (
+                    ""
+                    if distance is not None
+                    else (
+                        "No failure records on one side: a distribution over zero "
+                        "records is not a distribution, so no distance is reported."
+                    )
+                ),
+            }
+        )
+    for block in modes.values():
+        block.setdefault("total_variation_vs_baseline", None)
+
+    return {
+        "vocabulary": vocabulary,
+        "baseline_mode": resolved_baseline,
+        "baseline_selection": selection,
+        "metric": "total_variation_distance",
+        "modes": modes,
+        "pairs": pairs,
+        "interpretation": (
+            "Shares describe the *mix* of a mode's failure labels, not how often "
+            "it fails; `defect_count` / `graded_count` / `failure_rate` carry the "
+            "volume. Total variation is 0 for an identical mix and 1 for a "
+            "disjoint one, over the taxonomy's fixed vocabulary. It is a "
+            "description, not a significance test: on a smoke tier a large "
+            "distance can be one record."
+        ),
+    }
+
+
+def _resolve_baseline(requested: str, modes: Sequence[str]) -> tuple[str, str]:
+    """Pick the distribution baseline, recording why."""
+
+    wanted = str(requested or "").strip()
+    if wanted:
+        if wanted in modes:
+            return wanted, "explicit"
+        if modes:
+            return modes[0], f"requested:{wanted} (absent, fell back to {modes[0]})"
+        return wanted, f"requested:{wanted} (no modes reported)"
+    if "full_context" in modes:
+        return "full_context", "default:full_context"
+    if modes:
+        return modes[0], f"first:{modes[0]}"
+    return "", "none"
+
+
+def _largest_divergence(
+    baseline: Mapping[str, int], other: Mapping[str, int], vocabulary: Sequence[str]
+) -> dict[str, Any]:
+    """Return the label whose share differs most from the baseline's."""
+
+    baseline_total = sum(int(baseline.get(label, 0) or 0) for label in vocabulary)
+    other_total = sum(int(other.get(label, 0) or 0) for label in vocabulary)
+    if not baseline_total or not other_total:
+        return {}
+    best: dict[str, Any] = {}
+    best_gap = -1.0
+    for label in vocabulary:
+        left = int(baseline.get(label, 0) or 0) / baseline_total
+        right = int(other.get(label, 0) or 0) / other_total
+        gap = abs(left - right)
+        if gap > best_gap:
+            best_gap = gap
+            best = {
+                "label": label,
+                "baseline_share": round(left, 6),
+                "mode_share": round(right, 6),
+                "difference": round(right - left, 6),
+            }
+    # Two identical mixes have no "largest divergence": naming a label whose share
+    # differs by exactly zero would read as a finding where there is none.
+    return best if best_gap > 0.0 else {}
+
+
 __all__ = [
     "HEADLINE_KEYS",
     "STATISTICAL_METRICS",
+    "compare_error_distributions",
     "compare_modes_paired",
     "compare_runs",
     "extract_mode_result_items",
@@ -678,4 +882,5 @@ __all__ = [
     "statistical_analysis",
     "statistical_plot_series",
     "summarize_trial_modes",
+    "total_variation_distance",
 ]

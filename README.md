@@ -8,7 +8,7 @@ This repository integrates BrainOS as an upstream dependency. It does **not** mo
 
 ## Current status
 
-Phases 1–16 are complete and validated against the pinned BrainOS runtime. The
+Phases 1–17 are complete and validated against the pinned BrainOS runtime. The
 app persists conversations and memory mirrors to SQLite with hard session
 isolation, offers the full data-control set (clear conversation, clear memory,
 export session, end/delete session), can run the same conversation through all
@@ -22,9 +22,12 @@ time, turns the scored records into a structured failure taxonomy, guards
 every route untrusted text takes into a prompt — with the guard's own findings
 reported in the UI, in exports, and in evaluation artifacts, enforces
 per-request and per-session cost ceilings on the chat path so a public BYOK
-deployment cannot run away, and stamps every run with a reproducibility
+deployment cannot run away, stamps every run with a reproducibility
 manifest (versions, environment, task ids, dataset digest, and a re-run
-command) so a result can be re-derived and re-inspected.
+command) so a result can be re-derived and re-inspected, and runs the whole
+benchmark end to end — controlled experiment, raw run files, aggregates,
+statistics, failure taxonomy, figures, and a rendered report — from one command
+or one button in the browser.
 
 - **Phase 1** maps the provider abstraction (OpenAI and OpenAI-compatible)
   behind `LLMProvider`, with secret-safe errors and diagnostics.
@@ -123,16 +126,32 @@ command) so a result can be re-derived and re-inspected.
   identifiers that echo the session key. A latent split-vocabulary bug — the
   runner/experiment recorded `context_rot-v1` where the dataset generator
   pins `context-rot-v1` — is fixed and pinned by a test.
+- **Phase 17** automates the evaluation: `python -m evaluation.pipeline` runs
+  the seven stages (`experiment → raw → comparison → statistics → errors →
+  plots → report`) into the plan's `results/{raw,aggregated,plots,report}`
+  layout, records a `StageResult` per stage, and exits non-zero when the
+  comparison is uncontrolled (2), when a ceiling truncated the run (3), or when
+  the pipeline is incomplete or a credential reached an artifact (4). Its
+  credential scan does not just report: implicated files inside the run's own
+  output directory are **quarantined** (deleted, with a `QUARANTINED.txt` and a
+  `## Quarantine` report section left behind), because a detected key that stays
+  on disk is a key that leaked. The same pipeline drives a full-width
+  **Evaluation** tab — preset catalogue, a cost preview that renders
+  `estimate_ceiling` *before* anything can be spent, the run itself, figures, the
+  rendered report, per-session history, and optional generation with the
+  visitor's own sidebar key (never an environment variable). `EvaluationPolicy`
+  lets a deployment narrow what the tab offers; `End session` deletes the
+  session's persisted rows *and* its artifacts.
 
 A session-scoped `ConversationService` combines the adapter, the retrieval
 policy, the context builder, and the provider factory. Deterministic fakes cover
 the whole pipeline without BrainOS installed; optional live tests exercise the
-pinned runtime. 1070 tests pass and `ruff check .` is clean repository-wide.
+pinned runtime. 1179 tests pass and `ruff check .` is clean repository-wide.
 
 Chat is usable without an API key: BrainOS still observes and retrieves memory,
 and the panels show exactly what the model *would* have been sent. See
 [`CONTEXT.md`](CONTEXT.md) for the living implementation state and the Phase
-0–16 logs in `docs/`.
+0–17 logs in `docs/`.
 
 ### Measured behaviour so far
 
@@ -206,9 +225,33 @@ while removing memory collapses evidence to zero with the window held
 constant. D1/D3 are byte-identical to full: one short session gives recency
 and retrieval-stage conflict handling nothing to decide.
 
+Phase 17 then ran the whole benchmark through one command — two tasks of the
+committed smoke tier, three modes, no provider:
+
+```text
+stage       status  detail
+experiment  ok      2/7 task(s) × 3 mode(s) × 1 trial(s); dry run; 0 violations
+raw         ok      3 run file(s) in the Phase 6/7 schema, each with its own repro manifest
+comparison  ok      3 mode row(s), 6 plot series
+statistics  ok      12 paired comparison(s) against `full_context`; one trial, intervals degenerate
+errors      ok      1 failure record(s) (0 observed, 1 latent); labels_vs_scorer.unexpected=0
+plots       ok      6 figure(s)
+report      ok      15347 characters rendered from the pipeline artifact
+
+  full_context  graded=0 accuracy=—  tokens=1226.5 reduction=0.000
+  rag           graded=0 accuracy=—  tokens=281.0  reduction=0.771
+  brainos       graded=0 accuracy=—  tokens=191.0  reduction=0.843
+credential scan: files=16 findings=0 clean=True · exit_code=0
+```
+
+16 files across `results/{raw,aggregated,plots,report}`, and `accuracy=—` rather
+than `0.000` because no model was asked anything: an ungraded answer-side metric
+is unset, not zero.
+
 **Integration-validation observations, not research results**: one seed, one
 length tier, an estimated token counter, and no model in the loop — answer
-accuracy is only measurable once real generations are graded.
+accuracy is only measurable once real generations are graded. Every number in
+this README came from a dry run or a deterministic fake.
 
 ## Repository layout
 
@@ -216,7 +259,8 @@ accuracy is only measurable once real generations are graded.
 app.py                         # Local/Hugging Face Space entry point
 pyproject.toml                 # Package metadata and optional dependencies
 src/
-  app/                         # UI, controller, session lifecycle, service, and state
+  app/                         # UI, controller, session lifecycle, service, state,
+                               #   and the Phase 17 Evaluation-tab runner
   baselines/                   # Phase 6 baseline modes A-E, the BrainOS-free
                                #   lexical retriever Mode C/E use, and the
                                #   Phase 11 ablation profiles (D1-D4)
@@ -228,7 +272,8 @@ src/
                                #   and the artifact credential scanner (CLI)
   storage/                     # Conversation and evaluation persistence
   evaluation/                  # Benchmark runners, mode strategies, metrics,
-                               #   reports, and the Phase 12 error taxonomy
+                               #   reports, the Phase 12 error taxonomy, and the
+                               #   Phase 17 automated pipeline (CLI)
   reproducibility/             # Phase 16: the §22 run manifest, version reads,
                                #   rerun command, and persistence seam
 benchmarks/
@@ -237,7 +282,9 @@ benchmarks/
 docs/                          # Architecture, integration, evaluation, threat
                                #   model, security controls, and per-phase logs
 tests/                         # Unit, integration, security, and evaluation tests
-results/                       # Generated results (not committed by default)
+results/                       # Generated results (not committed by default):
+                               #   raw/ aggregated/ plots/ report/, plus ui/ for
+                               #   the Evaluation tab's session-scoped runs
 ```
 
 ## Local setup
@@ -263,9 +310,12 @@ box is cleared immediately, and **Forget key** drops it at any time. Without a
 key the app still observes, retrieves, and builds context — the panels show the
 exact prompt, but no model is called.
 
-The five tabs are Chat, Memory (stored / in-prompt / filtered-out / conflicts),
-Context (summary, statistics, final prompt), Cognitive Trace, and Evaluation
-(placeholder until Phase 17).
+The tabs are Chat, Memory (stored / in-prompt / filtered-out / conflicts),
+Context (summary, statistics, final prompt), Cognitive Trace, Security, Usage,
+and — below the chat row, full width — **Evaluation**: pick a preset, preview
+what it would cost, and run the benchmark. Retrieval-only by default (free, no
+key, no prompts sent); tick **Call my model** to generate answers with the key
+from the sidebar, billed by your provider and bounded by the preset's ceilings.
 
 The upstream BrainOS revision is pinned and the Phase 2 adapter mapping is
 wired. Install the optional integration extra to use the live runtime:
@@ -343,6 +393,24 @@ python -m security.scan results/ data/brainos_lab.sqlite3 --secrets-env OPENAI_A
 # Phase 16: inspect a run's reproducibility manifest and exact re-run command
 python -m evaluation.run --mode brainos --limit 1 --output results/run.json
 python -c "import json; print(json.load(open('results/run.json'))['repro']['rerun_command'])"
+
+# Phase 17: the whole §23 layout in one command. A dry run needs no key — it
+# builds every prompt, measures tokens, runs retrieval, compares modes, runs the
+# statistics and the failure taxonomy, renders six figures, and writes the report.
+python -m evaluation.pipeline --dry-run --limit 2 --output-dir results/phase17-dry
+#   → results/phase17-dry/{raw,aggregated,plots,report}/  (exit 0, scan clean)
+
+# A generated run reads the credential from the environment variable it names.
+python -m evaluation.pipeline --preset research --modes all --provider openai \
+  --model gpt-4o-mini --api-key-env OPENAI_API_KEY --baseline-mode full_context \
+  --output-dir results/phase17-research
+
+# A stage subset pulls in the stages it is made of, and the report then says
+# which stages ran ("Partial pipeline — Only these stages ran: …").
+python -m evaluation.pipeline --dry-run --stages report --output-dir results/p17
+
+# Exit codes: 0 complete · 2 uncontrolled comparison · 3 stopped at a cost
+# ceiling · 4 a stage failed or a credential reached an artifact (quarantined).
 ```
 
 `--session-isolation` replays each transcript session separately, which is how
@@ -352,6 +420,9 @@ as a first cost control; the full Phase 15 run budgets (`quick` / `standard` /
 `research` presets, per-request and per-run ceilings) apply on top of it once
 `--generate` sends prompts to a model. Every run artifact also carries a
 `repro` manifest — versions, task ids, dataset digest, and a `rerun_command`.
+`python -m evaluation.pipeline` composes all of the above and writes the same
+manifest on every artifact it produces, plus a `pipeline_rerun_command` that
+reproduces the whole run.
 
 ## Security principles
 
@@ -382,7 +453,21 @@ as a first cost control; the full Phase 15 run budgets (`quick` / `standard` /
 - Evaluation artifacts never contain provider credentials, and
   `python -m security.scan results/ data/brainos_lab.sqlite3` checks that
   claim over whatever a run actually produced (exit `0` clean, `1` findings,
-  `2` nothing could be scanned).
+  `2` nothing could be scanned). Naming a database scans the whole database:
+  SQLite runs in WAL mode, so the newest rows can be in `lab.sqlite3-wal`
+  rather than in the main file, and the scanner expands a named file's
+  `-wal` / `-shm` / `-journal` sidecars instead of reporting one file clean.
+- The Phase 17 pipeline scans its own output in two passes — everything stages
+  1–6 wrote, then the report and manifest written afterwards — and a finding is
+  not merely reported: the implicated files are deleted from that run's own
+  output directory, the run exits `4`, and `report/QUARANTINED.txt` plus a
+  `## Quarantine` section record what was removed and why. A credential that
+  reached a model's answer should be treated as compromised and rotated.
+- A benchmark run started from the browser uses the visitor's session key as a
+  value passed to the provider factory. It is never exported to the environment,
+  never written to an artifact (the manifest records the *route*, e.g.
+  `the active browser session (openai bring-your-own-key)`), and it is deleted
+  with the session's rows and artifacts on **End session**.
 - Detection is pattern-based and English-only, and the reports say so: a clean
   report means nothing matched, not that the content was safe. The structural
   controls — delimiters, the untrusted-data preamble, and the rewrites — are what
@@ -393,8 +478,10 @@ See [`docs/threat-model.md`](docs/threat-model.md) for the assets, actors, route
 and residual risk, [`docs/security.md`](docs/security.md) for the maintained
 controls, [`docs/phase-13-security.md`](docs/phase-13-security.md) for how they
 were built and measured, [`docs/phase-16-reproducibility.md`](docs/phase-16-reproducibility.md)
-for the reproducibility manifest, and [`docs/architecture.md`](docs/architecture.md)
-for the system boundaries.
+for the reproducibility manifest,
+[`docs/phase-17-automated-pipeline.md`](docs/phase-17-automated-pipeline.md) for
+the automated pipeline and its Evaluation tab, and
+[`docs/architecture.md`](docs/architecture.md) for the system boundaries.
 
 ## Research positioning
 
