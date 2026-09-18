@@ -624,9 +624,12 @@ class UIController:
         budget.record_turn()
 
         try:
+            active_limits = budget.limits
             turn = service.handle_user_message(
                 text,
-                request_timeout=self.limits.request_timeout_seconds,
+                request_timeout=active_limits.request_timeout_seconds,
+                input_token_limit=active_limits.max_input_tokens,
+                output_token_limit=self._effective_output_limit(state, active_limits),
             )
         except BrainOSNotConfiguredError:
             return self._view(state, notice=f"⚠️ {_BRAINOS_INSTALL_HINT}")
@@ -638,26 +641,22 @@ class UIController:
                 ),
             )
 
-        # Phase 15: charge the budget from the turn's reported usage.
-        budget.charge(
-            prompt_tokens=turn.usage.get("prompt_tokens"),
-            completion_text=turn.reply or "",
-            usage={
-                "prompt_tokens": turn.usage.get("prompt_tokens"),
-                "completion_tokens": turn.usage.get("completion_tokens"),
-            },
-            failed=bool(turn.error) or bool(turn.usage.get("failed")),
-            timed_out=bool(turn.usage.get("timed_out")),
-        )
-
-        # Check per-request input ceiling post-hoc for the prompt we built
-        # (the pre-check above is on turn/token/session, not on prompt size).
-        prompt_tokens = turn.usage.get("prompt_tokens", 0)
-        if (
-            self.limits.max_input_tokens
-            and prompt_tokens > self.limits.max_input_tokens
-        ):
+        # Phase 15/18: an input-limit refusal happens after context construction
+        # but before the provider call. It must not be charged as a request or
+        # token spend; the refusal is still visible in the session accounting.
+        if turn.usage.get("input_limit_exceeded"):
             budget.record_refusal("max_input_tokens")
+        else:
+            budget.charge(
+                prompt_tokens=turn.usage.get("prompt_tokens"),
+                completion_text=turn.reply or "",
+                usage={
+                    "prompt_tokens": turn.usage.get("prompt_tokens"),
+                    "completion_tokens": turn.usage.get("completion_tokens"),
+                },
+                failed=bool(turn.error) or bool(turn.usage.get("failed")),
+                timed_out=bool(turn.usage.get("timed_out")),
+            )
 
         self._last_turn[state.session_id] = turn
         return self._view(
@@ -1286,6 +1285,26 @@ class UIController:
     def _secrets(self, state: SessionState) -> tuple[str, ...]:
         key = state.provider.api_key
         return (key,) if key else ()
+
+    def _effective_output_limit(
+        self, state: SessionState, limits: ChatLimits | None = None
+    ) -> int | None:
+        """Return the tightest active completion ceiling for one provider call.
+
+        The provider connection may carry its own ``max_tokens`` preference,
+        while the session budget supplies the deployment-wide safety ceiling.
+        The smaller positive value wins; zero means that the corresponding
+        control is disabled. Keeping this calculation at the controller
+        boundary makes the provider adapter unaware of UI policy while ensuring
+        a request can never override the immutable limits used by accounting.
+        """
+
+        configured = int(state.provider.max_tokens or 0)
+        session_limit = int(
+            (limits or self.limits.chat_limits()).max_output_tokens or 0
+        )
+        values = [value for value in (configured, session_limit) if value > 0]
+        return min(values) if values else None
 
     def _ensure_budget(self, state: SessionState) -> ChatBudget:
         """Return the session's cost budget, creating it on first use.

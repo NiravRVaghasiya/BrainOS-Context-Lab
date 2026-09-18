@@ -8,7 +8,7 @@ This repository integrates BrainOS as an upstream dependency. It does **not** mo
 
 ## Current status
 
-Phases 1–17 are complete and validated against the pinned BrainOS runtime. The
+Phases 1–18 are complete and validated against the pinned BrainOS runtime. The
 app persists conversations and memory mirrors to SQLite with hard session
 isolation, offers the full data-control set (clear conversation, clear memory,
 export session, end/delete session), can run the same conversation through all
@@ -24,10 +24,12 @@ reported in the UI, in exports, and in evaluation artifacts, enforces
 per-request and per-session cost ceilings on the chat path so a public BYOK
 deployment cannot run away, stamps every run with a reproducibility
 manifest (versions, environment, task ids, dataset digest, and a re-run
-command) so a result can be re-derived and re-inspected, and runs the whole
+command) so a result can be re-derived and re-inspected, runs the whole
 benchmark end to end — controlled experiment, raw run files, aggregates,
 statistics, failure taxonomy, figures, and a rendered report — from one command
-or one button in the browser.
+or one button in the browser, and now proves the two deployment boundaries that
+were previously only documented: a slow provider is cut off by the chat timeout
+and concurrent SQLite workers preserve session isolation without losing rows.
 
 - **Phase 1** maps the provider abstraction (OpenAI and OpenAI-compatible)
   behind `LLMProvider`, with secret-safe errors and diagnostics.
@@ -142,16 +144,25 @@ or one button in the browser.
   visitor's own sidebar key (never an environment variable). `EvaluationPolicy`
   lets a deployment narrow what the tab offers; `End session` deletes the
   session's persisted rows *and* its artifacts.
+- **Phase 18** completes the plan's test-suite hardening pass: the existing unit,
+  integration, evaluation, and security contracts remain green; a deterministic
+  `SlowProvider` proves the real chat timeout path returns before a stalled model;
+  an oversized prompt is refused before a provider request is constructed; and
+  an eight-worker SQLite stress test proves WAL-backed reads/writes retain exact
+  row counts and session isolation. The phase also closes the previously
+  documented input-budget gap by applying `max_input_tokens` before generation
+  and forwarding the effective output ceiling as `max_tokens`.
 
 A session-scoped `ConversationService` combines the adapter, the retrieval
 policy, the context builder, and the provider factory. Deterministic fakes cover
 the whole pipeline without BrainOS installed; optional live tests exercise the
-pinned runtime. 1179 tests pass and `ruff check .` is clean repository-wide.
+pinned runtime. 1183 tests pass with the optional UI/runtime dependencies
+installed, and `ruff check .` is clean repository-wide.
 
 Chat is usable without an API key: BrainOS still observes and retrieves memory,
 and the panels show exactly what the model *would* have been sent. See
 [`CONTEXT.md`](CONTEXT.md) for the living implementation state and the Phase
-0–17 logs in `docs/`.
+0–18 logs in `docs/`.
 
 ### Measured behaviour so far
 
@@ -480,7 +491,8 @@ controls, [`docs/phase-13-security.md`](docs/phase-13-security.md) for how they
 were built and measured, [`docs/phase-16-reproducibility.md`](docs/phase-16-reproducibility.md)
 for the reproducibility manifest,
 [`docs/phase-17-automated-pipeline.md`](docs/phase-17-automated-pipeline.md) for
-the automated pipeline and its Evaluation tab, and
+the automated pipeline and its Evaluation tab, [`docs/phase-18-test-suite.md`](docs/phase-18-test-suite.md)
+for the timeout/input-budget/concurrency hardening, and
 [`docs/architecture.md`](docs/architecture.md) for the system boundaries.
 
 ## Research positioning

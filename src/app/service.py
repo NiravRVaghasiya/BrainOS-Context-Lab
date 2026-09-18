@@ -226,7 +226,12 @@ class ConversationService:
         return [record for record in after if record.memory_id not in before]
 
     def handle_user_message(
-        self, text: str, *, request_timeout: float | None = None
+        self,
+        text: str,
+        *,
+        request_timeout: float | None = None,
+        input_token_limit: int | None = None,
+        output_token_limit: int | None = None,
     ) -> ConversationTurn:
         """Run the BrainOS-backed turn and optionally call the configured provider.
 
@@ -234,6 +239,14 @@ class ConversationService:
         cannot hold a Gradio worker indefinitely. When the timeout fires the
         turn records a timed-out usage entry and the error is rendered as a
         redacted status, exactly like any other provider failure.
+
+        The chat controller supplies the per-request token ceilings after this
+        method has built the final prompt. Input-limit refusal therefore happens
+        *before* the provider object is called, rather than charging a request
+        and discovering the violation after generation. ``output_token_limit``
+        is forwarded as the provider's ``max_tokens`` request parameter and is
+        also recorded when a provider ignores that parameter and reports a
+        larger completion.
         """
 
         user_text = text.strip()
@@ -257,27 +270,48 @@ class ConversationService:
             "failed": False,
         }
         if self._can_generate():
-            try:
-                response = self._generate(
-                    built.messages, timeout=request_timeout
+            fits_input = (
+                input_token_limit is None
+                or input_token_limit <= 0
+                or built.stats.final_context_tokens <= input_token_limit
+            )
+            if not fits_input:
+                error = (
+                    "Prompt exceeds the max_input_tokens ceiling: "
+                    f"{built.stats.final_context_tokens} > {input_token_limit}. "
+                    "Shorten the conversation or raise the limit."
                 )
-                reply = response.text
-                generated = True
-                reported = dict(response.usage or {})
-                usage["prompt_tokens"] = int(
-                    reported.get("prompt_tokens", built.stats.final_context_tokens)
-                )
-                usage["completion_tokens"] = int(
-                    reported.get("completion_tokens", 0)
-                )
-                usage["model"] = response.model
-            except _TimeoutError as exc:
-                error = str(exc)
-                usage["timed_out"] = True
+                usage["input_limit_exceeded"] = True
                 usage["failed"] = True
-            except ProviderError as exc:
-                error = str(exc)
-                usage["failed"] = True
+            else:
+                try:
+                    response = self._generate(
+                        built.messages,
+                        timeout=request_timeout,
+                        max_output_tokens=output_token_limit,
+                    )
+                    reply = response.text
+                    generated = True
+                    reported = dict(response.usage or {})
+                    usage["prompt_tokens"] = int(
+                        reported.get("prompt_tokens", built.stats.final_context_tokens)
+                    )
+                    usage["completion_tokens"] = int(
+                        reported.get("completion_tokens", 0)
+                    )
+                    usage["model"] = response.model
+                    if (
+                        output_token_limit
+                        and usage["completion_tokens"] > output_token_limit
+                    ):
+                        usage["output_limit_exceeded"] = True
+                except _TimeoutError as exc:
+                    error = str(exc)
+                    usage["timed_out"] = True
+                    usage["failed"] = True
+                except ProviderError as exc:
+                    error = str(exc)
+                    usage["failed"] = True
         if reply:
             self.state.messages.append({"role": "assistant", "content": reply})
             self.observe_text(reply, role="assistant")
@@ -679,22 +713,28 @@ class ConversationService:
         messages: list[dict[str, str]],
         *,
         timeout: float | None = None,
+        max_output_tokens: int | None = None,
     ) -> ProviderResponse:
-        """Call the configured provider, optionally bounded by a wall-clock timeout.
+        """Call the provider with the chat request ceilings applied.
 
         Phase 15: the timeout is enforced with a thread-pool future so a slow
         or stalled provider cannot hold a Gradio worker indefinitely. The
         future is cancelled on timeout; the underlying provider call may still
         be running in its own thread, but the service returns to the caller
-        and records a timed-out usage entry.
+        and records a timed-out usage entry. ``max_output_tokens`` is sent as
+        the provider-neutral ``max_tokens`` override, which OpenAI-compatible
+        adapters understand and test doubles can inspect.
         """
 
         provider = self.provider()
+        request_kwargs: dict[str, Any] = {}
+        if max_output_tokens is not None and max_output_tokens > 0:
+            request_kwargs["max_tokens"] = int(max_output_tokens)
         if timeout is None or timeout <= 0:
-            return provider.generate(messages)
+            return provider.generate(messages, **request_kwargs)
         executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
         try:
-            future = executor.submit(provider.generate, messages)
+            future = executor.submit(provider.generate, messages, **request_kwargs)
             try:
                 return future.result(timeout=float(timeout))
             except concurrent.futures.TimeoutError:

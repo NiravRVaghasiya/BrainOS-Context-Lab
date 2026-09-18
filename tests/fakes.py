@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import re
+import threading
+import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -202,6 +204,37 @@ class FakeLLMProvider:
 
         self.requests.append(messages)
         return ProviderResponse(text=self.text, model=self.config.model, usage={"total_tokens": 4})
+
+
+class SlowProvider(FakeLLMProvider):
+    """Provider double that finishes after a configurable wall-clock delay.
+
+    Phase 18 uses this to exercise the real chat timeout boundary rather than
+    merely asserting that a numeric timeout was passed through a callback. The
+    events make the test deterministic without exposing a credential or waiting
+    on an arbitrary polling loop.
+    """
+
+    def __init__(self, config: Any, *, delay: float = 0.2) -> None:
+        super().__init__(config)
+        self.delay = delay
+        self.started = threading.Event()
+        self.finished = threading.Event()
+        self.request_kwargs: dict[str, Any] = {}
+
+    def generate(self, messages: list[dict[str, str]], **kwargs: Any) -> Any:
+        from providers.base import ProviderResponse
+
+        self.requests.append(messages)
+        self.request_kwargs = dict(kwargs)
+        self.started.set()
+        time.sleep(self.delay)
+        self.finished.set()
+        return ProviderResponse(
+            text=self.text,
+            model=self.config.model,
+            usage={"prompt_tokens": 8, "completion_tokens": 4, "total_tokens": 12},
+        )
 
 
 class RecordingProvider:

@@ -4,8 +4,8 @@
 > repository state and decisions that should be preserved between phases.
 
 **Last updated:** 2026-09-18
-**Branch:** `arena/01a0b45a-brainos-context-lab`
-**Baseline:** `bf94792` (`origin/main`, the PR #17 merge that includes Phase 16); this branch adds Phase 17 on top
+**Branch:** `arena/01a0b5a2-brainos-context-lab`
+**Baseline:** `dab23c0` (`origin/main`, the PR #18 merge that includes Phase 17); this branch adds Phase 18 on top
 **Implementation plan:** [`BrainOS_Context_Lab_Implementation_Plan.md`](BrainOS_Context_Lab_Implementation_Plan.md)
 
 ## Product boundary
@@ -38,7 +38,9 @@ layer that helps select historical context.
 | **Phase 15 — Cost Controls** | Complete | `ChatLimits` (7 ceilings: `max_input_tokens`, `max_output_tokens`, `max_turns`, `max_message_chars`, `max_session_tokens`, `max_session_requests`, `request_timeout_seconds`) + `ChatBudget` (mutable session accounting with `check_turn()`, `charge()`, `record_turn()`, `record_refusal()`, `snapshot()`) + `ChatLimitExceeded` (credential-blind refusal); `UILimits` expanded from 2 to 7 fields with `chat_limits()` bridge; `update_costs()` callback wired to 4 sidebar widgets; service gains `request_timeout` wrapping the provider call in `concurrent.futures` + `_TimeoutError`; `ConversationTurn.usage` carries prompt/completion tokens, timeout, and failure flags; Usage tab added to the inspection panels; turn view carries `usage_summary`, `usage_report`, `turn_usage`; export includes `usage` block; `clear_conversation()` resets the budget. 1015 → **1048 tests**; `ruff check .` clean; 90 shipped files scan clean. |
 | **Phase 16 — Reproducibility** | Complete (landed via PR #17) | One `src/reproducibility/` package is the single source of the §22 vocabulary: `app_version()` (installed-metadata read with `fallback:` origin tag), `brainos_version()` (`unvalidated` / `pinned:` / live read plus the `pin:` commit), `build_manifest()` (versions + environment + config + task ids + dataset path/digest + aggregate metrics + a credential-free `--rerun` string), `rerun_command()`, `global_overrides()`, `persist_run()` (secret-stripping store write). `python -m evaluation.run` writes a top-level `repro` block **and** the fallback `config.application_version` / `config.brainos_version` / `config.benchmark_version` / `config.output` fields; `evaluation.experiment` carries a matching `repro` block and routes its `provenance` version fields through the same functions; `evaluation.errors` records the version pair in `provenance`. The chat export gains `limits` (the Phase 15 constraint), `versions`, and a `chat_history_sha256` transcript digest; `connect()` drops model ids that echo the session key. Fixed the latent split-vocabulary bug (`context_rot-v1` vs the dataset's `context-rot-v1`), unified on `context-rot-v1` and pinned by a test. 1048 → **1070 tests**; `ruff check .` clean; 87 shipped files scan clean. |
 | **Phase 17 — Automated Evaluation Pipeline** | **Complete in this turn** | `python -m evaluation.pipeline` composes the seven existing stages (`experiment → raw → comparison → statistics → errors → plots → report`) into the plan's §23 `results/{raw,aggregated,plots,report}` layout in one command: `STAGE_DEPENDENCIES` + `expand_stages` add the stages a selected stage is made of, a stage with no input is *skipped with a reason*, `run_pipeline` never raises for a failing stage, and the exit code distinguishes complete (0), uncontrolled (2), ceiling-truncated (3), and incomplete-or-leaked (4). Every artifact carries the Phase 16 `repro` manifest plus a `pipeline_rerun_command`; `markdown_report` renders twelve sections with the honesty rules (`—` for ungraded answer-side metrics, `Partial pipeline` when fewer than seven stages ran, a task-ceiling "remaining" column); `analysis.compare_error_distributions` compares failure *mixes* (per-mode label shares + total variation) rather than accuracies. Two-pass credential scan (stages 1–6, then report+manifest) now **quarantines**: implicated files inside the run's own output directory are deleted, known secrets scrubbed from the in-memory artifact, the report text suppressed if `report.md` itself leaked, `QUARANTINED.txt` + a `## Quarantine` section left behind, exit 4. The browser gets the same pipeline through `app/evaluation.py` (`UIEvaluationRunner`, `EvaluationPolicy`): a full-width **Evaluation** tab with preset catalogue, `estimate_ceiling` cost preview before any spend, run, figures, report, history, session-scoped `results/ui/<session>/<run>`, generation with the sidebar key (never an environment variable), `persist_run` storage, and `End session` deleting rows *and* artifacts. Fixed an import cycle through the root `app.py` shim that also made the benchmark CLI load Gradio. 1070 → **1179 tests** (incl. 7 live pipeline tests against the pinned runtime); `ruff check .` clean; 91 shipped files scan clean. Also fixed: a full run labelling itself `Partial pipeline`, a plan whose dataset digest reached the manifest but not the run files, a report naming a distribution baseline the run never chose, and a WAL-blind credential test — `security.scan` now expands a named database's `-wal`/`-shm`/`-journal` sidecars. |
-| Phases 18–20 | Pending | Test suite completion, MVP polish, research release. |
+| **Phase 18 — Test Suite and Runtime Hardening** | **Complete in this turn** | Added the deterministic `SlowProvider` timeout proof and an eight-worker WAL/SQLite persistence stress test (`tests/integration/test_phase18_hardening.py`), while keeping the existing unit, evaluation, security, UI, and pinned-runtime integration contracts green. Closed the Phase 15 input-budget gap: `max_input_tokens` is checked after prompt construction but before `_generate()` (no provider instance/request/tokens charged on refusal), and the effective positive output ceiling is forwarded as `max_tokens`; provider-reported overages remain visible in turn usage. **1183 tests** pass with optional dependencies installed; `ruff check .` is clean. |
+| Phase 19 — MVP polish | Pending | Add retention cleanup (or a temporary artifact root) for abandoned `results/ui/` sessions, finalize the public `EvaluationPolicy`, and polish deployment-facing controls. |
+| Phase 20 — Research release | Pending | Run real-provider multi-length experiments, publish results/limitations/reproducibility material, and avoid claims beyond the measured benchmark. |
 
 Detailed logs are available in
 [`docs/phase-0-research-baseline.md`](docs/phase-0-research-baseline.md),
@@ -57,8 +59,9 @@ Detailed logs are available in
 [`docs/phase-13-security.md`](docs/phase-13-security.md),
 [`docs/phase-14-hf-deployment.md`](docs/phase-14-hf-deployment.md),
 [`docs/phase-15-cost-controls.md`](docs/phase-15-cost-controls.md),
-[`docs/phase-16-reproducibility.md`](docs/phase-16-reproducibility.md), and
-[`docs/phase-17-automated-pipeline.md`](docs/phase-17-automated-pipeline.md).
+[`docs/phase-16-reproducibility.md`](docs/phase-16-reproducibility.md),
+[`docs/phase-17-automated-pipeline.md`](docs/phase-17-automated-pipeline.md), and
+[`docs/phase-18-test-suite.md`](docs/phase-18-test-suite.md).
 
 ## What was done in Phase 17 (this turn)
 
@@ -336,8 +339,8 @@ the chat path.
 
 1. Phase 16 (reproducibility) must record the chat limits in the export.
 2. Phase 17 (evaluation pipeline in the UI) should surface the presets.
-3. Phase 18 (test suite completion) should add a timeout test with a
-   `SlowProvider` fake.
+3. Phase 18 (test suite completion) added the real timeout proof with a
+   deterministic `SlowProvider` fake.
 4. Cost controls are per-session, not per-user. A multi-user deployment
    would need per-user budgets on top of these.
 
@@ -473,10 +476,11 @@ installed for the integration suites which are excluded from the count above.
 5. **The `-wal` and `-shm` files are part of the database now.** Backup and
    scan tooling must include them; the artifact scanner already reads
    everything `*.read_bytes()` reaches.
-6. **Session isolation under concurrency still needs a live stress test.**
-   The Phase 4/5 in-process two-session test proves isolation; Phase 14 adds
-   the concurrency primitives (WAL, busy_timeout, queue) but a multi-threaded
-   stress test is a candidate for Phase 18.
+6. **Session isolation under concurrency is now exercised.**
+   The Phase 4/5 in-process two-session test proves the service boundary, and
+   Phase 18 adds an eight-worker SQLite stress test over WAL, busy_timeout, and
+   exact session/conversation filters. Multi-process deployment still needs a
+   separate operational review.
 
 ## What was done in Phase 13 (landed via PR #14)
 
@@ -2036,10 +2040,9 @@ PYTHONPATH=src .venv/bin/python app.py
 Test count went 154 → 216 (Phase 4) → 249 (Phase 5) → 379 (Phase 6) → 494
 (Phase 8) → 586 (Phase 9) → 598 (Phase 10) → 632 (Phase 11) → 696 (Phase 12) →
 1004 (Phase 13) → 1015 (Phase 14) → 1048 (Phase 15) → 1070 (Phase 16) →
-**1179** in this phase (+31 pipeline, +48 UI-runner, +14 pipeline-security,
-+7 live-pipeline, +8 Evaluation-tab, +1 scanner sidecar; the registered-callback
-count in `tests/ui/test_ui.py` is now 19). Two consecutive full-suite runs are
-green, which matters because bug 15 was an order-dependent failure.
+1179 (Phase 17) → **1183** in this phase (+4 hardening tests; the registered-
+callback count in `tests/ui/test_ui.py` remains 19). Two consecutive full-suite
+runs are green, which matters because bug 15 was an order-dependent failure.
 The live tests in `tests/integration/test_chat_controller_live.py`,
 `tests/integration/test_persistence_live.py`,
 `tests/integration/test_context_pipeline.py`,
@@ -2059,45 +2062,89 @@ and the localhost stub.
 
 `.venv` is ignored and is only a local test environment.
 
+## What was done in Phase 18 (this turn)
+
+Phase 18 closes the two runtime gaps named by the Phase 17 hand-off and repairs
+a cost-control contract that the existing tests did not exercise at the real
+provider boundary.
+
+### New / changed modules
+
+| File | Purpose |
+| --- | --- |
+| [`src/app/service.py`](src/app/service.py) | `handle_user_message()` accepts input/output ceilings; final prompt size is rejected before `_generate()`, and the effective output ceiling is sent as `max_tokens`. Turn usage marks input/output overages without exposing text or credentials. |
+| [`src/app/controller.py`](src/app/controller.py) | Passes the chat ceilings to the service, charges normal requests only, records a pre-provider input refusal without request/token spend, and computes the tightest positive output cap across provider/session settings. |
+| [`tests/fakes.py`](tests/fakes.py) | Adds the finite-delay, event-signalled `SlowProvider` used to prove the timeout boundary. |
+| [`tests/integration/test_phase18_hardening.py`](tests/integration/test_phase18_hardening.py) | End-to-end timeout, input-ceiling, and eight-worker SQLite/WAL isolation tests. |
+| [`docs/phase-18-test-suite.md`](docs/phase-18-test-suite.md) | Phase log, contracts, measured validation, and Phase 19 constraints. |
+
+### Decisions later phases must not undo
+
+1. **Input-limit refusal is pre-provider.** It happens after context construction
+   (the final token estimate is needed) but before provider creation/request,
+   and it does not charge prompt tokens or a request.
+2. **Output ceilings are sent to the provider.** The provider's own configured
+   `max_tokens` and the chat safety ceiling are combined by taking the tightest
+   positive value. Reported overages stay visible if a gateway ignores the cap.
+3. **A timeout returns a failed turn, not a late assistant message.** The worker
+   may finish in the background because Python cannot kill arbitrary provider
+   code, but the service has already returned and owns the conversation state.
+4. **The database stress proof stays storage-level.** The process-local
+   `SessionManager` is not made globally thread-safe; each SQLite operation
+   keeps its own connection, WAL/busy-timeout settings, and exact row filters.
+5. **The Phase 17 pins remain load-bearing.** Credential quarantine, report
+   honesty (`—` for ungraded metrics), UI callback count, and deterministic
+   pipeline artifacts remain in the full-suite gate.
+
+### Measured behaviour
+
+```text
+.venv/bin/pytest -q       # 1182 passed
+.venv/bin/ruff check .    # All checks passed!
+```
+
+No external provider API key was used. The pinned BrainOS integration suites,
+Gradio UI contract, deterministic evaluation pipeline, security scanner, the
+slow-provider timeout, and the concurrent storage stress test all pass.
+
 ## Next safe step
 
-Phase 17 is complete and validated (1179 tests, `ruff check .` clean, 91 shipped
-files scan clean, the pipeline writes the plan's whole §23 `results/` layout in
-one command and the Evaluation tab drives the same entry point). The suggested
-next phase is **Phase 18 — Test Suite** (plan §24), which is now mostly a
-completion-and-hardening pass over a suite that already covers the plan's list:
+Phase 18 is complete and validated (1183 tests, `ruff check .` clean, pinned
+runtime/UI suites green). The suggested next phase is **Phase 19 — MVP polish**:
 
-* **Unit:** provider adapters, API key redaction, context builder, token
-  budgeting, memory filtering, session isolation, conflict handling — all present
-  (`tests/unit/`), but §24 asks for them to be *exhaustive*, not representative.
-* **Integration:** `user input → observe → recall → context → provider → response
-  → memory update` is covered end to end by
-  `tests/integration/test_context_pipeline.py` and the live suites.
-* **Evaluation:** §24's "deterministic mock models to verify that benchmark
-  calculations are correct" now has a one-call home —
-  `run_pipeline(plan, tasks, ModelSpec(...), RecordingProvider(...))` — so
-  metric arithmetic can be pinned end to end rather than per module.
-* **Security:** §24's four pins exist (key never in logs/artifacts, session
-  isolation, retrieved memory cannot override system instructions, no user data
-  in diagnostics) and Phase 17 added the pipeline's own.
+* **Retention:** add a bounded retention sweep or a temporary artifact root for
+  abandoned `results/ui/<session>/` runs. End-session deletion is correct for
+  active users, but no callback can clean a browser session that disappears.
+* **Public evaluation policy:** make the deployment default explicit and
+  conservative — `EvaluationPolicy(allowed_presets=("quick",),
+  allow_generation=False, max_tasks=20, max_requests=60)` — while keeping the
+  browser tab and CLI entry point shared.
+* **Deployment polish:** document the persistence/ephemeral choice, inspect
+  process-level deployment semantics beyond the single-process SQLite stress
+  proof, and keep queue/concurrency limits bounded.
 
-Carry these constraints into Phase 18:
+Phase 20 remains the research release: real-provider multi-length runs, results,
+limitations, and reproducibility material. No dry run or deterministic fake in
+this repository is evidence for the project's research claim.
 
-1. **Do not weaken Phase 17's pins.** The credential-freedom and quarantine tests
-   in `tests/security/test_pipeline_secrets.py`, the `—`-not-`0.000` honesty rules,
-   and the registered-callback count (19) in `tests/ui/test_ui.py` are load-bearing.
-2. **The two gaps Phase 17 named are still open.** (a) A `SlowProvider` timeout
-   test and a multi-threaded stress test (deferred since Phase 16). (b) Retention
-   for `results/ui/`: runs are deleted with their session, but an *abandoned*
-   session is ended by nobody, so a public Space accumulates artifacts. Phase 19
-   should add a sweep (or a temp root) before the tab is enabled publicly with
-   generation on.
-3. **Tighten `EvaluationPolicy` for a public Space rather than editing the tab:**
+## Constraints carried into Phase 19+
+
+1. **Retention is the next implementation gap.** End-session deletion removes
+   active users' rows and artifacts, but an abandoned browser session can leave
+   `results/ui/<session>/` on disk. Add a bounded sweep or a temporary artifact
+   root before enabling browser generation broadly.
+2. **The public policy should tighten, not fork, the tab.** Prefer
    `EvaluationPolicy(allowed_presets=("quick",), allow_generation=False,
-   max_tasks=20, max_requests=60)` is a defensible default.
-4. **Live re-proof after any change to the generation path.** A generated run must
-   still keep the session key out of every artifact, out of the environment, and
-   out of every rendered field — and must still quarantine if a provider echoes it.
-5. **No number produced so far validates a model.** Every measurement in this
-   repository came from dry runs or deterministic fakes. The research claim needs
-   a real `--preset research` run with a real key, which is Phase 20's job.
+   max_tasks=20, max_requests=60)` as the deployment default, while keeping the
+   CLI and browser on the same `run_pipeline` entry point.
+3. **Keep Phase 18's generation pins.** Any future provider-path change must
+   re-run the slow timeout, input refusal, output-cap forwarding, credential
+   freedom, and quarantine tests. A generated run must keep the session key out
+   of artifacts, environment, and rendered fields.
+4. **Keep the storage deployment boundary explicit.** The stress test proves one
+   process and one WAL database with per-operation connections. Multi-process
+   deployment still needs an operational review before queue or worker limits
+   are increased.
+5. **No current number validates the research claim.** Dry runs and deterministic
+   fakes validate plumbing only. Phase 20 must run real-provider, multi-length
+   experiments and publish results, limitations, and reproducibility material.
