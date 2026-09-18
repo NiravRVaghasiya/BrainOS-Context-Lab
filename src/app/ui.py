@@ -88,20 +88,38 @@ in server memory for the active session only and are never written to disk.
 
 EVALUATION_MARKDOWN = """### Evaluation
 
-Benchmark runs are **not available yet** (plan Phase 17).
+Benchmark runs are driven from the command line (`python -m evaluation.run`,
+`python -m evaluation.experiment`). The Evaluation tab surfaces the presets
+and the session's usage so a visitor can see what a run *would* cost.
 
-The chat above already produces the raw material for them: every turn records
-raw history tokens, selected history tokens, retrieved memory tokens, retrieved
-chunk tokens, system tokens, final context tokens, and a per-item audit trail of
-everything the retrieval policy removed.
+| Preset | Tasks | Modes | Trials | Max requests | Max total tokens |
+| --- | --- | --- | --- | --- | --- |
+| Quick | 20 | 3 | 1 | 60 | 250,000 |
+| Standard | 100 | 5 | 1 | 500 | 5,000,000 |
+| Research | 500 | 5 | 3 | 7,500 | 100,000,000 |
 
-Baseline modes (Phase 6) are live — pick one in the sidebar under **Context** to
-run the same conversation through Full Context, Sliding Window, Lexical RAG,
-BrainOS, or BrainOS + RAG. Each mode reports the identical accounting fields, so
-the Context tab is a one-conversation version of the comparison the benchmark
-will run at scale. The context-rot benchmark itself lands in Phase 7; until
-then, use **Export session** to take a machine-readable snapshot.
+The chat above already produces the raw material for benchmark runs: every
+turn records raw history tokens, selected history tokens, retrieved memory
+tokens, retrieved chunk tokens, system tokens, final context tokens, and a
+per-item audit trail of everything the retrieval policy removed.
+
+Baseline modes (Phase 6) are live — pick one in the sidebar under **Context**
+to run the same conversation through Full Context, Sliding Window, Lexical
+RAG, BrainOS, or BrainOS + RAG. Each mode reports the identical accounting
+fields, so the **Usage** tab is a one-session version of the cost report a
+benchmark run produces at scale.
 """
+
+USAGE_INTRO_MARKDOWN = """### Usage
+
+Session cost accounting: what this conversation has cost so far, how much
+budget remains, and which ceilings (if any) have been reached.
+
+**Your provider account is billed directly.** These limits protect against
+runaway usage on this demo server but cannot cap what your provider charges.
+Token counts use the session's configured counter (estimated by default).
+"""
+
 
 SECURITY_INTRO_MARKDOWN = """### Security
 
@@ -150,6 +168,12 @@ class SidebarComponents:
     drop_suspicious_memories: Any
     context_btn: Any
     context_status: Any
+    #: Phase 15: cost controls for the chat path.
+    chat_max_input_tokens: Any
+    chat_max_output_tokens: Any
+    chat_request_timeout: Any
+    chat_max_session_tokens: Any
+    cost_status: Any
 
 
 @dataclass
@@ -184,6 +208,10 @@ class PanelComponents:
     security: Any
     security_rows: Any
     security_report: Any
+    #: Phase 15: the session's cost accounting — a markdown summary, the JSON
+    #: snapshot, and the per-turn usage dict.
+    usage_summary: Any
+    usage_report: Any
     order: tuple[str, ...] = field(
         default=(
             "stored",
@@ -199,6 +227,8 @@ class PanelComponents:
             "security",
             "security_rows",
             "security_report",
+            "usage_summary",
+            "usage_report",
         )
     )
 
@@ -353,6 +383,38 @@ def _build_sidebar(gr: Any) -> SidebarComponents:
     context_btn = gr.Button("Apply context settings")
     context_status = gr.Markdown("")
 
+    gr.Markdown("### Cost Controls")
+    gr.Markdown(
+        "Per-request and per-session ceilings protect against runaway usage. "
+        "Your provider account is billed directly — these limits cap what this "
+        "demo server will send, not what your provider charges."
+    )
+    chat_max_input_tokens = gr.Number(
+        value=32_000,
+        label="Max input tokens (per request)",
+        precision=0,
+        info="Prompts larger than this are refused before the provider is called.",
+    )
+    chat_max_output_tokens = gr.Number(
+        value=4_096,
+        label="Max output tokens (per request)",
+        precision=0,
+        info="The maximum completion length per request.",
+    )
+    chat_request_timeout = gr.Number(
+        value=120,
+        label="Request timeout (seconds)",
+        precision=0,
+        info="A provider call that takes longer is refused and recorded.",
+    )
+    chat_max_session_tokens = gr.Number(
+        value=500_000,
+        label="Max session tokens (total)",
+        precision=0,
+        info="Input + output tokens across the whole session.",
+    )
+    cost_status = gr.Markdown("")
+
     return SidebarComponents(
         provider=provider,
         model=model,
@@ -378,6 +440,11 @@ def _build_sidebar(gr: Any) -> SidebarComponents:
         drop_suspicious_memories=drop_suspicious_memories,
         context_btn=context_btn,
         context_status=context_status,
+        chat_max_input_tokens=chat_max_input_tokens,
+        chat_max_output_tokens=chat_max_output_tokens,
+        chat_request_timeout=chat_request_timeout,
+        chat_max_session_tokens=chat_max_session_tokens,
+        cost_status=cost_status,
     )
 
 
@@ -477,6 +544,9 @@ def _build_inspection(gr: Any) -> PanelComponents:
             wrap=True,
         )
         security_report = gr.JSON(label="Security report", value={})
+    with gr.Tab("Usage"):
+        usage_summary = gr.Markdown(USAGE_INTRO_MARKDOWN)
+        usage_report = gr.JSON(label="Session usage", value={})
     with gr.Tab("Evaluation"):
         gr.Markdown(EVALUATION_MARKDOWN)
 
@@ -494,6 +564,8 @@ def _build_inspection(gr: Any) -> PanelComponents:
         security=security,
         security_rows=security_rows,
         security_report=security_report,
+        usage_summary=usage_summary,
+        usage_report=usage_report,
     )
 
 
@@ -620,6 +692,24 @@ def _wire(
     chat.export_btn.click(
         _export(controller), inputs=[session_state], outputs=[chat.export_btn]
     )
+    # Phase 15: cost control widgets update the controller's limits on change.
+    for widget in (
+        sidebar.chat_max_input_tokens,
+        sidebar.chat_max_output_tokens,
+        sidebar.chat_request_timeout,
+        sidebar.chat_max_session_tokens,
+    ):
+        widget.change(
+            _update_costs(controller),
+            inputs=[
+                sidebar.chat_max_input_tokens,
+                sidebar.chat_max_output_tokens,
+                sidebar.chat_request_timeout,
+                sidebar.chat_max_session_tokens,
+                session_state,
+            ],
+            outputs=[sidebar.cost_status, session_state],
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -724,6 +814,29 @@ def _update_context(controller: UIController) -> Any:
         return status, controller.ensure_session(session_id).session_id
 
     return update_context
+
+
+def _update_costs(controller: UIController) -> Any:
+    """Callback for the cost control widgets (Phase 15)."""
+
+    def update_costs(
+        max_input_tokens: Any,
+        max_output_tokens: Any,
+        request_timeout: Any,
+        max_session_tokens: Any,
+        session_id: str | None,
+    ) -> tuple[str, str]:
+        session_id = controller.ensure_session(session_id).session_id
+        status = controller.update_costs(
+            session_id,
+            max_input_tokens=max_input_tokens,
+            max_output_tokens=max_output_tokens,
+            request_timeout_seconds=request_timeout,
+            max_session_tokens=max_session_tokens,
+        )
+        return status, session_id
+
+    return update_costs
 
 
 def _apply_mode(controller: UIController) -> Any:
@@ -851,6 +964,8 @@ def _panel_values(view: Any) -> tuple[Any, ...]:
         view.security,
         view.security_rows,
         view.security_report,
+        view.usage_summary,
+        view.usage_report,
     )
 
 

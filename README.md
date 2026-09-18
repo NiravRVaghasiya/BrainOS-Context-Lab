@@ -8,7 +8,7 @@ This repository integrates BrainOS as an upstream dependency. It does **not** mo
 
 ## Current status
 
-Phases 1–14 are complete and validated against the pinned BrainOS runtime. The
+Phases 1–15 are complete and validated against the pinned BrainOS runtime. The
 app persists conversations and memory mirrors to SQLite with hard session
 isolation, offers the full data-control set (clear conversation, clear memory,
 export session, end/delete session), can run the same conversation through all
@@ -18,9 +18,11 @@ robustness metric suite (including faithfulness and a degradation curve that
 stays unset until more than one length is present), runs controlled
 multi-mode experiments with cost budgets, summarizes trials with paired
 statistics and effect sizes, ablates the BrainOS pipeline one component at a
-time, turns the scored records into a structured failure taxonomy, and guards
+time, turns the scored records into a structured failure taxonomy, guards
 every route untrusted text takes into a prompt — with the guard's own findings
-reported in the UI, in exports, and in evaluation artifacts.
+reported in the UI, in exports, and in evaluation artifacts — and enforces
+per-request and per-session cost ceilings on the chat path so a public BYOK
+deployment cannot run away.
 
 - **Phase 1** maps the provider abstraction (OpenAI and OpenAI-compatible)
   behind `LLMProvider`, with secret-safe errors and diagnostics.
@@ -98,11 +100,20 @@ reported in the UI, in exports, and in evaluation artifacts.
   API disabled) for multi-visitor safety, an honest header that discloses
   whether messages are persisted or run fully in memory, and deployment
   configuration tests that pin all of the above.
+- **Phase 15** layers the plan's full cost-control surface onto the chat
+  path: `ChatLimits` (7 ceilings — per-request input/output tokens, per-
+  session turns/requests/tokens, request timeout), `ChatBudget` (mutable
+  session accounting with turn gating, usage charging from provider-reported
+  or estimated tokens, refusal counting, and a JSON snapshot), a wall-clock
+  timeout wrapping the provider call, a Usage tab in the inspection panels,
+  cost control widgets in the sidebar, usage in the session export, and
+  budget reset on clear-conversation. A refusal is a user-visible status,
+  not a security finding.
 
 A session-scoped `ConversationService` combines the adapter, the retrieval
 policy, the context builder, and the provider factory. Deterministic fakes cover
 the whole pipeline without BrainOS installed; optional live tests exercise the
-pinned runtime. 1004 tests pass and `ruff check .` is clean repository-wide.
+pinned runtime. 1048 tests pass and `ruff check .` is clean repository-wide.
 
 Chat is usable without an API key: BrainOS still observes and retrieves memory,
 and the panels show exactly what the model *would* have been sent. See

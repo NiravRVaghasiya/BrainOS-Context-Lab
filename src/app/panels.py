@@ -678,6 +678,81 @@ def export_payload(payload: Mapping[str, Any]) -> str:
     return json.dumps(payload, indent=2, sort_keys=True, default=str)
 
 
+def usage_summary(report: Mapping[str, Any]) -> str:
+    """Markdown summary of the session's cost accounting (Phase 15).
+
+    The panel answers three questions in one screen: what did this session
+    cost so far, how much budget remains, and are any ceilings hit. The
+    limits block travels with the numbers so a reader can tell whether a
+    low count is "the session is new" or "the operator set a tight ceiling".
+    """
+
+    if not isinstance(report, Mapping):
+        return "_No usage report available._"
+
+    limits = report.get("limits") if isinstance(report.get("limits"), Mapping) else {}
+    requests = format_int(report.get("requests"))
+    user_turns = format_int(report.get("user_turns"))
+    input_tokens = format_int(report.get("input_tokens"))
+    output_tokens = format_int(report.get("output_tokens"))
+    total_tokens = format_int(report.get("total_tokens"))
+    refused = format_int(report.get("refused"))
+    timeouts = format_int(report.get("timeouts"))
+    within = bool(report.get("within_limits", True))
+
+    remaining_turns = report.get("remaining_turns")
+    remaining_requests = report.get("remaining_requests")
+    remaining_session_tokens = report.get("remaining_session_tokens")
+
+    headline = (
+        "**Within all session limits.**"
+        if within
+        else (
+            "**A session limit has been reached.** "
+            "Clear the conversation or start a new session to continue."
+        )
+    )
+
+    def _remaining_line(label: str, remaining: Any, limit: Any) -> str:
+        if remaining is None:
+            return f"| {label} | {format_int(limit)} (no ceiling) |"
+        return f"| {label} | {format_int(remaining)} of {format_int(limit)} remaining |"
+
+    lines = [
+        "### Usage",
+        "",
+        headline,
+        "",
+        "| Metric | Value |",
+        "| --- | --- |",
+        f"| User turns | {user_turns} |",
+        f"| Provider requests | {requests} |",
+        f"| Input tokens | {input_tokens} |",
+        f"| Output tokens | {output_tokens} |",
+        f"| Total tokens | **{total_tokens}** |",
+        f"| Refused turns | {refused} |",
+        f"| Timed-out requests | {timeouts} |",
+        "",
+        "| Remaining | Status |",
+        "| --- | --- |",
+        _remaining_line("Turns", remaining_turns, limits.get("max_turns")),
+        _remaining_line("Requests", remaining_requests, limits.get("max_session_requests")),
+        _remaining_line(
+            "Session tokens",
+            remaining_session_tokens,
+            limits.get("max_session_tokens"),
+        ),
+        "",
+        "| Limit | Value |",
+        "| --- | --- |",
+        f"| Max input tokens (per request) | {format_int(limits.get('max_input_tokens'))} |",
+        f"| Max output tokens (per request) | {format_int(limits.get('max_output_tokens'))} |",
+        f"| Request timeout | {limits.get('request_timeout_seconds', '—')}s |",
+        f"| Token counter | `{report.get('token_counter', '—')}` |",
+    ]
+    return "\n".join(lines)
+
+
 def _iter_dropped(report: Mapping[str, Any]) -> list[Mapping[str, Any]]:
     dropped = report.get("dropped") if isinstance(report, Mapping) else None
     if not isinstance(dropped, list):
@@ -718,4 +793,5 @@ __all__ = [
     "status_line",
     "token_breakdown",
     "trace_markdown",
+    "usage_summary",
 ]

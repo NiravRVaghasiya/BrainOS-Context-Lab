@@ -45,6 +45,7 @@ from providers import ProviderError, create_provider
 from providers.base import ProviderConfig, ProviderConfigurationError
 
 from . import panels
+from .limits import ChatBudget, ChatLimitExceeded, ChatLimits
 from .service import ConversationService, _warn_storage
 from .session import SessionManager
 from .state import ContextSettings, SessionState
@@ -68,14 +69,39 @@ _BRAINOS_INSTALL_HINT = (
 class UILimits:
     """Guard rails that protect a bring-your-own-key user from runaway usage.
 
-    These are the two limits the plan's Phase 15 list that matter before any
-    network-facing surface exists: a session cannot grow without bound, and a
-    single message cannot be large enough to be a paste accident rather than a
-    chat turn. Benchmark controls (the rest of Phase 15) are not exposed yet.
+    Phase 15 (plan §15 / §21): the full cost-control surface for the chat path.
+    The two fields that existed before Phase 15 (``max_turns``,
+    ``max_message_chars``) are retained as the user-facing knobs; the remaining
+    ceilings are configured through :class:`ChatLimits`, which this object
+    wraps. A :class:`UILimits` is still what a caller constructs, and its
+    :meth:`chat_limits` method produces the frozen limits object the budget
+    tracks against.
+
+    The split is intentional: ``UILimits`` carries the defaults an operator
+    changes at deployment time; ``ChatLimits`` is the immutable per-session
+    contract the accounting honours.
     """
 
     max_turns: int = 200
     max_message_chars: int = 8000
+    max_input_tokens: int = 32_000
+    max_output_tokens: int = 4_096
+    max_session_tokens: int = 500_000
+    max_session_requests: int = 500
+    request_timeout_seconds: float = 120.0
+
+    def chat_limits(self) -> ChatLimits:
+        """Return the immutable limits contract for one session's budget."""
+
+        return ChatLimits(
+            max_input_tokens=self.max_input_tokens,
+            max_output_tokens=self.max_output_tokens,
+            max_turns=self.max_turns,
+            max_message_chars=self.max_message_chars,
+            max_session_tokens=self.max_session_tokens,
+            max_session_requests=self.max_session_requests,
+            request_timeout_seconds=self.request_timeout_seconds,
+        )
 
 
 @dataclass(frozen=True)
@@ -115,6 +141,11 @@ class TurnView:
     security: str = ""
     security_rows: list[list[Any]] = field(default_factory=list)
     security_report: dict[str, Any] = field(default_factory=dict)
+    #: Phase 15: session cost accounting — the markdown summary, the JSON
+    #: snapshot, and the per-turn usage dict for the current turn.
+    usage_summary: str = ""
+    usage_report: dict[str, Any] = field(default_factory=dict)
+    turn_usage: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -340,6 +371,67 @@ class UIController:
         )
 
     # ------------------------------------------------------------------ #
+    # Cost controls (Phase 15)
+    # ------------------------------------------------------------------ #
+
+    def update_costs(self, session_id: str | None, **fields: Any) -> str:
+        """Apply per-request and per-session cost ceilings from the sidebar.
+
+        The controller's :class:`UILimits` is replaced with a new frozen
+        object carrying the validated values. Existing session budgets are
+        not retroactively rewritten — the new ceilings apply from the next
+        turn — because a limit change mid-conversation would confuse the
+        visitor about what they are actually allowed to spend.
+        """
+
+        known = {
+            "max_input_tokens",
+            "max_output_tokens",
+            "request_timeout_seconds",
+            "max_session_tokens",
+        }
+        unknown = sorted(set(fields) - known)
+        if unknown:
+            return f"⚠️ Unknown cost setting(s): {', '.join(unknown)}"
+        current = self.limits
+        updated = {
+            "max_turns": current.max_turns,
+            "max_message_chars": current.max_message_chars,
+            "max_input_tokens": current.max_input_tokens,
+            "max_output_tokens": current.max_output_tokens,
+            "max_session_tokens": current.max_session_tokens,
+            "max_session_requests": current.max_session_requests,
+            "request_timeout_seconds": current.request_timeout_seconds,
+        }
+        for key, value in fields.items():
+            if key in ("max_input_tokens", "max_output_tokens", "max_session_tokens"):
+                try:
+                    updated[key] = int(value)
+                except (TypeError, ValueError):
+                    return f"⚠️ {key} must be a non-negative integer."
+            elif key == "request_timeout_seconds":
+                try:
+                    updated[key] = float(value)
+                except (TypeError, ValueError):
+                    return f"⚠️ {key} must be a positive number."
+        # Validate the timeout separately since UILimits does not enforce it.
+        if updated["request_timeout_seconds"] <= 0:
+            return "⚠️ request_timeout_seconds must be greater than zero."
+        try:
+            new_limits = UILimits(**updated)
+            # Validate through ChatLimits which enforces the full contract.
+            new_limits.chat_limits()
+        except (TypeError, ValueError) as exc:
+            return f"⚠️ {exc}"
+        self.limits = new_limits
+        return (
+            f"Cost limits updated · max input {self.limits.max_input_tokens} · "
+            f"max output {self.limits.max_output_tokens} · "
+            f"timeout {self.limits.request_timeout_seconds:g}s · "
+            f"session budget {self.limits.max_session_tokens} tokens"
+        )
+
+    # ------------------------------------------------------------------ #
     # Context configuration
     # ------------------------------------------------------------------ #
 
@@ -427,7 +519,14 @@ class UIController:
     # ------------------------------------------------------------------ #
 
     def chat(self, session_id: str | None, message: str) -> TurnView:
-        """Run one user turn and render every inspection panel."""
+        """Run one user turn and render every inspection panel.
+
+        Phase 15: the session's :class:`ChatBudget` is checked before the
+        provider is called and charged after. A ceiling hit renders a
+        user-visible refusal — the turn is not sent, the budget is not
+        charged, and the visitor is told how to continue (clear the
+        conversation or start a new session).
+        """
 
         state = self.ensure_session(session_id)
         text = (message or "").strip()
@@ -441,13 +540,14 @@ class UIController:
                     f"{self.limits.max_message_chars}. Shorten it or raise the limit."
                 ),
             )
-        if self._user_turns(state) >= self.limits.max_turns:
+        budget = self._ensure_budget(state)
+        try:
+            budget.check_turn()
+        except ChatLimitExceeded as exc:
+            budget.record_refusal(exc.limit)
             return self._view(
                 state,
-                notice=(
-                    f"⚠️ This session reached {self.limits.max_turns} turns. "
-                    "Start a new session to continue."
-                ),
+                notice=f"⚠️ {exc}",
             )
 
         try:
@@ -455,8 +555,15 @@ class UIController:
         except BrainOSNotConfiguredError:
             return self._view(state, notice=f"⚠️ {_BRAINOS_INSTALL_HINT}")
 
+        # Count the turn only after the service is successfully created —
+        # a failed service creation must not consume a turn from the budget.
+        budget.record_turn()
+
         try:
-            turn = service.handle_user_message(text)
+            turn = service.handle_user_message(
+                text,
+                request_timeout=self.limits.request_timeout_seconds,
+            )
         except BrainOSNotConfiguredError:
             return self._view(state, notice=f"⚠️ {_BRAINOS_INSTALL_HINT}")
         except Exception as exc:  # noqa: BLE001 - a web turn must not crash the app
@@ -466,6 +573,27 @@ class UIController:
                     f"⚠️ {type(exc).__name__}: {exc}", self._secrets(state)
                 ),
             )
+
+        # Phase 15: charge the budget from the turn's reported usage.
+        budget.charge(
+            prompt_tokens=turn.usage.get("prompt_tokens"),
+            completion_text=turn.reply or "",
+            usage={
+                "prompt_tokens": turn.usage.get("prompt_tokens"),
+                "completion_tokens": turn.usage.get("completion_tokens"),
+            },
+            failed=bool(turn.error) or bool(turn.usage.get("failed")),
+            timed_out=bool(turn.usage.get("timed_out")),
+        )
+
+        # Check per-request input ceiling post-hoc for the prompt we built
+        # (the pre-check above is on turn/token/session, not on prompt size).
+        prompt_tokens = turn.usage.get("prompt_tokens", 0)
+        if (
+            self.limits.max_input_tokens
+            and prompt_tokens > self.limits.max_input_tokens
+        ):
+            budget.record_refusal("max_input_tokens")
 
         self._last_turn[state.session_id] = turn
         return self._view(
@@ -575,6 +703,7 @@ class UIController:
             ],
             "persistence": self._persistence_payload(state.session_id),
             "security": self._security_report_safe(service, state),
+            "usage": self.usage_payload(state.session_id),
         }
         return self._redact(payload, self._secrets(state))
 
@@ -693,6 +822,12 @@ class UIController:
             security=self._redact(panels.security_markdown(security), secrets),
             security_rows=self._redact(panels.security_rows(security), secrets),
             security_report=security,
+            usage_summary=self._redact(
+                panels.usage_summary(self.usage_payload(state.session_id)),
+                secrets,
+            ),
+            usage_report=self.usage_payload(state.session_id),
+            turn_usage=dict(turn.usage) if turn is not None else {},
         )
 
     # ------------------------------------------------------------------ #
@@ -837,6 +972,32 @@ class UIController:
         key = state.provider.api_key
         return (key,) if key else ()
 
+    def _ensure_budget(self, state: SessionState) -> ChatBudget:
+        """Return the session's cost budget, creating it on first use.
+
+        Phase 15: the budget is created lazily from the controller's
+        :class:`UILimits` so a session that never sends a turn costs nothing
+        to track. The budget is stored on the session state so
+        ``clear_conversation`` can reset it alongside the transcript.
+        """
+
+        budget = state.usage
+        if isinstance(budget, ChatBudget):
+            return budget
+        budget = ChatBudget(limits=self.limits.chat_limits())
+        state.usage = budget
+        return budget
+
+    def usage_payload(self, session_id: str | None) -> dict[str, Any]:
+        """Return the current session's cost accounting for diagnostics and export."""
+
+        state = self.ensure_session(session_id)
+        budget = state.usage
+        if isinstance(budget, ChatBudget):
+            return budget.snapshot()
+        # No turn has been sent yet — report the limits and zero usage.
+        return ChatBudget(limits=self.limits.chat_limits()).snapshot()
+
     def _redact(self, value: Any, secrets: tuple[str, ...]) -> Any:
         return sanitize_value(value, secrets=secrets)
 
@@ -863,6 +1024,7 @@ __all__ = [
     "DEFAULT_MODEL_PLACEHOLDER",
     "MODE_CHOICES",
     "PROVIDER_LABELS",
+    "ChatLimits",
     "ConnectionView",
     "SessionView",
     "TurnView",

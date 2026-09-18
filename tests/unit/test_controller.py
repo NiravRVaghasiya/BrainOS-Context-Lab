@@ -226,7 +226,7 @@ def test_turn_and_message_limits_are_enforced(controller: UIController) -> None:
     sid = limited.connect(None, provider="openai", model="m", api_key=KEY).session_id
     assert limited.chat(sid, "first").history
     blocked = limited.chat(sid, "second")
-    assert "reached 1 turns" in blocked.status
+    assert "max_turns" in blocked.status or "reached 1 turns" in blocked.status
 
 
 def test_a_stale_session_id_gets_a_fresh_isolated_session(controller: UIController) -> None:
