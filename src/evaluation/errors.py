@@ -77,6 +77,7 @@ from pathlib import Path
 from typing import Any
 
 from baselines.modes import mode_label, mode_profile
+from reproducibility.run_provenance import app_version, brainos_version
 from security.findings import summarize_security
 
 from .analysis import extract_mode_result_items
@@ -1167,6 +1168,8 @@ def error_report(
             "modes_with_defects": modes_with_defects,
             "run_ids": run_ids,
             "trials": sorted({int(item.get("trial", 0) or 0) for item in items}),
+            "application_version": app_version(),
+            "brainos_version": brainos_version(),
         },
         "scored_record_count": scorable_total,
         "graded_record_count": graded_total,

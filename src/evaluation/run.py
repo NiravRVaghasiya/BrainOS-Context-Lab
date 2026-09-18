@@ -35,10 +35,16 @@ import argparse
 import hashlib
 import json
 import sys
+from dataclasses import asdict
 from pathlib import Path
 
 from baselines.modes import ABLATION_ORDER, MODE_ORDER
 from brain.tokenizers import TokenizerUnavailableError, estimate_tokens, tiktoken_counter
+from reproducibility.run_provenance import (
+    app_version,
+    brainos_version,
+    build_manifest,
+)
 from security.findings import summarize_security
 
 from .datasets import load_jsonl
@@ -286,6 +292,23 @@ def main(argv: list[str] | None = None) -> int:
     payload["security"] = summarize_security(
         record.get("security") for record in run.task_results
     )
+    # Phase 16 (reproducibility): a top-level ``repro`` block and the fallback
+    # version fields on ``config``, so a run artifact produced or consumed by
+    # older tooling still carries the §22 provenance vocabulary. The manifest
+    # is the full authority.
+    config_dict = asdict(run.config)
+    config_dict["output"] = str(args.output)
+    payload["repro"] = build_manifest(
+        run_id=run.run_id,
+        timestamp=run.timestamp,
+        task_ids=tuple(str(item.get("task_id", "")) for item in run.task_results),
+        dataset_path=args.dataset,
+        config=config_dict,
+        aggregate_metrics=run.aggregate_metrics,
+    )
+    payload["config"]["application_version"] = app_version()
+    payload["config"]["brainos_version"] = brainos_version()
+    payload["config"]["output"] = str(args.output)
     if budget is not None and spec is not None:
         # The Phase 6/7 run schema stays as it is; the cost report is an
         # addition beside it so older consumers keep working unchanged.

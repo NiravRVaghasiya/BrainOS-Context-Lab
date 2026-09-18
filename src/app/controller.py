@@ -317,6 +317,11 @@ class UIController:
 
         if config.model and config.model not in models:
             models = (config.model, *models)
+        safe_models = tuple(
+            model
+            for model in models
+            if config.api_key not in model
+        )
         return ConnectionView(
             status=(
                 f"Connected to **{config.provider}** · model `{config.model or '—'}` · "
@@ -325,7 +330,7 @@ class UIController:
             ),
             session_id=state.session_id,
             connected=True,
-            models=models,
+            models=safe_models,
             model_value=config.model,
             key_value="",
             diagnostics=config.safe_dict(),
@@ -687,6 +692,13 @@ class UIController:
             "conversation_id": state.conversation_id,
             "provider": state.provider.safe_dict(),
             "context": self.context_payload(state.session_id),
+            "limits": self.limits.chat_limits().to_dict(),
+            "chat_history_sha256": self._chat_history_digest(state),
+            "versions": {
+                "application": self._application_version(),
+                "benchmark": "context-rot-v1",
+                "brainos": self._brainos_version(),
+            },
             "messages": [dict(message) for message in state.messages],
             "memories": [
                 {
@@ -1018,6 +1030,43 @@ class UIController:
             if text and text not in cleaned:
                 cleaned.append(text)
         return cleaned
+
+    @staticmethod
+    def _chat_history_digest(state: SessionState) -> str:
+        """SHA-256 of the transcript, in message order, for the session export.
+
+        Deterministic for a given transcript — no timestamps, no ids — so the
+        same conversation exported twice hashes the same way, and a result tied
+        to the hash can be re-inspected against the transcript it came from.
+        """
+
+        import hashlib
+
+        digest = hashlib.sha256()
+        for message in state.messages:
+            role = str(message["role"]) if isinstance(message, Mapping) else "user"
+            content = str(message["content"]) if isinstance(message, Mapping) else str(message)
+            digest.update(role.encode("utf-8"))
+            digest.update(b"\n")
+            digest.update(content.encode("utf-8"))
+            digest.update(b"\n")
+        return digest.hexdigest()
+
+    @staticmethod
+    def _application_version() -> str:
+        """The installed application version, or its fallback (never the key)."""
+
+        from reproducibility.run_provenance import app_version
+
+        return app_version()
+
+    @staticmethod
+    def _brainos_version() -> str:
+        """The installed BrainOS revision, or ``unvalidated`` (never the key)."""
+
+        from reproducibility.run_provenance import brainos_version
+
+        return brainos_version()
 
 
 __all__ = [

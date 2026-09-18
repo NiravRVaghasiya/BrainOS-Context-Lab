@@ -87,6 +87,10 @@ from brain.tokenizers import (
     estimate_tokens,
     tiktoken_counter,
 )
+from reproducibility.run_provenance import (
+    BENCHMARK_VERSION as REPRO_BENCHMARK_VERSION,
+)
+from reproducibility.run_provenance import app_version, brainos_version
 from security.findings import summarize_security
 
 from .datasets import BenchmarkTask, dataset_issues, load_jsonl
@@ -115,10 +119,11 @@ from .scoring import aggregate_scores, score_record
 EXPERIMENT_VERSION = "experiment-v1"
 
 #: Application version recorded on a run, matching :mod:`evaluation.runner`.
-APPLICATION_VERSION = "0.1.0"
+APPLICATION_VERSION = "0.1.0"  # noqa: F841 - legacy export field, kept for schema stability
 
-#: Benchmark revision recorded on a run, matching the Phase 7 generator.
-BENCHMARK_VERSION = "context_rot-v1"
+#: Benchmark revision recorded on a run, matching the Phase 7 generator
+#: (``benchmarks/context_rot``, which pins ``context-rot-v1`` in its spec).
+BENCHMARK_VERSION = "context-rot-v1"
 
 #: The context budget the controlled runs are built with (plan Phase 16 lists
 #: it as provenance because every token figure depends on it).
@@ -388,13 +393,41 @@ class ExperimentRun:
             "experiment_version": EXPERIMENT_VERSION,
             "run_id": self.run_id,
             "timestamp": self.timestamp,
+            "repro": {
+                "repro_version": "repro-v1",
+                "application_version": app_version(),
+                "benchmark_version": REPRO_BENCHMARK_VERSION,
+                "brainos_version": brainos_version(),
+                "experiment_version": EXPERIMENT_VERSION,
+                "run_id": self.run_id,
+                "timestamp": self.timestamp,
+                "dry_run": self.dry_run,
+                "passed": self.passed,
+                "trials": self.plan.trials,
+                "session_isolation": self.plan.session_isolation,
+                "modes": list(self.plan.resolved_modes()),
+                "task_count": self.tasks_executed,
+                "dataset": self.plan.dataset,
+                "dataset_sha256": self.plan.dataset_sha256,
+                "limits": self.plan.limits.to_dict(),
+                "model": (
+                    {
+                        "provider": self.model.provider,
+                        "model": self.model.model,
+                        "temperature": self.model.temperature,
+                    }
+                    if self.model is not None
+                    else None
+                ),
+                "violations": list(self.violations),
+            },
             "dry_run": self.dry_run,
             "passed": self.passed,
             "plan": self.plan.to_dict(),
             "model": self.model.to_dict() if self.model is not None else None,
             "provenance": {
-                "application_version": APPLICATION_VERSION,
-                "brainos_version": runtime_version(),
+                "application_version": app_version(),
+                "brainos_version": brainos_version(),
                 "benchmark_version": BENCHMARK_VERSION,
                 "dataset_sha256": self.plan.dataset_sha256,
                 "context_budget": CONTEXT_BUDGET,
@@ -747,8 +780,8 @@ def _build_mode_result(
         "mode": mode,
         "benchmark": "context_rot",
         "benchmark_version": BENCHMARK_VERSION,
-        "application_version": APPLICATION_VERSION,
-        "brainos_version": runtime_version(),
+        "application_version": app_version(),
+        "brainos_version": brainos_version(),
         "context_budget": CONTEXT_BUDGET,
         "temperature": model.temperature if model is not None else None,
         "session_isolation": plan.session_isolation,

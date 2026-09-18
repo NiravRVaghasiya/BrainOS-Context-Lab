@@ -350,7 +350,7 @@ def test_artifact_carries_provenance_and_no_credential_fields() -> None:
 
     assert payload["provenance"]["model"] == "fake-model"
     assert payload["provenance"]["application_version"]
-    assert payload["provenance"]["benchmark_version"] == "context_rot-v1"
+    assert payload["provenance"]["benchmark_version"] == "context-rot-v1"
     assert payload["provenance"]["context_budget"] > 0
     assert payload["experiment_version"] == "experiment-v1"
     # ``api_key_env`` is the *name* of an environment variable, which is

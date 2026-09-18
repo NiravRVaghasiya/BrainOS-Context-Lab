@@ -4,8 +4,8 @@
 > repository state and decisions that should be preserved between phases.
 
 **Last updated:** 2026-09-18
-**Branch:** `arena/01a0b40c-brainos-context-lab`
-**Baseline:** `485d8a1` (`origin/main`, the PR #15 merge that includes Phase 14); this branch adds Phase 15 on top
+**Branch:** `arena/01a0b437-brainos-context-lab`
+**Baseline:** `baac161` (`origin/main`, the PR #16 merge that includes Phase 15); this branch adds Phase 16 on top
 **Implementation plan:** [`BrainOS_Context_Lab_Implementation_Plan.md`](BrainOS_Context_Lab_Implementation_Plan.md)
 
 ## Product boundary
@@ -35,8 +35,9 @@ layer that helps select historical context.
 | Phase 12 — Error analysis | Complete (landed via PR #13) | The plan's nine-label failure taxonomy with stage attribution: builds on `score_record` + the Phase 3 drop-reason audit (never a second scorer), emits one JSON failure record per defect (`task_id`, `mode`, `conversation_length`, `expected_memory`, `retrieved_memories`, `answer`, `failure_type` + verdict/retrieval/prompt/grounding contexts), and aggregates by mode (baselines *and* ablations), category, and length. `python -m evaluation.errors` over dry-run, three-tier, and scripted-answer runs; `labels_vs_scorer.unexpected=0`. 696 tests. |
 | **Phase 13 — Security** | Complete (landed via PR #14) | One shared guard (`src/security/guard.py`: 7 families, intent vs structural split, invisible/control folding, 14 attack + 9 benign probes), one findings vocabulary with a per-session ledger and a `PromptGuardReport` on every built prompt, a Security tab in the UI, an artifact scanner CLI (`python -m security.scan`, two detection layers, scope in every report), history + current-message credential redaction (the route Phases 3/5/6 left open), history role containment, `PRAGMA secure_delete=ON` + `VACUUM` after every user-data delete, and a `security` block in mode/run/experiment/error artifacts. `suspicious` stays label-less (`labels_vs_scorer.unexpected=0`); shipped surfaces scan clean (77 files, 0 findings); the guard flags/rewrites 0 of the 522 benchmark strings (pinned by a test, not a quoted measurement). Threat model expanded from the 7-line stub. 696 → **1004 tests**; live-validated against the pinned runtime. |
 | **Phase 14 — HF Deployment** | **Complete in this turn** | Flat `requirements.txt` (gradio, openai, pinned BrainOS commit `1d9eb7a0…`, matplotlib, pandas, `-e .`) and a present `packages.txt`; SQLite stores switched to WAL journal mode with `busy_timeout=30s`, `synchronous=NORMAL`, and `wal_checkpoint(TRUNCATE)` after every destructive write (so Phase 13's byte-level secure-deletion contract holds under concurrent Gradio workers); a shared-cache `:memory:` mode via `BRAINOS_LAB_DB=:memory:` for ephemeral/stateless deployments; bounded `demo.queue(default_concurrency_limit=3, max_size=32, api_open=False)`; header copy is now a function that reads `persistence_enabled()` so the UI tells the visitor honestly whether messages go to disk or vanish on restart; `tests/unit/test_deployment_config.py` (11 tests) pins every deployment surface; artifact scanner extended to cover `app.py`, `requirements.txt`, `packages.txt`, `pyproject.toml`; secure-deletion byte scans now read `-wal`/`-shm` sidecars. 1004 → **1015 tests**; server boots on `0.0.0.0:7860` and serves HTTP 200 in `:memory:` mode; shipped surfaces scan clean (83 files, 0 findings); `ruff check .` clean. |
-| **Phase 15 — Cost Controls** | **Complete in this turn** | `ChatLimits` (7 ceilings: `max_input_tokens`, `max_output_tokens`, `max_turns`, `max_message_chars`, `max_session_tokens`, `max_session_requests`, `request_timeout_seconds`) + `ChatBudget` (mutable session accounting with `check_turn()`, `charge()`, `record_turn()`, `record_refusal()`, `snapshot()`) + `ChatLimitExceeded` (credential-blind refusal); `UILimits` expanded from 2 to 7 fields with `chat_limits()` bridge; `update_costs()` callback wired to 4 sidebar widgets; service gains `request_timeout` wrapping the provider call in `concurrent.futures` + `_TimeoutError`; `ConversationTurn.usage` carries prompt/completion tokens, timeout, and failure flags; Usage tab added to the inspection panels; turn view carries `usage_summary`, `usage_report`, `turn_usage`; export includes `usage` block; `clear_conversation()` resets the budget. 1015 → **1048 tests**; `ruff check .` clean; 90 shipped files scan clean. |
-| Phases 16–20 | Pending | Reproducibility, evaluation pipeline in the UI, test suite completion, MVP polish, research release. |
+| **Phase 15 — Cost Controls** | Complete | `ChatLimits` (7 ceilings: `max_input_tokens`, `max_output_tokens`, `max_turns`, `max_message_chars`, `max_session_tokens`, `max_session_requests`, `request_timeout_seconds`) + `ChatBudget` (mutable session accounting with `check_turn()`, `charge()`, `record_turn()`, `record_refusal()`, `snapshot()`) + `ChatLimitExceeded` (credential-blind refusal); `UILimits` expanded from 2 to 7 fields with `chat_limits()` bridge; `update_costs()` callback wired to 4 sidebar widgets; service gains `request_timeout` wrapping the provider call in `concurrent.futures` + `_TimeoutError`; `ConversationTurn.usage` carries prompt/completion tokens, timeout, and failure flags; Usage tab added to the inspection panels; turn view carries `usage_summary`, `usage_report`, `turn_usage`; export includes `usage` block; `clear_conversation()` resets the budget. 1015 → **1048 tests**; `ruff check .` clean; 90 shipped files scan clean. |
+| **Phase 16 — Reproducibility** | **Complete in this turn** | One `src/reproducibility/` package is the single source of the §22 vocabulary: `app_version()` (installed-metadata read with `fallback:` origin tag), `brainos_version()` (`unvalidated` / `pinned:` / live read plus the `pin:` commit), `build_manifest()` (versions + environment + config + task ids + dataset path/digest + aggregate metrics + a credential-free `--rerun` string), `rerun_command()`, `global_overrides()`, `persist_run()` (secret-stripping store write). `python -m evaluation.run` writes a top-level `repro` block **and** the fallback `config.application_version` / `config.brainos_version` / `config.benchmark_version` / `config.output` fields; `evaluation.experiment` carries a matching `repro` block and routes its `provenance` version fields through the same functions; `evaluation.errors` records the version pair in `provenance`. The chat export gains `limits` (the Phase 15 constraint), `versions`, and a `chat_history_sha256` transcript digest; `connect()` drops model ids that echo the session key. Fixed the latent split-vocabulary bug (`context_rot-v1` vs the dataset's `context-rot-v1`), unified on `context-rot-v1` and pinned by a test. 1048 → **1070 tests**; `ruff check .` clean; 87 shipped files scan clean. |
+| Phases 17–20 | Pending | Evaluation pipeline in the UI, test suite completion, MVP polish, research release. |
 
 Detailed logs are available in
 [`docs/phase-0-research-baseline.md`](docs/phase-0-research-baseline.md),
@@ -52,8 +53,81 @@ Detailed logs are available in
 [`docs/phase-10-statistical-evaluation.md`](docs/phase-10-statistical-evaluation.md),
 [`docs/phase-11-ablation-study.md`](docs/phase-11-ablation-study.md),
 [`docs/phase-12-error-analysis.md`](docs/phase-12-error-analysis.md),
-[`docs/phase-13-security.md`](docs/phase-13-security.md), and
-[`docs/phase-14-hf-deployment.md`](docs/phase-14-hf-deployment.md).
+[`docs/phase-13-security.md`](docs/phase-13-security.md),
+[`docs/phase-14-hf-deployment.md`](docs/phase-14-hf-deployment.md),
+[`docs/phase-15-cost-controls.md`](docs/phase-15-cost-controls.md), and
+[`docs/phase-16-reproducibility.md`](docs/phase-16-reproducibility.md).
+
+## What was done in Phase 16 (this turn)
+
+Phase 16 closes the last deferred item the Phase 15 log named: reproducibility.
+Before it, every evaluation artifact carried *some* provenance — an experiment
+recorded `application_version` / `brainos_version` / `benchmark_version` in a
+`provenance` block, a single-mode run recorded a `dataset_sha256` in `config` —
+but the version strings were produced in three different places, one of them
+spelled the benchmark revision differently from the dataset generator it was
+supposed to match, and a chat export carried nothing that let a reader re-derive
+which ceilings and code revision produced it.
+
+### New / changed modules
+
+| File | Purpose |
+| --- | --- |
+| [`src/reproducibility/__init__.py`](src/reproducibility/__init__.py) (new) | Package surface: the manifest and version primitives. |
+| [`src/reproducibility/run_provenance.py`](src/reproducibility/run_provenance.py) (new) | The single source of the §22 vocabulary. `app_version()`, `brainos_version()`, `build_manifest()`, `rerun_command()`, `global_overrides()`, `persist_run()`. Standard-library only; storage imported lazily. |
+| [`src/evaluation/run.py`](src/evaluation/run.py) | `repro` block + fallback `config` version/`output` fields on every single-mode run artifact. |
+| [`src/evaluation/experiment.py`](src/evaluation/experiment.py) | `ExperimentRun` gains a top-level `repro` block matching the manifest; `provenance` fields route through `app_version()` / `brainos_version()`; `ModeResult.config` carries the pair. |
+| [`src/evaluation/runner.py`](src/evaluation/runner.py) | `benchmark_version` default unified to `context-rot-v1` (was the underscore spelling). |
+| [`src/evaluation/errors.py`](src/evaluation/errors.py) | `provenance.application_version` / `brainos_version` on the Phase 12 report. |
+| [`src/app/controller.py`](src/app/controller.py) | Export `limits` (Phase 15 constraint), `versions`, `chat_history_sha256`; `connect()` drops model ids echoing the session key. |
+| [`tests/unit/test_run_provenance.py`](tests/unit/test_run_provenance.py) (new, 12) | Manifest shape, honesty of unknowns, credential-freedom, version-vocabulary single-sourcing, rerun command. |
+| [`tests/evaluation/test_reproducibility.py`](tests/evaluation/test_reproducibility.py) (new, 7) | Run/experiment/error-report artifact pins plus `persist_run` through the store protocol. |
+| [`tests/unit/test_reproducibility_chat.py`](tests/unit/test_reproducibility_chat.py) (new, 4) | Chat-side export fields and the model-id credential boundary. |
+| [`docs/phase-16-reproducibility.md`](docs/phase-16-reproducibility.md) (new) | Detailed phase log, decisions, measured behaviour, constraints carried forward. |
+
+### Decisions later phases must not undo
+
+1. **`src/reproducibility/run_provenance.py` is the only place version strings
+   are produced.** Phase 17's UI runner and any new artifact type call
+   `build_manifest` / `app_version` / `brainos_version`; no new local
+   `APPLICATION_VERSION` constants.
+2. **`benchmark_version` is `context-rot-v1` (hyphen).** The underscore spelling
+   was the split-vocabulary bug this phase fixed; `experiment.BENCHMARK_VERSION`
+   was not the reference — the dataset generator's `spec.GENERATOR_VERSION` is.
+3. **Version strings carry origin tags** (`fallback:` / `installed:` /
+   `pinned:` / `unvalidated`). Stripping them would make a live read
+   indistinguishable from a constant.
+4. **`repro` is an addition, not a replacement.** `config` keeps the fallback
+   version fields so pre-Phase-16 consumers keep working; the top-level
+   manifest is authoritative.
+5. **A manifest never fails a run.** `build_manifest` never raises; provenance
+   recording must not be the reason an experiment is lost.
+6. **The model-id guard is exact-match on the session key**, not a pattern scrub
+   of "key-looking" ids — a provider may legitimately name a model strangely.
+
+### Bugs and gaps found while building it
+
+1. **The benchmark revision was spelled two ways.** Dataset `context-rot-v1` vs
+   runner/experiment `context_rot-v1`. Unified and pinned.
+2. **The experiment had two BrainOS-version readers** (`runtime_version()` and
+   the manifest would have drifted); both now call `brainos_version()`.
+3. **`output` was never recorded** on a run artifact; `config.output` now is,
+   and the manifest's `rerun_command` reconstructs from it.
+
+### Measured behaviour
+
+```bash
+.venv/bin/pytest -q                                   # 1070 passed
+.venv/bin/ruff check .                                # All checks passed!
+PYTHONPATH=src .venv/bin/python -m security.scan <all shipped>   # 87 files, 0 findings
+PYTHONPATH=src .venv/bin/python -m evaluation.run --mode brainos --limit 1 --output /tmp/r.json
+# → repro.brainos_version = "2.0.0-alpha.1 (pin:1d9eb7a0ca537e7278e29809cda4f4c5da6c1dcc)"
+# → repro.application_version = "fallback:0.1.0"
+# → repro.dataset.sha256 matches the committed manifest
+```
+
+See [`docs/phase-16-reproducibility.md`](docs/phase-16-reproducibility.md) for
+the full record, including the live chat-export read.
 
 ## What was done in Phase 15 (this turn)
 

@@ -35,7 +35,7 @@ class EvaluationConfig:
     benchmark: str = "context_rot"
     context_budget: int = 4096
     temperature: float = 0.0
-    benchmark_version: str = "context_rot-v1"
+    benchmark_version: str = "context-rot-v1"
     brainos_version: str = "unvalidated"
     application_version: str = "0.1.0"
     dataset_sha256: str = ""

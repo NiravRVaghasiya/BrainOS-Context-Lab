@@ -8,7 +8,7 @@ This repository integrates BrainOS as an upstream dependency. It does **not** mo
 
 ## Current status
 
-Phases 1–15 are complete and validated against the pinned BrainOS runtime. The
+Phases 1–16 are complete and validated against the pinned BrainOS runtime. The
 app persists conversations and memory mirrors to SQLite with hard session
 isolation, offers the full data-control set (clear conversation, clear memory,
 export session, end/delete session), can run the same conversation through all
@@ -20,9 +20,11 @@ multi-mode experiments with cost budgets, summarizes trials with paired
 statistics and effect sizes, ablates the BrainOS pipeline one component at a
 time, turns the scored records into a structured failure taxonomy, guards
 every route untrusted text takes into a prompt — with the guard's own findings
-reported in the UI, in exports, and in evaluation artifacts — and enforces
+reported in the UI, in exports, and in evaluation artifacts, enforces
 per-request and per-session cost ceilings on the chat path so a public BYOK
-deployment cannot run away.
+deployment cannot run away, and stamps every run with a reproducibility
+manifest (versions, environment, task ids, dataset digest, and a re-run
+command) so a result can be re-derived and re-inspected.
 
 - **Phase 1** maps the provider abstraction (OpenAI and OpenAI-compatible)
   behind `LLMProvider`, with secret-safe errors and diagnostics.
@@ -109,16 +111,28 @@ deployment cannot run away.
   cost control widgets in the sidebar, usage in the session export, and
   budget reset on clear-conversation. A refusal is a user-visible status,
   not a security finding.
+- **Phase 16** makes results reproducible: one `reproducibility` package is
+  the single source of the plan's §22 vocabulary, and every
+  `python -m evaluation.run` artifact, every controlled experiment, and every
+  error report carries a `repro` manifest (run id, timestamp, pinned BrainOS
+  revision, application version, provider/model/temperature, benchmark
+  revision, mode, context budget, task ids, dataset path + SHA-256, and a
+  copy-pasteable `--rerun` command). The chat export now records the session
+  cost ceilings, the application/BrainOS/benchmark revisions, and a
+  `chat_history_sha256` transcript digest, and the model dropdown refuses
+  identifiers that echo the session key. A latent split-vocabulary bug — the
+  runner/experiment recorded `context_rot-v1` where the dataset generator
+  pins `context-rot-v1` — is fixed and pinned by a test.
 
 A session-scoped `ConversationService` combines the adapter, the retrieval
 policy, the context builder, and the provider factory. Deterministic fakes cover
 the whole pipeline without BrainOS installed; optional live tests exercise the
-pinned runtime. 1048 tests pass and `ruff check .` is clean repository-wide.
+pinned runtime. 1070 tests pass and `ruff check .` is clean repository-wide.
 
 Chat is usable without an API key: BrainOS still observes and retrieves memory,
 and the panels show exactly what the model *would* have been sent. See
 [`CONTEXT.md`](CONTEXT.md) for the living implementation state and the Phase
-0–12 logs in `docs/`.
+0–16 logs in `docs/`.
 
 ### Measured behaviour so far
 
@@ -215,6 +229,8 @@ src/
   storage/                     # Conversation and evaluation persistence
   evaluation/                  # Benchmark runners, mode strategies, metrics,
                                #   reports, and the Phase 12 error taxonomy
+  reproducibility/             # Phase 16: the §22 run manifest, version reads,
+                               #   rerun command, and persistence seam
 benchmarks/
   context_rot/                 # Phase 7 generator, spec, scored dataset, manifest
   fixtures/                    # Deterministic fixtures (Phase 12 scripted answers)
@@ -323,12 +339,19 @@ python -m evaluation.errors results/run.json --examples 1
 # Phase 13: is there a credential in anything a run wrote?
 # --secrets-env names an environment variable, so the value is never an argument.
 python -m security.scan results/ data/brainos_lab.sqlite3 --secrets-env OPENAI_API_KEY
+
+# Phase 16: inspect a run's reproducibility manifest and exact re-run command
+python -m evaluation.run --mode brainos --limit 1 --output results/run.json
+python -c "import json; print(json.load(open('results/run.json'))['repro']['rerun_command'])"
 ```
 
 `--session-isolation` replays each transcript session separately, which is how
 the cross-session category measures the product's "memory never crosses a
 session" invariant instead of assuming it. `--limit N` caps the number of tasks
-as a first cost control; the full Phase 15 budgets are still to come.
+as a first cost control; the full Phase 15 run budgets (`quick` / `standard` /
+`research` presets, per-request and per-run ceilings) apply on top of it once
+`--generate` sends prompts to a model. Every run artifact also carries a
+`repro` manifest — versions, task ids, dataset digest, and a `rerun_command`.
 
 ## Security principles
 
@@ -369,8 +392,9 @@ as a first cost control; the full Phase 15 budgets are still to come.
 See [`docs/threat-model.md`](docs/threat-model.md) for the assets, actors, routes,
 and residual risk, [`docs/security.md`](docs/security.md) for the maintained
 controls, [`docs/phase-13-security.md`](docs/phase-13-security.md) for how they
-were built and measured, and [`docs/architecture.md`](docs/architecture.md) for
-the system boundaries.
+were built and measured, [`docs/phase-16-reproducibility.md`](docs/phase-16-reproducibility.md)
+for the reproducibility manifest, and [`docs/architecture.md`](docs/architecture.md)
+for the system boundaries.
 
 ## Research positioning
 
