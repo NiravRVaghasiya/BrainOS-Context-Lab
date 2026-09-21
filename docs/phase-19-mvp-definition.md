@@ -214,6 +214,21 @@ scan_version=scan-v1 files=101 bytes=1744538 findings=0 clean=True
 New modules: `src/checkout.py` 100%, `src/app/retention.py` 95%,
 `src/app/evaluation.py` 94% (all above the 90% floor).
 
+Both CI jobs pass on the pushed branch (run
+[`35582619453`](https://github.com/NiravRVaghasiya/BrainOS-Context-Lab/actions/runs/35582619453)):
+
+```text
+lint, test, coverage floor                pass    6m17s
+suite runs without the optional extras    pass      25s
+```
+
+The `without-extras` job failed on the first push and is worth recording: a
+pipeline run builds a BrainOS adapter for *every* mode, including the baselines,
+so in a base install the experiment stage fails (exit 4) rather than skipping —
+two of this phase's checkout tests asserted a successful run without declaring
+the dependency. They now carry `@pytest.mark.requires_runtime`, and the local
+base-install run is `1132 passed, 104 skipped, 0 failed`.
+
 ## Constraints carried into Phase 20+
 
 1. **The MVP is walkable but not published.** §25 item 1 is the only unmet item,
