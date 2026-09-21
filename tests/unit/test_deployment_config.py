@@ -12,7 +12,12 @@ relies on that aren't visible from inside a running chat turn:
   WAL mode with a busy timeout so concurrent Gradio workers don't lock,
 * the Gradio entry point calls ``.queue()`` with bounded concurrency so a
   public Space cannot be driven into unbounded parallel provider calls,
-* the UI header honestly discloses whether persistence is enabled.
+* the UI header honestly discloses whether persistence is enabled,
+* Phase 20: the README opens with the Hugging Face manifest a Space build reads
+  (``sdk`` / ``app_file`` / a version that does not lag ``requirements.txt``),
+  and the five ``BRAINOS_LAB_EVAL_*`` variables narrow the Evaluation tab
+  without editing source — including the failure mode, where an unparsable value
+  stops startup instead of silently hosting the widest policy.
 
 These tests do not require Gradio or BrainOS to be installed; they read files
 and exercise the storage module with dependency-free assertions.
@@ -224,3 +229,194 @@ def test_default_database_path_is_repo_local_when_unset(
     import pathlib
 
     assert sqlite_mod.default_database_path() == pathlib.Path("data") / "brainos_lab.sqlite3"
+
+
+# --------------------------------------------------------------------------- #
+# Phase 20: the Space manifest and the deployment-narrowed Evaluation tab
+# --------------------------------------------------------------------------- #
+
+
+#: The colours the Space server accepts in front matter; anything else is
+#: rejected when the Space is created.
+_HF_SPACE_COLORS = frozenset(
+    {"red", "yellow", "green", "blue", "indigo", "purple", "pink", "gray"}
+)
+
+
+def _front_matter(text: str) -> dict[str, str]:
+    """Parse the ``---`` block at the top of the README as ``key: value`` pairs."""
+
+    assert text.startswith("---\n"), "README.md must open with the Space manifest"
+    end = text.index("\n---\n", 4)
+    block: dict[str, str] = {}
+    for line in text[4:end].splitlines():
+        if not line.strip():
+            continue
+        key, _, value = line.partition(":")
+        block[key.strip()] = value.strip()
+    return block
+
+
+def test_readme_carries_the_hugging_face_space_manifest() -> None:
+    """A Space created from this repository reads these keys or builds nothing."""
+
+    manifest = _front_matter(_read("README.md"))
+    assert manifest["sdk"] == "gradio"
+    assert manifest["app_file"] == "app.py"
+    assert (REPO_ROOT / manifest["app_file"]).exists()
+    assert manifest["title"] == "BrainOS Context Lab"
+    assert manifest["emoji"]
+    # The Space server rejects a longer short_description, so this is a build
+    # failure waiting to happen rather than a style preference.
+    assert 0 < len(manifest["short_description"]) <= 60
+    assert manifest["colorFrom"] in _HF_SPACE_COLORS
+    assert manifest["colorTo"] in _HF_SPACE_COLORS
+
+    # The manifest's SDK version must match the requirement the build installs;
+    # pinning an older major version would build a different Gradio than the one
+    # this suite is validated against.
+    requirement = re.search(r"gradio>=(\d+)", _read("requirements.txt"))
+    assert requirement is not None, "requirements.txt no longer pins a gradio floor"
+    assert manifest["sdk_version"].split(".")[0] == requirement.group(1)
+
+
+def test_the_deployment_document_lists_every_variable_the_code_reads() -> None:
+    """A variable an operator cannot find is a variable an operator will guess."""
+
+    import app.evaluation as evaluation
+
+    documented = _read("docs/deployment.md")
+    for name in evaluation.POLICY_ENVIRONMENT_VARIABLES:
+        assert name in documented, f"{name} is read by the code but not documented"
+    assert "docs/deployment.md" in _read("README.md")
+
+
+def test_the_ui_builds_its_controller_with_the_deployments_policy() -> None:
+    """The variables only matter if the shipped entry point reads them."""
+
+    src = _read("src/app/ui.py")
+    assert "EvaluationPolicy.from_environment()" in src
+    assert "evaluation_policy=" in src
+
+
+
+
+def test_a_generation_flag_accepts_the_strings_a_deployment_uses() -> None:
+    from app.evaluation import EvaluationPolicy
+
+    for off in ("0", "false", "no", "off", "FALSE"):
+        policy = EvaluationPolicy.from_environment({"BRAINOS_LAB_EVAL_ALLOW_GENERATION": off})
+        assert policy.allow_generation is False, off
+    # A blank value is "unset", not "off": an operator who clears the field in the
+    # Space settings should get the documented default back, not silence.
+    assert (
+        EvaluationPolicy.from_environment(
+            {"BRAINOS_LAB_EVAL_ALLOW_GENERATION": "  "}
+        ).allow_generation
+        is True
+    )
+    for on in ("1", "true", "yes", "on"):
+        assert EvaluationPolicy.from_environment(
+            {"BRAINOS_LAB_EVAL_ALLOW_GENERATION": on}
+        ).allow_generation is True
+
+
+
+# --------------------------------------------------------------------------- #
+# Space manifest (Phase 20)
+# --------------------------------------------------------------------------- #
+
+
+
+
+def test_the_space_app_file_exposes_the_entry_point_the_manifest_names() -> None:
+    text = _read("app.py")
+    assert "from app.ui import main" in text
+    assert "main()" in text
+    assert "sys.path.insert(0, str(src_dir))" in text
+
+
+
+
+# --------------------------------------------------------------------------- #
+# Evaluation-policy variables (Phase 20)
+# --------------------------------------------------------------------------- #
+
+
+def test_no_variables_means_the_plan_defaults() -> None:
+    from app.evaluation import EvaluationPolicy
+
+    assert EvaluationPolicy.from_environment({}) == EvaluationPolicy()
+    assert EvaluationPolicy.from_environment({"BRAINOS_LAB_EVAL_PRESETS": "  "}) == (
+        EvaluationPolicy()
+    )
+
+
+def test_a_public_space_can_narrow_the_tab_without_editing_source() -> None:
+    from app.evaluation import EvaluationPolicy, EvaluationRequestError
+
+    policy = EvaluationPolicy.from_environment(
+        {
+            "BRAINOS_LAB_EVAL_PRESETS": "quick",
+            "BRAINOS_LAB_EVAL_MAX_TASKS": "20",
+            "BRAINOS_LAB_EVAL_MAX_REQUESTS": "60",
+            "BRAINOS_LAB_EVAL_ALLOW_GENERATION": "0",
+            "BRAINOS_LAB_EVAL_RETENTION_DAYS": "0",
+        }
+    )
+
+    assert policy.allowed_presets == ("quick",)
+    assert policy.max_tasks == 20
+    assert policy.max_requests == 60
+    assert policy.allow_generation is False
+    assert policy.results_retention_seconds is None
+    assert "no automatic sweep" in policy.retention_notice()
+
+    with pytest.raises(EvaluationRequestError, match="retrieval-only"):
+        policy.check(preset_name="quick", generate=True)
+    with pytest.raises(EvaluationRequestError, match="does not allow"):
+        policy.check(preset_name="standard", generate=False)
+    policy.check(preset_name="quick", generate=False)  # the dry run still works
+
+
+def test_a_narrowed_policy_still_obeys_the_presets_ceiling() -> None:
+    """The variables can only tighten — ``apply`` keeps the preset's own limits."""
+
+    from app.evaluation import EvaluationPolicy
+    from evaluation.experiment import ExperimentPlan
+
+    plan = ExperimentPlan.from_preset("standard", modes=("full_context",))
+    assert (plan.limits.max_tasks, plan.limits.max_requests) == (100, 500)
+
+    narrowed = EvaluationPolicy.from_environment({"BRAINOS_LAB_EVAL_MAX_TASKS": "20"}).apply(plan)
+    assert narrowed.limits.max_tasks == 20
+    # Everything the policy did not narrow is still the preset's own number.
+    assert narrowed.limits.max_requests == 500
+
+    looser = EvaluationPolicy.from_environment({"BRAINOS_LAB_EVAL_MAX_TASKS": "500"}).apply(plan)
+    assert looser.limits.max_tasks == 100, "a policy can never widen a preset's ceiling"
+
+
+def test_a_registered_retention_window_survives_the_conversion() -> None:
+    from app.evaluation import EvaluationPolicy
+
+    policy = EvaluationPolicy.from_environment({"BRAINOS_LAB_EVAL_RETENTION_DAYS": "3"})
+    assert policy.results_retention_seconds == 3 * 86_400
+    assert "3 days" in policy.retention_notice()
+
+
+def test_a_variable_that_cannot_be_obeyed_stops_the_process_at_startup() -> None:
+    from app.evaluation import EvaluationPolicy
+
+    for name, value, expected in (
+        ("BRAINOS_LAB_EVAL_MAX_TASKS", "twenty", "must be an integer"),
+        ("BRAINOS_LAB_EVAL_MAX_TASKS", "0", "must be at least 1"),
+        ("BRAINOS_LAB_EVAL_MAX_REQUESTS", "-5", "must be at least 1"),
+        ("BRAINOS_LAB_EVAL_RETENTION_DAYS", "-1", "must be at least 0"),
+    ):
+        with pytest.raises(ValueError, match=expected) as error:
+            EvaluationPolicy.from_environment({name: value})
+        assert name in str(error.value)
+
+    with pytest.raises(ValueError, match="Unknown preset"):
+        EvaluationPolicy.from_environment({"BRAINOS_LAB_EVAL_PRESETS": "gigantic"})

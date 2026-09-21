@@ -99,6 +99,43 @@ session/conversation identity, and all reads and deletes filter on it to
 prevent cross-session leakage. The memory table is a mirror for inspection
 and export — the BrainOS runtime remains authoritative for recall.
 
+### Locations and retention
+
+Every repository-owned location — the committed dataset, the dataset root, the
+browser run artifacts under `results/ui/`, the CLIs' `--dataset` default, and the
+unset SQLite default — is resolved through `src/checkout.py`. Inside the checkout
+the paths stay exactly as the plan writes them (relative), which is what keeps
+artifacts and re-run commands portable between machines; a process started
+elsewhere (an installed console script, a supervisor with its own working
+directory) anchors them to the checkout instead of creating a second `results/`
+wherever it happened to start. `BRAINOS_LAB_DB` still overrides the database
+location, and `:memory:` still means "no file".
+
+`src/app/retention.py` owns the lifetime of `results/ui/`: a session directory is
+removed when its **newest** file is older than the retention window (7 days by
+default, `None` disables), oldest first and capped per sweep, and only if it is a
+direct child of `ui/`, a single safe path segment, not a symlink, and still
+resolves inside that directory. The sweep runs when a browser run starts and from
+`python -m app.retention`; each run's manifest records the window it ran under and
+what the sweep removed. **End session** still deletes a visitor's own rows and
+artifacts immediately.
+
+### Deployment configuration
+
+The same code runs a local checkout and a public Space; what differs is
+configuration, and it is read in exactly two places. `src/app/ui.py` reads the
+server variables (`BRAINOS_LAB_DB`, `BRAINOS_LAB_CONCURRENCY`,
+`BRAINOS_LAB_MAX_QUEUE`, the `GRADIO_*` bindings) in `main()`/`create_app()`, and
+`EvaluationPolicy.from_environment()` (`src/app/evaluation.py`) reads the five
+`BRAINOS_LAB_EVAL_*` variables that narrow the Evaluation tab. `create_app()`
+builds its controller with that policy, so a deployment that sets nothing gets
+the plan's own defaults and a deployment that sets something can only tighten:
+`EvaluationPolicy.apply` still enforces the preset's ceilings underneath, and a
+value that cannot be obeyed stops startup with the variable's name in the
+message. The manifest a Space build reads lives in the first block of
+[`README.md`](../README.md); the operator-facing table, the recommended postures
+and the checklist are in [`deployment.md`](deployment.md).
+
 ## Baseline modes
 
 The evaluation layer supports the same provider and task protocol for all five
@@ -107,11 +144,17 @@ registered in `src/baselines/modes.py`:
 
 | Mode | Selector | Evidence | History window |
 | --- | --- | --- | --- |
-| A | `full_context` | none | unlimited (whole `max_tokens` ceiling) |
+| A | `full_context` | none | unlimited (whole `max_tokens` ceiling¹) |
 | B | `sliding_window` | none | last 8 turns |
 | C | `rag` | lexical top-k transcript chunks | last 2 turns / 256 tokens |
 | D | `brainos` | BrainOS recall | last 2 turns / 256 tokens |
 | E | `brainos_rag` | BrainOS recall + lexical chunks | last 2 turns / 256 tokens |
+
+¹ In the product the ceiling is the session's `max_tokens` (4,096 by default).
+A benchmark replay sizes that ceiling to the transcript it is about to replay
+(`evaluation.modes.replay_ceiling`), because a reference that stops growing at
+4k tokens makes every reduction above 4k an artefact — Phase 20 measured exactly
+that before the fix.
 
 Only the context-management strategy changes in a controlled comparison. Two
 rules keep the comparison meaningful, both derived from the Phase 3 measurement

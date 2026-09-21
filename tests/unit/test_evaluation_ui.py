@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from pathlib import Path
 
 import pytest
@@ -440,6 +441,65 @@ def test_discard_removes_the_session_artifacts_from_disk(tmp_path: Path) -> None
     # Another session's artifacts are untouched, and a junk id removes nothing.
     assert runner.discard("../../escape") == 0
     assert runner.discard("") == 0
+
+
+@pytest.mark.requires_runtime
+def test_a_run_sweeps_expired_sessions_before_it_starts(tmp_path: Path) -> None:
+    """Phase 19: ordinary use is what reclaims an abandoned session's disk.
+
+    A visitor who never presses **End session** leaves artifacts nobody else
+    will clean up, so the sweep runs as part of the run machinery rather than
+    only in a cron job an operator might never install.
+    """
+
+    runner = _runner(tmp_path)
+    runner.run(session_id=SESSION, preset_name="quick", limit=1, render_plots=False)
+
+    # Age that session's tree past the retention window, then run again.
+    stale = tmp_path / "results" / UI_RESULTS_SUBDIR / SESSION
+    abandoned = tmp_path / "results" / UI_RESULTS_SUBDIR / "00000000-1111-2222-3333-444444444444"
+    abandoned.mkdir(parents=True)
+    (abandoned / "run-0001").mkdir()
+    (abandoned / "run-0001" / "report.md").write_text("stale", encoding="utf-8")
+    old = time.time() - 30 * 86_400
+    for path in sorted(abandoned.rglob("*"), reverse=True) + [abandoned]:
+        os.utime(path, (old, old))
+
+    view = runner.run(session_id="other", preset_name="quick", limit=1, render_plots=False)
+
+    assert not abandoned.exists(), "the expired session was not swept"
+    assert stale.exists(), "the live session's own artifacts were swept"
+    notes = view.repro["notes"]
+    assert notes["retention"]["retention_version"]
+    assert notes["retention"]["sessions_removed"] == 1
+    assert notes["retention"]["files_removed"] >= 1
+    assert notes["policy"]["results_retention_seconds"] == 7 * 86_400
+
+
+@pytest.mark.requires_runtime
+def test_a_run_records_how_long_artifacts_are_kept(tmp_path: Path) -> None:
+    """The run's own manifest has to disclose the deletion policy it ran under."""
+
+    runner = _runner(
+        tmp_path, policy=EvaluationPolicy(results_retention_seconds=2 * 86_400)
+    )
+
+    view = runner.run(session_id=SESSION, preset_name="quick", limit=1, render_plots=False)
+
+    notes = view.repro["notes"]
+    assert notes["policy"]["results_retention_seconds"] == 2 * 86_400
+    assert notes["retention"]["dry_run"] is False
+    assert notes["retention"]["bytes_removed"] >= 0
+
+
+@pytest.mark.requires_runtime
+def test_the_policy_notice_discloses_the_retention_window(tmp_path: Path) -> None:
+    runner = _runner(tmp_path)
+
+    notices = " ".join(runner.policy_notice())
+
+    assert "7 days" in notices
+    assert "End session" in notices
 
 
 @pytest.mark.requires_runtime

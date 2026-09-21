@@ -24,8 +24,11 @@ htmlcov/
 # Runtime data and generated evaluation artifacts
 *.sqlite3
 *.db
-# Large generated benchmark tiers (the committed dataset is dataset.jsonl)
-benchmarks/context_rot/generated/
+# Large generated benchmark tiers (the committed dataset is dataset.jsonl).
+# The datasets stay local; their manifests are tiny provenance records and are
+# committed so a run's dataset_sha256 can be tied to the parameters that made it.
+benchmarks/context_rot/generated/*
+!benchmarks/context_rot/generated/*.manifest.json
 results/raw/*
 results/aggregated/*
 results/plots/*

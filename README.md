@@ -1,3 +1,16 @@
+---
+title: BrainOS Context Lab
+emoji: 🧠
+colorFrom: indigo
+colorTo: purple
+sdk: gradio
+sdk_version: 6.28.0
+app_file: app.py
+pinned: false
+license: mit
+short_description: Bring your model, give it memory, measure context cost.
+---
+
 # BrainOS Context Lab
 
 > Bring your model. Give it memory. Measure context efficiency.
@@ -8,7 +21,7 @@ This repository integrates BrainOS as an upstream dependency. It does **not** mo
 
 ## Current status
 
-Phases 1–18 are complete and validated against the pinned BrainOS runtime. The
+Phases 1–19 are complete and validated against the pinned BrainOS runtime. The
 app persists conversations and memory mirrors to SQLite with hard session
 isolation, offers the full data-control set (clear conversation, clear memory,
 export session, end/delete session), can run the same conversation through all
@@ -152,16 +165,57 @@ or one button in the browser.
   failing the 86 tests that need the pinned runtime, a 90% coverage floor, and
   CI that runs the suite both with the pinned runtime and without any of the
   optional extras.
+- **Phase 19** walks the plan's §25 MVP checklist instead of asserting it: one
+  ordered session (connect → chat → store a fact → four unrelated turns →
+  retrieve it → inspect memory → inspect context → compare with full-context
+  mode → token usage → a small benchmark → export), one test per item, plus a
+  ledger table that parses the checklist out of the plan. It also closes the
+  three gaps the 2026-09-21 audit named — the request timeout is now triggered by
+  a provider that really blocks, the SQLite stores are exercised by eight
+  concurrent threads rather than by a comment, and `results/ui/` gains retention
+  for the session nobody ends (`python -m app.retention`, age-based, capped,
+  dry-runnable). Audit bug: the Evaluation tab resolved the dataset and its
+  output root against the working directory, so starting the app from anywhere
+  but the checkout raised `Dataset not found` and wrote a stray `results/`; the
+  repository now knows where it is (`src/checkout.py`) and anchors its own paths
+  without changing the relative paths the plan documents.
 
 A session-scoped `ConversationService` combines the adapter, the retrieval
 policy, the context builder, and the provider factory. Deterministic fakes cover
 the whole pipeline without BrainOS installed; optional live tests exercise the
-pinned runtime. 1248 tests pass and `ruff check .` is clean repository-wide.
+pinned runtime. 1349 tests pass and `ruff check .` is clean repository-wide.
 
 Chat is usable without an API key: BrainOS still observes and retrieves memory,
 and the panels show exactly what the model *would* have been sent. See
-[`CONTEXT.md`](CONTEXT.md) for the living implementation state and the Phase
-0–17 logs in `docs/`.
+[`CONTEXT.md`](CONTEXT.md) for the living implementation state, the Phase 0–19
+logs in `docs/`, and [`docs/status-audit-2026-09-21.md`](docs/status-audit-2026-09-21.md)
+for the audit that motivates Phase 19.
+
+### The MVP checklist (plan §25)
+
+Every item below is walkable today and walked by
+`tests/integration/test_mvp_walkthrough.py`, with the exception of the first —
+publishing a Space is an operator action, and the repository checks the half it
+owns (the app entry point, the declared dependencies, a Gradio app that builds).
+
+| §25 item | How to do it |
+| --- | --- |
+| 1 Open the HF Space | **Not published** — the only unmet MVP item. The repository-side half is in place: the Space manifest is the first block of this README, and [`docs/deployment.md`](docs/deployment.md) carries the operator checklist. |
+| 2–4 Select OpenAI, enter a key, select a model | Sidebar → provider, API key, model → **Connect**. The key stays in server memory and is never returned to the browser. |
+| 5 Start a conversation | Type in the chat box. |
+| 6 Store a fact | State it in a turn; the memory policy keeps durable project facts. |
+| 7 Continue the conversation | Keep talking — the fact is no longer in recent history. |
+| 8 Retrieve the fact later | Ask for it; the prompt contains the memory block. |
+| 9–10 Inspect BrainOS memory / retrieved context | Memory and Context tabs, including why each memory was selected and what was dropped. |
+| 11 Compare with full-context mode | Sidebar → context mode → `full_context`, ask the same question, compare the token accounting. |
+| 12 See token usage | Usage tab: per-turn and per-session ceilings, requests, and timeouts. |
+| 13 Run a small benchmark | Evaluation tab → preset → **Preview** (cost ceiling) → **Run**. A dry run needs no key. |
+| 14 Export results | Session export (transcript, usage, runs) and the run's own `results/ui/<session>/<run>/` artifacts. |
+
+Benchmark artifacts under `results/ui/` are kept for **7 days** after the last
+file in that session was written and then swept automatically; **End session**
+deletes a visitor's own artifacts (and persisted rows) immediately.
+`python -m app.retention --dry-run` shows what a sweep would remove.
 
 ### Measured behaviour so far
 
@@ -263,6 +317,23 @@ length tier, an estimated token counter, and no model in the loop — answer
 accuracy is only measurable once real generations are graded. Every number in
 this README came from a dry run or a deterministic fake.
 
+Phase 20 (in progress) prepares the run the research question needs. The tiers
+§29 asks for are generated — `standard` (56 tasks, 5k–40k, two variants), the
+plan's `research` ladder (5k–120k) and three smaller slices — with their manifests
+committed and the datasets local (`benchmarks/context_rot/generated/`). The
+model-free runs over the new tiers, recorded in
+[`docs/phase-20-research-release.md`](docs/phase-20-research-release.md), found
+something the smoke tier could not show: the benchmark's replay session took the
+product's default `max_tokens` ceiling, so above ~4k tokens Mode A — the "full
+context" reference every reduction is priced against — silently became a 4k
+window (4,086 / 4,090 / 4,090 tokens for 5k / 10k / 20k tasks, and one task in
+four *lost its evidence to the truncation*). A replay now sizes its session
+ceiling to the transcript being replayed (`evaluation.modes.replay_ceiling`),
+and the re-measured runs show Mode A carrying the whole conversation again
+(mean 4,307 tokens on the 2k/4k tier, evidence in prompt 1.000) while BrainOS
+stays at 193 tokens. That fix is what makes the model half worth its budget; the
+phase log also records what the harness costs and what is still open.
+
 ## Repository layout
 
 ```text
@@ -290,7 +361,8 @@ benchmarks/
   context_rot/                 # Phase 7 generator, spec, scored dataset, manifest
   fixtures/                    # Deterministic fixtures (Phase 12 scripted answers)
 docs/                          # Architecture, integration, evaluation, threat
-                               #   model, security controls, and per-phase logs
+                               #   model, security controls, deployment, and
+                               #   per-phase logs
 tests/                         # Unit, integration, evaluation, security, and UI
                                #   tests; the §24 traceability ledger; the
                                #   optional-dependency skip policy (conftest.py)
@@ -340,7 +412,7 @@ pip install -e ".[integration]"
 
 ```bash
 pip install -e ".[dev,ui,providers,evaluation,integration]"   # everything
-pytest -q                                                     # 1248 tests
+pytest -q                                                     # 1349 tests
 pytest -q --cov --cov-report=term-missing                     # 94%, floor 90
 ruff check .
 ```
@@ -466,6 +538,35 @@ as a first cost control; the full Phase 15 run budgets (`quick` / `standard` /
 `python -m evaluation.pipeline` composes all of the above and writes the same
 manifest on every artifact it produces, plus a `pipeline_rerun_command` that
 reproduces the whole run.
+
+## Deployment
+
+The repository is shaped like a Hugging Face Space: `README.md` opens with the
+manifest (`sdk: gradio`, `app_file: app.py`) and the build reads
+`requirements.txt` and `packages.txt`. None of that is folklore — the manifest's
+keys, the fact that `app_file` exposes the entry point, the manifest's SDK version
+against the requirement the build installs, and every deployment variable below
+are pinned by `tests/unit/test_deployment_config.py`.
+
+A deployment narrows the Evaluation tab with environment variables instead of
+editing source, and the variables can only tighten — the preset's own ceilings
+are still applied underneath:
+
+```bash
+BRAINOS_LAB_DB=":memory:"             # stateless: no visitor transcript is kept
+BRAINOS_LAB_EVAL_PRESETS="quick"      # a retrieval-only public posture
+BRAINOS_LAB_EVAL_MAX_TASKS="20"
+BRAINOS_LAB_EVAL_MAX_REQUESTS="60"
+BRAINOS_LAB_EVAL_ALLOW_GENERATION="0"
+BRAINOS_LAB_EVAL_RETENTION_DAYS="0"   # no automatic sweep; End session still deletes
+```
+
+**No Space is published yet.** The MVP checklist's first item ("open the HF
+Space") is the one item this repository cannot satisfy by itself; when a Space is
+opened, its URL belongs here and in `CONTEXT.md`. See
+[`docs/deployment.md`](docs/deployment.md) for the full variable table, the two
+recommended postures (public Space vs. research deployment), and the operator
+checklist.
 
 ## Security principles
 

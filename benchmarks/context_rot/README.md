@@ -73,7 +73,10 @@ python benchmarks/context_rot/generation.py \
 
 `dataset.jsonl` is generated from `spec.py` (content) and `generation.py`
 (structure) and pinned by `MANIFEST.json`, which records the generator version,
-tier, seed, task count, and the SHA-256 of the dataset. Regenerating with the
+tier, seed, task count, and the SHA-256 of the dataset. Tier manifests written
+into `generated/` are committed for the same reason — a run's `dataset_sha256`
+can then be tied to the parameters that produced it — while the datasets
+themselves stay local (a `research` tier is ~15 MB, a `top-rung` slice ~7 MB). Regenerating with the
 manifest's parameters reproduces the file exactly; `tests/evaluation/
 test_context_rot_dataset.py` asserts both.
 

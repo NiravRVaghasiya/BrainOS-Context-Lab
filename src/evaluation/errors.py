@@ -77,6 +77,7 @@ from pathlib import Path
 from typing import Any
 
 from baselines.modes import mode_label, mode_profile
+from checkout import repo_anchored
 from reproducibility.run_provenance import app_version, brainos_version
 from security.findings import summarize_security
 
@@ -1260,7 +1261,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--dataset",
         type=Path,
-        default=Path("benchmarks/context_rot/dataset.jsonl"),
+        default=repo_anchored(Path("benchmarks/context_rot/dataset.jsonl"), must_exist=True),
         help="Benchmark file used to enrich records with the fact ledger.",
     )
     parser.add_argument("--output", type=Path, help="Path for the aggregated report JSON.")

@@ -32,7 +32,7 @@ context-management strategy differs.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from app.service import ConversationService
@@ -40,7 +40,7 @@ from app.state import ContextSettings, SessionState
 from baselines.modes import MODE_ORDER, mode_label, resolve_mode
 
 from .datasets import BenchmarkTask
-from .generation import GenerationResult, Generator
+from .generation import GenerationResult, Generator, count_messages
 
 #: Type of the factory that hands a replay a fresh, session-scoped service.
 ServiceFactory = Callable[[str], ConversationService]
@@ -161,6 +161,38 @@ class ModeReplay:
         }
 
 
+#: Room a replay's ceiling leaves on top of the transcript for the system
+#: prompt, the question, and whatever evidence block the mode adds.
+REPLAY_CEILING_SLACK = 1024
+
+
+def replay_ceiling(task: BenchmarkTask) -> int:
+    """Return the context ceiling a replay of ``task`` needs.
+
+    The product's ceiling (``ContextSettings.max_tokens``, 4096) exists to bound a
+    *live* session. Applied to a replay it silently turns the benchmark's
+    reference into a 4k window: Mode A's history budget is derived from
+    ``max_tokens``, so above roughly 4k tokens the "full context" prompt stops
+    growing and every other mode's reduction is measured against a truncated
+    conversation. Phase 20 measured exactly that — Mode A sat at 4,086 / 4,090 /
+    4,090 tokens for 5k / 10k / 20k tasks — which is why the replay sizes its own
+    ceiling to the transcript it is about to replay.
+
+    The run-level ``max_input_tokens`` ceiling (preset ``standard``: 64k) stays
+    the guard: a prompt genuinely too big for a run is refused or reported, not
+    quietly truncated by a session default nobody in the benchmark chose.
+    """
+
+    settings = ContextSettings()
+    # Malformed entries are skipped the same way the replay skips them, so a
+    # dataset with a stray string cannot inflate the ceiling.
+    messages = [message for message in task.conversation if isinstance(message, Mapping)]
+    transcript = count_messages(messages) + count_messages(
+        [{"role": "user", "content": task.question}]
+    )
+    return max(settings.max_tokens, transcript + REPLAY_CEILING_SLACK)
+
+
 def default_service_factory(mode: str) -> ConversationService:
     """Build a fresh, purely in-memory service configured for ``mode``.
 
@@ -170,6 +202,24 @@ def default_service_factory(mode: str) -> ConversationService:
 
     state = SessionState(context=ContextSettings().with_mode_defaults(mode))
     return ConversationService(state)
+
+
+def _raise_session_ceiling(service: ConversationService, ceiling: int) -> None:
+    """Let a replay's session hold its whole transcript, before it starts.
+
+    Applied to the service the factory returned — the default factory and any
+    injected one — through the same settings object the mode switch edits. The
+    mode's budgets are re-derived from the new ceiling, because Mode A's history
+    budget *is* the ceiling: without that step a larger ``max_tokens`` would move
+    the wall but not the window.
+    """
+
+    settings = service.state.context
+    if ceiling <= settings.max_tokens:
+        return
+    service.state.context = replace(settings, max_tokens=ceiling).with_mode_defaults(
+        settings.mode
+    )
 
 
 def replay_task(
@@ -205,6 +255,7 @@ def replay_task(
 
     factory = service_factory or default_service_factory
     service = factory(resolve_mode(mode))
+    _raise_session_ceiling(service, replay_ceiling(task))
     sessions_used = 1
     current_session = _message_session(task.conversation[0]) if task.conversation else 0
     for message in task.conversation:
@@ -351,7 +402,9 @@ __all__ = [
     "ModeReplay",
     "ServiceFactory",
     "compare_modes",
+    "REPLAY_CEILING_SLACK",
     "default_service_factory",
+    "replay_ceiling",
     "replay_task",
     "task_evaluator",
 ]

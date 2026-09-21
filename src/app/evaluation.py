@@ -47,6 +47,7 @@ being reachable by an anonymous visitor on a public Space:
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
 from collections.abc import Callable, Mapping, Sequence
@@ -55,6 +56,16 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from app.retention import (
+    DEFAULT_RETENTION_SECONDS,
+    MAX_SESSIONS_PER_SWEEP,
+    RESULTS_ROOT,
+    RETENTION_VERSION,
+    RUNS_SUBDIR,
+    RetentionPolicy,
+    RetentionReport,
+    sweep_results,
+)
 from baselines.modes import ABLATION_ORDER, MODE_BRAINOS, MODE_ORDER, mode_label, resolve_mode
 from brain.tokenizers import (
     TokenCounter,
@@ -62,6 +73,7 @@ from brain.tokenizers import (
     estimate_tokens,
     tiktoken_counter,
 )
+from checkout import REPO_ROOT, repo_anchored
 from evaluation.datasets import load_jsonl
 from evaluation.experiment import ExperimentPlan, dataset_sha256
 from evaluation.generation import ModelSpec, build_provider
@@ -78,8 +90,13 @@ from reproducibility.run_provenance import persist_run
 
 #: Where a browser-initiated run writes, under the plan's ``results/`` root.
 #: Session-scoped so two visitors cannot overwrite each other's artifacts.
-UI_RESULTS_ROOT = Path("results")
-UI_RESULTS_SUBDIR = "ui"
+#: The constants are the *declared* layout; :class:`UIEvaluationRunner` resolves
+#: them at construction so a process started outside the checkout still writes
+#: here instead of creating a stray ``results/`` (Phase 19, see
+#: :mod:`checkout`). They are the same objects :mod:`app.retention` sweeps by, so
+#: the writer and the sweeper cannot disagree about where runs live.
+UI_RESULTS_ROOT = RESULTS_ROOT
+UI_RESULTS_SUBDIR = RUNS_SUBDIR
 
 #: Datasets the tab may load. Anything outside this root is refused: the widget
 #: is a text box, and a text box that resolves arbitrary paths is a file oracle.
@@ -99,6 +116,51 @@ _SAFE_TOKEN_RE = re.compile(r"[A-Za-z0-9._-]{1,128}")
 #: How many generated datasets the dataset dropdown offers before it stops
 #: looking. A directory with thousands of tiers is a listing problem, not a UI.
 MAX_DATASET_CHOICES = 24
+
+#: Phase 20: the deployment variables that narrow the Evaluation tab. They exist
+#: because the Space operator's job ("do not host 7 500-request runs on this box")
+#: should not require editing source, and because an operator who edits source
+#: drifts from the version the tests pin. Every one of them can only tighten: the
+#: preset's own ceilings are still applied underneath (see
+#: :meth:`EvaluationPolicy.apply`).
+POLICY_PRESETS_ENV = "BRAINOS_LAB_EVAL_PRESETS"
+POLICY_MAX_TASKS_ENV = "BRAINOS_LAB_EVAL_MAX_TASKS"
+POLICY_MAX_REQUESTS_ENV = "BRAINOS_LAB_EVAL_MAX_REQUESTS"
+POLICY_ALLOW_GENERATION_ENV = "BRAINOS_LAB_EVAL_ALLOW_GENERATION"
+POLICY_RETENTION_DAYS_ENV = "BRAINOS_LAB_EVAL_RETENTION_DAYS"
+
+#: The five variables above, in the order a deployment doc should list them.
+POLICY_ENVIRONMENT_VARIABLES = (
+    POLICY_PRESETS_ENV,
+    POLICY_MAX_TASKS_ENV,
+    POLICY_MAX_REQUESTS_ENV,
+    POLICY_ALLOW_GENERATION_ENV,
+    POLICY_RETENTION_DAYS_ENV,
+)
+
+#: Strings a deployment uses to mean "off". ``GRADIO_STRICT_CORS`` already reads
+#: flags this way, so a Space that sets one of them expects the other to agree.
+_FALSEY = frozenset({"0", "false", "no", "off", ""})
+
+
+def _policy_integer(source: Mapping[str, str], name: str, *, minimum: int) -> int | None:
+    """Read one integer deployment variable, naming it in any complaint.
+
+    Nothing here is allowed to guess: a typo in a Space's variables must fail at
+    startup with the variable's name in the message, not silently fall back to a
+    ceiling the operator did not choose.
+    """
+
+    raw = source.get(name)
+    if raw is None or not str(raw).strip():
+        return None
+    try:
+        value = int(str(raw).strip())
+    except ValueError:
+        raise ValueError(f"{name} must be an integer, got {raw!r}.") from None
+    if value < minimum:
+        raise ValueError(f"{name} must be at least {minimum}, got {value}.")
+    return value
 
 
 class EvaluationRequestError(ValueError):
@@ -138,6 +200,58 @@ class EvaluationPolicy:
     max_requests: int = 7_500
     #: Runs one session may start before it must be ended and restarted.
     max_runs_per_session: int = 5
+    #: Phase 19: age at which an *abandoned* session's artifacts are swept.
+    #: ``End session`` still deletes a visitor's own files immediately; this
+    #: covers the session nobody ends. ``None`` keeps artifacts until then.
+    results_retention_seconds: float | None = DEFAULT_RETENTION_SECONDS
+    #: Sessions one sweep may remove, so a page load cannot become a purge.
+    max_sessions_per_sweep: int = MAX_SESSIONS_PER_SWEEP
+
+    @classmethod
+    def from_environment(cls, environ: Mapping[str, str] | None = None) -> EvaluationPolicy:
+        """Build the policy a deployment asked for, or the defaults.
+
+        Reads ``BRAINOS_LAB_EVAL_PRESETS``, ``..._MAX_TASKS``,
+        ``..._MAX_REQUESTS``, ``..._ALLOW_GENERATION`` and
+        ``..._RETENTION_DAYS`` (see :data:`POLICY_ENVIRONMENT_VARIABLES`); an
+        unset or blank variable keeps this class's default. ``..._RETENTION_DAYS=0``
+        means "no sweep" and is the explicit way to say artifacts stay until the
+        visitor ends the session — an operator should have to write that, rather
+        than get it by forgetting a variable.
+
+        Raises ``ValueError`` for a value that cannot be obeyed, because a
+        misconfigured public deployment should fail where the operator can see it
+        instead of quietly hosting the widest policy the code allows.
+        """
+
+        source = os.environ if environ is None else environ
+        overrides: dict[str, Any] = {}
+
+        raw_presets = str(source.get(POLICY_PRESETS_ENV, "")).strip()
+        if raw_presets:
+            presets = tuple(name.strip().lower() for name in raw_presets.split(",") if name.strip())
+            if not presets:
+                raise ValueError(f"{POLICY_PRESETS_ENV} listed no preset names.")
+            overrides["allowed_presets"] = presets
+
+        for name, field_name in (
+            (POLICY_MAX_TASKS_ENV, "max_tasks"),
+            (POLICY_MAX_REQUESTS_ENV, "max_requests"),
+        ):
+            value = _policy_integer(source, name, minimum=1)
+            if value is not None:
+                overrides[field_name] = value
+
+        raw_flag = source.get(POLICY_ALLOW_GENERATION_ENV)
+        if raw_flag is not None and str(raw_flag).strip() != "":
+            overrides["allow_generation"] = str(raw_flag).strip().lower() not in _FALSEY
+
+        raw_days = source.get(POLICY_RETENTION_DAYS_ENV)
+        if raw_days is not None and str(raw_days).strip() != "":
+            days = _policy_integer(source, POLICY_RETENTION_DAYS_ENV, minimum=0)
+            overrides["results_retention_seconds"] = None if days == 0 else days * 86_400
+
+        return cls(**overrides)
 
     def __post_init__(self) -> None:
         unknown = sorted(set(self.allowed_presets) - set(PRESETS))
@@ -152,6 +266,33 @@ class EvaluationPolicy:
             value = getattr(self, name)
             if not isinstance(value, int) or isinstance(value, bool) or value < 1:
                 raise ValueError(f"{name} must be a positive integer.")
+        self.retention_policy()  # validates max_age_seconds / max_sessions_per_sweep
+
+    def retention_policy(self) -> RetentionPolicy:
+        """The chat-path-style retention object this policy describes."""
+
+        return RetentionPolicy(
+            max_age_seconds=self.results_retention_seconds,
+            max_sessions_per_sweep=self.max_sessions_per_sweep,
+        )
+
+    def retention_notice(self) -> str:
+        """One sentence a visitor can act on, for the Evaluation tab."""
+
+        age = self.results_retention_seconds
+        if age is None:
+            return (
+                "Benchmark artifacts stay on this host until you press **End "
+                "session**. This deployment has no automatic sweep."
+            )
+        days = age / 86_400
+        human = f"{days:g} day" + ("" if days == 1 else "s")
+        return (
+            f"Benchmark artifacts under `results/ui/` are kept for {human} after "
+            "the last file was written, then swept automatically — including the "
+            "artifacts of a session nobody ended. **End session** removes yours "
+            "immediately."
+        )
 
     def check(self, *, preset_name: str, generate: bool, runs_so_far: int = 0) -> None:
         """Refuse a request the deployment does not allow, before any work."""
@@ -369,14 +510,33 @@ class UIEvaluationRunner:
     def __init__(
         self,
         *,
-        results_root: str | Path = UI_RESULTS_ROOT,
-        dataset_root: str | Path = DATASET_ROOT,
+        results_root: str | Path | None = None,
+        dataset_root: str | Path | None = None,
         policy: EvaluationPolicy | None = None,
         evaluation_store: Any = None,
         provider_factory: Callable[[ProviderConfig], Any] | None = None,
     ) -> None:
-        self.results_root = Path(results_root)
-        self.dataset_root = Path(dataset_root)
+        """Create a runner.
+
+        The two roots default to the plan's layout (``results/`` and
+        ``benchmarks/``) **resolved at construction time**: inside the checkout
+        they stay relative, so artifacts and re-run commands read the way the
+        plan writes them; started from anywhere else (an installed console
+        script, a supervisor with its own working directory) they anchor to the
+        checkout rather than inventing a second ``results/`` wherever the
+        process happens to be. Phase 19 fixed this: the tab used to raise
+        ``Dataset not found: benchmarks/context_rot/dataset.jsonl`` when the
+        controller was built outside the repository.
+        """
+
+        self.results_root = (
+            Path(results_root)
+            if results_root is not None
+            else repo_anchored(UI_RESULTS_ROOT)
+        )
+        self.dataset_root = (
+            Path(dataset_root) if dataset_root is not None else repo_anchored(DATASET_ROOT)
+        )
         self.policy = policy or EvaluationPolicy()
         self.evaluation_store = evaluation_store
         self.provider_factory = provider_factory or create_provider
@@ -434,6 +594,7 @@ class UIEvaluationRunner:
             f"{policy.max_requests} provider request(s) per run; "
             f"{policy.max_runs_per_session} run(s) per session."
         )
+        notices.append(policy.retention_notice())
         return tuple(notices)
 
     def preset_choices(self) -> tuple[tuple[str, str], ...]:
@@ -476,9 +637,17 @@ class UIEvaluationRunner:
         return tuple(choices) or (str(DEFAULT_DATASET),)
 
     def _default_dataset(self) -> Path | None:
-        candidate = Path(DEFAULT_DATASET)
-        if candidate.exists():
-            return candidate
+        """The committed dataset, or ``None`` when this checkout has no copy.
+
+        The declared path is tried first, so the documented workflow keeps
+        naming ``benchmarks/context_rot/dataset.jsonl``; when the process is not
+        running from the checkout, the anchored copy is what makes the tab work
+        instead of reporting the committed dataset missing.
+        """
+
+        for candidate in (Path(DEFAULT_DATASET), repo_anchored(DEFAULT_DATASET, must_exist=True)):
+            if candidate.exists():
+                return candidate
         fallback = self.dataset_root / "context_rot" / "dataset.jsonl"
         return fallback if fallback.exists() else None
 
@@ -496,7 +665,12 @@ class UIEvaluationRunner:
         """
 
         text = str(value or "").strip()
-        candidate = Path(text) if text else (self._default_dataset() or Path(DEFAULT_DATASET))
+        if text:
+            candidate = Path(text)
+        else:
+            candidate = self._default_dataset() or repo_anchored(
+                DEFAULT_DATASET, must_exist=True
+            )
         resolved = self._contained(candidate, self.dataset_root, "Benchmark datasets")
         if not resolved.exists():
             raise EvaluationRequestError(
@@ -641,8 +815,15 @@ class UIEvaluationRunner:
         (an unknown preset, a dataset outside ``benchmarks/``, generation without
         a connected key) raise :class:`EvaluationRequestError`, which the
         controller turns into the same kind of status line.
+
+        Phase 19: a run also sweeps *expired* sessions out of ``results/ui/``
+        before it starts, so abandoned artifacts are reclaimed by ordinary use
+        rather than by a cron job somebody has to remember to install. The sweep
+        is bounded, age-based, and never touches the session that asked for the
+        run — see :mod:`app.retention`.
         """
 
+        retention = self.sweep()
         plan, tasks, path = self._plan(
             session_id=session_id,
             preset_name=preset_name,
@@ -696,6 +877,16 @@ class UIEvaluationRunner:
                         "max_requests": self.policy.max_requests,
                         "allow_generation": self.policy.allow_generation,
                         "allowed_presets": list(self.policy.allowed_presets),
+                        "results_retention_seconds": self.policy.results_retention_seconds,
+                    },
+                    # What this run swept before it started, so an artifact says
+                    # how the host it was produced on was being maintained.
+                    "retention": {
+                        "retention_version": RETENTION_VERSION,
+                        "sessions_removed": retention.sessions_removed,
+                        "files_removed": retention.files_removed,
+                        "bytes_removed": retention.bytes_removed,
+                        "dry_run": retention.dry_run,
                     },
                 },
             )
@@ -723,6 +914,21 @@ class UIEvaluationRunner:
 
     def run_count(self, session_id: str) -> int:
         return len(self._runs.get(str(session_id or ""), ()))
+
+    def sweep(self, *, now: float | None = None, dry_run: bool = False) -> RetentionReport:
+        """Reclaim expired session artifacts, without touching a live session.
+
+        Called by :meth:`run` before a run starts and available directly to an
+        operator or a test. It is a no-op (and says so in its report) when the
+        policy disables retention or nothing has ever run on this host.
+        """
+
+        return sweep_results(
+            self.results_root,
+            policy=self.policy.retention_policy(),
+            now=now,
+            dry_run=dry_run,
+        )
 
     def forget(self, session_id: str) -> None:
         """Drop a session's in-memory history (called when the session ends).
@@ -1169,18 +1375,28 @@ def _portable(path: Path) -> str:
 
     The containment check needs an absolute path; the artifact needs a portable
     one. A dataset inside the working directory is recorded relative to it, so
-    the re-run command works from any checkout.
+    the re-run command works from any checkout. Phase 19 adds the second base: a
+    process started outside the checkout anchors its dataset to the checkout, and
+    the recorded path is still the plan's relative one rather than this
+    machine's directory layout.
     """
 
-    try:
-        return str(path.relative_to(Path.cwd()))
-    except ValueError:
-        return str(path)
+    for base in (Path.cwd(), REPO_ROOT):
+        try:
+            return str(path.relative_to(base))
+        except ValueError:
+            continue
+    return str(path)
 
 
 __all__ = [
     "DATASET_ROOT",
     "DEFAULT_DATASET",
+    "RESULTS_ROOT",
+    "RETENTION_VERSION",
+    "RUNS_SUBDIR",
+    "RetentionPolicy",
+    "RetentionReport",
     "MAX_DATASET_CHOICES",
     "PIPELINE_VERSION",
     "SESSION_CREDENTIAL_LABEL",

@@ -4,8 +4,8 @@
 > repository state and decisions that should be preserved between phases.
 
 **Last updated:** 2026-09-21
-**Branch:** `arena/01a0c2db-brainos-context-lab`
-**Baseline:** `dab23c0` (`origin/main`, the PR #18 merge that includes Phase 17); this branch adds Phase 18 on top
+**Branch:** `arena/01a0c313-brainos-context-lab`
+**Baseline:** `187384d` (`origin/main`, the PR #19 merge that includes Phase 18); this branch adds Phase 19 on top
 **Implementation plan:** [`BrainOS_Context_Lab_Implementation_Plan.md`](BrainOS_Context_Lab_Implementation_Plan.md)
 
 ## Product boundary
@@ -39,7 +39,8 @@ layer that helps select historical context.
 | **Phase 16 — Reproducibility** | Complete (landed via PR #17) | One `src/reproducibility/` package is the single source of the §22 vocabulary: `app_version()` (installed-metadata read with `fallback:` origin tag), `brainos_version()` (`unvalidated` / `pinned:` / live read plus the `pin:` commit), `build_manifest()` (versions + environment + config + task ids + dataset path/digest + aggregate metrics + a credential-free `--rerun` string), `rerun_command()`, `global_overrides()`, `persist_run()` (secret-stripping store write). `python -m evaluation.run` writes a top-level `repro` block **and** the fallback `config.application_version` / `config.brainos_version` / `config.benchmark_version` / `config.output` fields; `evaluation.experiment` carries a matching `repro` block and routes its `provenance` version fields through the same functions; `evaluation.errors` records the version pair in `provenance`. The chat export gains `limits` (the Phase 15 constraint), `versions`, and a `chat_history_sha256` transcript digest; `connect()` drops model ids that echo the session key. Fixed the latent split-vocabulary bug (`context_rot-v1` vs the dataset's `context-rot-v1`), unified on `context-rot-v1` and pinned by a test. 1048 → **1070 tests**; `ruff check .` clean; 87 shipped files scan clean. |
 | **Phase 17 — Automated Evaluation Pipeline** | **Complete in this turn** | `python -m evaluation.pipeline` composes the seven existing stages (`experiment → raw → comparison → statistics → errors → plots → report`) into the plan's §23 `results/{raw,aggregated,plots,report}` layout in one command: `STAGE_DEPENDENCIES` + `expand_stages` add the stages a selected stage is made of, a stage with no input is *skipped with a reason*, `run_pipeline` never raises for a failing stage, and the exit code distinguishes complete (0), uncontrolled (2), ceiling-truncated (3), and incomplete-or-leaked (4). Every artifact carries the Phase 16 `repro` manifest plus a `pipeline_rerun_command`; `markdown_report` renders twelve sections with the honesty rules (`—` for ungraded answer-side metrics, `Partial pipeline` when fewer than seven stages ran, a task-ceiling "remaining" column); `analysis.compare_error_distributions` compares failure *mixes* (per-mode label shares + total variation) rather than accuracies. Two-pass credential scan (stages 1–6, then report+manifest) now **quarantines**: implicated files inside the run's own output directory are deleted, known secrets scrubbed from the in-memory artifact, the report text suppressed if `report.md` itself leaked, `QUARANTINED.txt` + a `## Quarantine` section left behind, exit 4. The browser gets the same pipeline through `app/evaluation.py` (`UIEvaluationRunner`, `EvaluationPolicy`): a full-width **Evaluation** tab with preset catalogue, `estimate_ceiling` cost preview before any spend, run, figures, report, history, session-scoped `results/ui/<session>/<run>`, generation with the sidebar key (never an environment variable), `persist_run` storage, and `End session` deleting rows *and* artifacts. Fixed an import cycle through the root `app.py` shim that also made the benchmark CLI load Gradio. 1070 → **1179 tests** (incl. 7 live pipeline tests against the pinned runtime); `ruff check .` clean; 91 shipped files scan clean. Also fixed: a full run labelling itself `Partial pipeline`, a plan whose dataset digest reached the manifest but not the run files, a report naming a distribution baseline the run never chose, and a WAL-blind credential test — `security.scan` now expands a named database's `-wal`/`-shm`/`-journal` sidecars. |
 | **Phase 18 — Test Suite** | **Complete in this turn** | The plan's §24 as an enforced contract. `tests/unit/test_plan_traceability.py` maps every §24 item (unit · integration · evaluation · security) to named tests, re-reads the plan, and runs the suite's own collection so a rename or delete fails the build; `tests/security/test_log_hygiene.py` closes the one §24 security rule nothing had ever exercised (no test in the repository used `caplog`, a handler, or a captured stderr for a credential claim) and pins the "no logger at all" property from both sides; `tests/unit/test_provider_adapter_edges.py` closes §24's first unit item (79% → **100%** on `providers/openai.py`); `tests/evaluation/test_experiment_cli.py` covers the experiment CLI's summary and 0 / 2 / 3 exit codes, including the precedence rule that a coverage-truncating ceiling stop exits 2, not 3. Found and fixed the suite's documentation claim: **a base install failed 86 tests** (82 with no extras at all) because they exercise the application's real composition, which builds a BrainOS adapter — `tests/conftest.py` now turns `@pytest.mark.requires_runtime` / `@pytest.mark.requires_figures` into skips, 2 of the 86 were fixed properly instead of skipped (the controller's limits test takes the fake adapter factory the rest of its module uses; the ledger falls back to source inspection for a module skipped wholesale), and the base install is now `1073 passed, 98 skipped, 0 failed`. Coverage floor (`fail_under = 90`, `source = ["src"]`, `pytest-cov` in `dev`) and a two-job CI workflow (`.github/workflows/ci.yml`: full environment with the coverage floor · base install where optional tests skip) — both jobs green on GitHub (run `35576154648`: `lint, test, coverage floor` 5m46s, `suite runs without the optional extras` 29s). 1179 → **1248 tests**; 93% → **94%** (9067 stmts, 543 missed); `ruff check .` clean; no `src/` change was needed. |
-| Phases 19–20 | Pending | MVP definition (plan §25's 14-item checklist) and the research release (§26). |
+| **Phase 19 — MVP Definition** | **Complete in this turn** | The plan's §25 checklist, walked rather than asserted: `tests/integration/test_mvp_walkthrough.py` runs items 2–14 in one ordered session against the pinned runtime (connect → chat → store a fact → four unrelated turns → retrieve it → inspect memory → inspect context → compare against `full_context` → token usage → a 2-task × 2-mode retrieval-only pipeline run → export), one test per item, each asserting the artefact the step is supposed to produce. `tests/unit/test_plan_traceability.py` gains a second table (`MVP_ITEMS`) with one ordered row per §25 item, parsed against the plan text, every row mapped to its walkthrough test plus focused tests; item 1 ("open the HF Space") is the only **external** row and says why — the repository checks that the checkout is deployable, not that a Space runs. Three named gaps closed: the Phase 15 timeout is now triggered for real (`tests/unit/test_chat_timeout.py`, a provider that blocks on a thread event: redacted status, unchanged transcript, `timeouts == 1`, session usable afterwards, and a generous timeout that does **not** fire early), the Phase 14 multi-visitor claim is exercised by 8 real threads on one database (`tests/unit/test_sqlite_concurrency.py`: no lost rows, no cross-session rows, delete-under-load leaves no deleted bytes in the file or WAL), and `results/ui/` gains age-based retention for the session nobody ends (`src/app/retention.py`: newest-file age, per-sweep cap, `ui/` containment, symlinks refused, dry run, `python -m app.retention` CLI). Audit bug #8 fixed: `src/checkout.py` (`in_checkout` / `repo_anchored`) anchors the dataset, dataset root, results root, the three CLIs' committed-dataset default (resolved at call time, so an artifact still records the plan's relative path) and the SQLite default — a process started outside the checkout no longer raises `Dataset not found` or writes a stray `results/`. 1248 → **1335 tests**; 94% → **94%** (94.19%, floor 90); `ruff check .` clean; 102 shipped files scan clean. Chasing a one-off `verify` failure on GitHub (run `35583466031`, logs unretrievable) turned up a **real concurrency bug** the new tests had been flaking on: `_connect` ran `PRAGMA journal_mode=WAL` on every connection, and SQLite does not route a journal-mode change through `busy_timeout`, so two workers opening a fresh file at once could raise `database is locked` before doing any work. `_ensure_wal` now reads the mode first (lock-free in WAL), switches only when needed, retries a lost race, and never fails the caller; 60 solo runs of the threaded file and an 8-thread repro are clean where both used to fail. Both CI jobs green on the pushed branch (run `35585990332`: `lint, test, coverage floor` 5m57s, `suite runs without the optional extras` 27s). |
+| **Phase 20 — Research Release** | **In progress** | §26/§29 preparation without a model. The tiers the matrix needs are generated (`standard` 56 tasks × 5k–40k × 2 variants, the plan's `research` ladder 5k–120k, plus `quick` 2k–4k, `curve` 5k–20k and `top-rung` 120k slices) with their **manifests committed** and the datasets ignored, and two `--dry-run` pipeline runs are recorded in [`docs/phase-20-research-release.md`](docs/phase-20-research-release.md) (retrieval-only: `accuracy=—`). **(1) Mode A was capped at 4,096 tokens — found and fixed here**: the replay session took the product's default `ContextSettings.max_tokens`, so the "full context" reference stopped growing above ~4k (4,086/4,090/4,090 tokens for 5k/10k/20k tasks) and one task in four lost its evidence to the truncation. `evaluation.modes.replay_ceiling` now sizes the replay's session ceiling to the transcript — raising both the wall and Mode A's derived history window, through the same settings object the mode switch edits — with unit and pinned-runtime regression tests; re-measured, Mode A carries the whole conversation (mean 4,307 tokens on the 2k/4k tier, evidence in prompt 0.750 → 1.000) while BrainOS stays at 193. **(2) The harness rebuilds context per message**, so cost grows faster than the dataset: the 9-task `curve` tier × 5 modes took ~12 minutes before the fix, the 56-task `standard` tier was stopped after >70 minutes of CPU with its 40k band unfinished, one 120k task after >50 minutes. **The release half of Milestone 6 is done too**: `README.md` opens with the Hugging Face manifest (`sdk: gradio`, `sdk_version: 6.28.0`, `app_file: app.py`) so a Space created from this repository has something to build, [`docs/deployment.md`](docs/deployment.md) is the operator document (variable table, the two postures, the checklist that ends by recording the Space URL), and `EvaluationPolicy.from_environment()` reads five `BRAINOS_LAB_EVAL_*` variables that can only tighten the Evaluation tab — presets, task and request ceilings, generation on/off, retention days — with an unparsable value stopping startup instead of silently hosting the widest policy. No model result, no §26 document, no Space URL yet. |
 
 Detailed logs are available in
 [`docs/phase-0-research-baseline.md`](docs/phase-0-research-baseline.md),
@@ -59,7 +60,79 @@ Detailed logs are available in
 [`docs/phase-14-hf-deployment.md`](docs/phase-14-hf-deployment.md),
 [`docs/phase-15-cost-controls.md`](docs/phase-15-cost-controls.md),
 [`docs/phase-16-reproducibility.md`](docs/phase-16-reproducibility.md), and
-[`docs/phase-17-automated-pipeline.md`](docs/phase-17-automated-pipeline.md).
+[`docs/phase-17-automated-pipeline.md`](docs/phase-17-automated-pipeline.md),
+[`docs/phase-18-test-suite.md`](docs/phase-18-test-suite.md), and
+[`docs/phase-19-mvp-definition.md`](docs/phase-19-mvp-definition.md).
+The audit that motivates Phase 19 is
+[`docs/status-audit-2026-09-21.md`](docs/status-audit-2026-09-21.md).
+
+## What was done in Phase 19 (this turn)
+
+§25 defines the MVP as fourteen things a user can do, in order. Phases 4–18
+built all of them and tested each one; none of them had ever been walked as a
+sequence, which is what `docs/status-audit-2026-09-21.md` found when it looked
+for the experiment. Phase 19 walks the checklist, registers it, and closes the
+three gaps the audit named alongside it.
+
+The audit's verdict is unchanged and worth repeating: **the experiment this
+project exists to run has never run.** Phase 19 makes the MVP walkable and
+honestly documented; it does not produce research numbers, and nothing here
+should be quoted as one.
+
+### New / changed files
+
+| File | Purpose |
+| --- | --- |
+| [`tests/integration/test_mvp_walkthrough.py`](tests/integration/test_mvp_walkthrough.py) (new, 19) | §25 items 2–14 in one ordered session on the pinned runtime with a deterministic provider double: connect (provider, key, model) → chat → store a fact → four unrelated turns → ask for the fact → inspect the memory and context panels → switch to `full_context` and compare → read token usage → run a 2-task × 2-mode retrieval-only pipeline → export. The facts it pins are the ones a checklist can lie about: the fact from turn 1 is in turn 6's prompt, BrainOS's final context is smaller than the full-context reference (197 vs 277 tokens, reduction 0.289), the rerun command carries the relative dataset path, and the export carries no `sk-`. |
+| [`tests/unit/test_plan_traceability.py`](tests/unit/test_plan_traceability.py) (+8 → 20) | `MVPItem(number, item, tests, external)` rows: ordered, parsed against the plan's §25 text, each mapped to the walkthrough test plus the focused tests that pin it, verified through the same `--collect-only` subprocess as the §24 table. Rules: ≥2 tests per row, every non-deployment row has a walkthrough test, and only item 1 may be external (with a reason that names the operator action). |
+| [`tests/unit/test_chat_timeout.py`](tests/unit/test_chat_timeout.py) (new, 10) | Phase 15's timeout, triggered by a provider that blocks on a thread event: chat returns in milliseconds with a redacted status, the user's message is still in the transcript and observed by the memory layer, the provider saw exactly one call, the budget records `requests == 1` / `timeouts == 1`, the session still works on the next turn with a different provider, `request_timeout=0`/`None` keeps the direct path, and a 5-second timeout does not fire on a 200 ms call. |
+| [`tests/unit/test_sqlite_concurrency.py`](tests/unit/test_sqlite_concurrency.py) (new, 4) | Phase 14's multi-visitor claim with 8 real threads through a `Barrier`: concurrent transcript appends across 8 sessions lose nothing and stay in their session, the conversation/memory/evaluation stores write to one file at once, a `clear` racing writers takes only its own session's rows, and a delete-then-`vacuum` under load leaves no deleted bytes in the database, `-wal`, `-shm`, or `-journal`. |
+| [`src/app/retention.py`](src/app/retention.py) (new) · [`tests/unit/test_retention.py`](tests/unit/test_retention.py) (new, 26) | Retention for the session nobody ends. `RetentionPolicy` (`max_age_seconds`, 7 days by default, `None` disables; `max_sessions_per_sweep`), `sweep_results(root, policy=, now=, dry_run=)` and a `RetentionReport` (scanned / removed / files / bytes / kept / skipped / truncated / root-exists), plus `python -m app.retention` (`--root`, `--max-age-days`, `--max-sessions`, `--dry-run`, `--output`, `--format json|text`, exit 0 even when nothing exists). Age is the **newest** file in a session directory; candidates are direct children of `<root>/ui`, single safe path segments, not symlinks, and re-checked after resolution; oldest first; capped; a `shutil.rmtree` failure is reported rather than raised. |
+| [`src/checkout.py`](src/checkout.py) (new) · [`tests/unit/test_checkout_paths.py`](tests/unit/test_checkout_paths.py) (new, 13) | Audit bug #8. `REPO_ROOT`, `in_checkout()`, and `repo_anchored(relative, *, must_exist=False)`: inside the checkout a path is returned unchanged (so artifacts keep the plan's relative form), outside it the path anchors to the checkout — except an input that is not there, which keeps the documented relative path so the error names it. The tests run the runner, the storage default and the CLI from a directory outside the checkout and assert both halves: the dataset is found, and the recorded path is still `benchmarks/context_rot/dataset.jsonl`. |
+| [`src/app/evaluation.py`](src/app/evaluation.py) | `UIEvaluationRunner.__init__` resolves `results_root` / `dataset_root` / the default dataset at construction through `repo_anchored`; `_default_dataset()` tries the declared path first, then the anchored one; `_portable()` prefers the working directory and then the checkout; `EvaluationPolicy` gains `results_retention_seconds` (validated via `retention_policy()`) and `max_sessions_per_sweep`; `retention_notice()` is appended to `policy_notice()`; `run()` sweeps before planning and records `notes["policy"]["results_retention_seconds"]` plus a `notes["retention"]` block in the run manifest. |
+| [`src/evaluation/run.py`](src/evaluation/run.py) · [`experiment.py`](src/evaluation/experiment.py) · [`pipeline.py`](src/evaluation/pipeline.py) · [`errors.py`](src/evaluation/errors.py) | Each CLI's `--dataset` default comes from `default_dataset_path()`, resolved at call time so the console scripts work from any directory; the pipeline's rerun-command builder treats the anchored default as the default, so an artifact still records `--dataset benchmarks/context_rot/dataset.jsonl` rather than a machine-specific path. |
+| [`src/storage/sqlite.py`](src/storage/sqlite.py) | `_ensure_wal()` replaces the per-connection `PRAGMA journal_mode=WAL`: it reads the mode (lock-free in WAL) and only switches when the file is not already WAL, retrying five times and then proceeding, because SQLite does not route a journal-mode change through `busy_timeout` — the old code let two workers opening a fresh file raise `database is locked` before doing any work. `busy_timeout` is also applied before anything that can contend. `default_database_path()` anchors its unset default the same way: `BRAINOS_LAB_DB` and `:memory:` still win, inside the checkout the path is still the relative `data/brainos_lab.sqlite3` the deployment test pins, and a process started elsewhere persists to the checkout's `data/` instead of creating one next to itself. |
+| [`tests/unit/test_evaluation_ui.py`](tests/unit/test_evaluation_ui.py) (+3) | The wiring, not just the sweeper: a run sweeps an expired session and leaves the live one, and the run manifest discloses both the window and what the sweep removed. |
+
+### Measured behaviour
+
+```bash
+$ .venv/bin/python -m pytest -q --cov --cov-report=term
+# Required test coverage of 90.0% reached. Total coverage: 94.19%
+# 1335 passed in 219.98s (0:03:39)
+# base install (extras hidden): 1136 passed, 104 skipped, 0 failed
+$ .venv/bin/python -m pytest tests/integration/test_mvp_walkthrough.py -q
+# 19 passed in 0.67s
+$ .venv/bin/python -m security.scan src docs README.md CONTEXT.md benchmarks \
+      app.py requirements.txt packages.txt pyproject.toml \
+      BrainOS_Context_Lab_Implementation_Plan.md
+scan_version=scan-v1 files=102 bytes=1787889 findings=0 clean=True
+```
+
+Retention by hand, from a `/tmp` root with one 30-day-old and one 1-day-old
+session: `--dry-run` reports `would remove=1 … dry_run=True` and removes nothing,
+the real sweep reports `removed=1 files=1 bytes=209`, the 1-day-old session
+survives, and a missing `results/ui` prints `nothing to sweep` and exits 0.
+
+### Constraints carried into Phase 20+
+
+1. **Item 1 is the only unmet MVP item, and it is an operator action.** No test
+   may claim to open a Space; the ledger row stays external until someone creates
+   one and records the URL in the release notes.
+2. **No number produced in this phase is a research result.** The walkthrough's
+   reduction figure comes from seven turns of a stub conversation; the pipeline
+   numbers come from the smoke tier (7 tasks, one length, `variants=1`). §29's
+   accuracy / temporal / abstention / length-curve / cross-model rows still
+   require a real model run, and §26 must cite run manifests rather than these.
+3. **Retention runs on use, not on a timer.** A Space with no traffic and no cron
+   keeps its files; `docs/limitations.md` and the release notes should state the
+   window rather than imply immediate deletion.
+4. **`checkout.repo_anchored` is the only place that decides where the repository
+   is.** Do not add a second helper, and do not anchor *outputs* to anything but
+   the checkout — a stray `results/` is the bug the function exists to prevent.
+5. **The ledger is the contract for §25.** A plan change to the checklist needs a
+   row, a walkthrough assertion, and nothing else; the plan text itself is parsed
+   so a renumbered item fails the build.
 
 ## What was done in Phase 18 (this turn)
 
@@ -2204,24 +2277,32 @@ and the localhost stub.
 
 ## Next safe step
 
-Phase 18 is complete and validated (1248 tests with every extra installed,
-`1073 passed / 98 skipped / 0 failed` in a base install, `ruff check .` clean,
-94% coverage against a 90% floor, two CI jobs). The suggested next phase is
-**Phase 19 — MVP Definition** (plan §25), which is a verification phase rather
-than a build phase: the MVP is defined as fourteen things a user can do.
+Phase 19 is complete and validated (1339 tests with every extra installed,
+94.19% coverage against a 90% floor, `ruff check .` clean). Phase 20 has started:
+the dataset half is generated with committed manifests, the model-free runs are
+recorded in `docs/phase-20-research-release.md`, and the ceiling bug they found
+is **fixed and re-measured** — Mode A carries a transcript larger than the
+product's 4,096-token default again, so reductions are no longer priced against
+a truncated reference.
 
-1. **Walk the checklist in one place.** Open the Space → select OpenAI → enter a
-   key → select a model → start a conversation → store a fact → continue →
-   retrieve the fact later → inspect BrainOS memory → inspect the retrieved
-   context → compare BrainOS against full context → see token usage → run a
-   small benchmark → export results. Twelve of the fourteen have tests today,
-   but no single test walks the sequence, and two ("open the Space",
-   "select OpenAI") are deployment facts rather than behaviours.
-2. **Register the checklist in the ledger.** `tests/unit/test_plan_traceability.py`
-   is where a §25 row belongs, so the MVP checklist cannot rot the way the base
-   install did.
-3. **Carry Phase 18's constraint:** a README claim needs a test that fails when
-   it stops being true.
-4. **Still open from Phases 16/17:** a `SlowProvider` timeout test, a
-   multi-threaded stress test, and retention for `results/ui/` before the
-   Evaluation tab is enabled publicly with generation on.
+1. **Decide the tier (finding 2).** `replay_task` rebuilds a context per message,
+   so the 56-task `standard` tier (99,266 messages ≈ 496,000 context builds) did
+   not finish a local pass in >70 minutes of CPU and the 80k/120k rungs are not
+   practical on one core. `standard` is the honest ceiling until the replay is
+   made cheaper or sharded; the plan's curve can be reported from it (the `curve`
+   tier already gives 5k/10k/20k points).
+2. **Then run the real experiment.** `brainos-context-pipeline --preset standard
+   --generate --model <model> --api-key-env OPENAI_API_KEY --dataset
+   benchmarks/context_rot/generated/standard.jsonl` — 56 tasks × 5 modes = 280
+   requests, output bounded by the preset's 1,024-token ceiling, input tokens on
+   the order the model-free runs measured. The repository ships no price table on
+   purpose: the budget is that arithmetic times the provider's price.
+3. **Then write §26 from the manifests.** Results, ablation results, methodology,
+   dataset description, baseline definitions, limitations, reproducibility —
+   each citing a run id, with ungraded metrics left as `—`.
+4. **Publish the Space and the release.** §25 item 1 is the only MVP item left,
+   and the ledger row stays external until the Space exists — but the repository
+   half is finished: the Space manifest is the first block of `README.md`, and
+   `docs/deployment.md` carries the variable table, the public-Space posture
+   (`BRAINOS_LAB_EVAL_ALLOW_GENERATION=0`, `quick`, small ceilings, retention
+   decided) and the checklist whose last step is recording the URL here.
