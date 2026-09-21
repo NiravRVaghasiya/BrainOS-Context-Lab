@@ -46,7 +46,7 @@ provider adapter was the least-covered module in the project, and a base install
 | [`tests/conftest.py`](../tests/conftest.py) (was a docstring) | The optional-dependency policy: `@pytest.mark.requires_runtime` / `@pytest.mark.requires_figures` become skips when the module is absent, so a base install reports skips instead of failures. |
 | [`tests/unit/test_tokenizers.py`](../tests/unit/test_tokenizers.py) (+2) · [`tests/security/test_secrets.py`](../tests/security/test_secrets.py) (+1) | The tiktoken setup path (encoding by name, by model, unknown encoding) with the dependency stubbed; `SessionManager.clear_all` clearing every session's credential. |
 | [`pyproject.toml`](../pyproject.toml) | `pytest-cov` in the `dev` extra; `[tool.coverage.run] source = ["src"]`; `[tool.coverage.report] fail_under = 90`; the two optional-dependency markers registered. |
-| [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) (new) | Two jobs: `verify` (ruff + the full suite with the coverage floor, `integration` extra installed) and `without-extras` (the base package only, where optional tests skip themselves). The shipped-surface credential scan is already a test, so it runs inside both. |
+| [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) (new) | Two jobs: `verify` (ruff + the full suite with the coverage floor, `integration` extra installed) and `without-extras` (the base package only, where optional tests skip themselves). The shipped-surface credential scan is already a test, so it runs inside both. **Not yet executing on GitHub:** `gh api repos/…/actions/workflows` returns `total_count: 0`, i.e. Actions is not enabled for this repository. Both jobs' commands were reproduced locally instead (see Measured behaviour), and the workflow starts running as soon as Actions is enabled. |
 
 Nothing in `src/` changed. Phase 18 is the phase that measures the others; a
 test-suite phase that needs a production edit to pass is a bug report, and none
@@ -155,7 +155,9 @@ inspection for a module that was skipped wholesale. The other 84 carry
    lines are covered for a reason.
 6. **CI runs the suite twice, on purpose.** `verify` proves the pinned-runtime
    path; `without-extras` proves the fake-backed path a Space or a contributor
-   with no extras gets. Deleting the second job deletes the claim.
+   with no extras gets. Deleting the second job deletes the claim. (The jobs
+   execute once GitHub Actions is enabled for this repository; until then both
+   commands are also documented in the README so a contributor can run them.)
 7. **A base install stays supported.** `pip install -e ".[dev]"` and
    `pytest -q` must stay green (with skips). Do not "fix" a future failure by
    making the extras mandatory.
@@ -224,6 +226,12 @@ The 98 skips are 85 marker-guarded tests plus 13 whole modules that skip
 themselves at import (`tests/integration/*`, `tests/ui`); those modules' 77
 tests are not collected at all without their extras, which is why the base
 install collects 1171 items instead of 1248.
+
+Those two commands are exactly the two CI jobs, run by hand because **GitHub
+Actions is not enabled for this repository** (`gh api
+repos/NiravRVaghasiya/BrainOS-Context-Lab/actions/workflows` → `total_count: 0`,
+and no run is created for a pushed branch). The workflow file is the definition;
+enabling Actions in the repository settings is what activates it.
 
 Live proof that the new guarantees hold against the pinned runtime comes from
 the existing live files, which run in the full environment and skip in the base

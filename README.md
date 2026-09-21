@@ -345,6 +345,11 @@ pytest -q --cov --cov-report=term-missing                     # 94%, floor 90
 ruff check .
 ```
 
+The same two commands are the two jobs in
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) (`verify` and
+`without-extras`); run them from a shell while GitHub Actions is not enabled for
+this repository.
+
 Two optional dependencies change what the suite can do, and neither is required
 to run it:
 
