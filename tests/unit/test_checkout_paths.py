@@ -169,6 +169,7 @@ def test_a_preview_works_from_any_directory_and_records_a_portable_path(
     assert not Path(preview.dataset).is_absolute()
 
 
+@pytest.mark.requires_runtime
 def test_a_run_completes_from_any_directory_and_writes_under_its_own_root(
     elsewhere: Path,
 ) -> None:
@@ -181,7 +182,7 @@ def test_a_run_completes_from_any_directory_and_writes_under_its_own_root(
         provider_factory=FakeLLMProvider,
     )
 
-    view = runner.run(session_id=SESSION, preset_name="quick", modes=["brainos"], limit=1)
+    view = runner.run(session_id=SESSION, preset_name="quick", modes=["full_context"], limit=1)
 
     assert view.ok is True
     assert (root / "ui" / SESSION).is_dir()
@@ -222,11 +223,23 @@ def test_the_single_mode_cli_defaults_to_the_committed_dataset_from_anywhere(
     assert Path(default).is_file()
 
 
+@pytest.mark.requires_runtime
 def test_the_pipeline_cli_is_usable_from_outside_the_checkout(elsewhere: Path) -> None:
-    """End to end: no path argument, a working directory that is not the repo."""
+    """End to end: no path argument, a working directory that is not the repo.
+
+    Marked ``requires_runtime`` because a pipeline run builds a BrainOS adapter
+    for every mode, including the baselines — the same reason
+    ``tests/evaluation/test_pipeline.py`` marks its dry-run tests. The path
+    resolution this test is about is exercised without the runtime by the
+    preview test above.
+    """
 
     env = dict(os.environ)
-    env["PYTHONPATH"] = str(REPO_ROOT / "src")
+    # Extend rather than replace: a caller's PYTHONPATH (a sandbox's import
+    # hooks, a sitecustomize) must survive into the subprocess.
+    env["PYTHONPATH"] = os.pathsep.join(
+        part for part in (str(REPO_ROOT / "src"), os.environ.get("PYTHONPATH", "")) if part
+    )
     result = subprocess.run(
         [
             sys.executable,
@@ -235,6 +248,8 @@ def test_the_pipeline_cli_is_usable_from_outside_the_checkout(elsewhere: Path) -
             "--dry-run",
             "--limit",
             "1",
+            "--modes",
+            "full_context",  # no BrainOS runtime in a base install
             "--no-plots",
             "--output-dir",
             str(elsewhere / "out"),

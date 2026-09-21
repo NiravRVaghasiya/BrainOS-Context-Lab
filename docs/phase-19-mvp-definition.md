@@ -156,6 +156,14 @@ the re-run command the plan documents.
 4. **The pipeline's rerun command would have carried a machine-specific path**
    once the CLI anchored its default. Fixed by treating the anchored default as
    the default in `_pipeline_rerun_command`.
+5. **Two of the new checkout tests needed the pinned runtime and did not say
+   so** — a pipeline run builds a BrainOS adapter for every mode, including the
+   baselines, so a base install fails the experiment stage (exit 4) rather than
+   skipping it. The `without-extras` CI job caught this on the first push; the
+   two tests now carry `@pytest.mark.requires_runtime`, and the path resolution
+   they are about is still exercised without the runtime by the preview and
+   sweeper tests beside them (`1132 passed, 104 skipped, 0 failed` in a base
+   install).
 5. **The retention notice made `policy_notice()` longer than the tab's header
    budget.** The sentence is written to be the shortest honest version of the
    policy; if a deployment turns retention off, it says that instead.
