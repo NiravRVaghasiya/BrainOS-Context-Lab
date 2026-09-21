@@ -478,10 +478,16 @@ def create_app(controller: UIController | None = None) -> Any:
             SqliteMemoryStore,
         )
 
+        # Phase 20: the narrowing a deployment asked for, read once at startup.
+        # With no variables set this is exactly `EvaluationPolicy()`, so a local
+        # run and the tests are unaffected by the feature existing.
+        from .evaluation import EvaluationPolicy
+
         controller = UIController(
             conversation_store=SqliteConversationStore(),
             memory_store=SqliteMemoryStore(),
             evaluation_store=SqliteEvaluationStore(),
+            evaluation_policy=EvaluationPolicy.from_environment(),
         )
 
     with gr.Blocks(title=TITLE) as demo:

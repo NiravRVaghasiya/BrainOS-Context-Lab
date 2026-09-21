@@ -1,7 +1,7 @@
 # Phase 20 — Research Release (in progress)
 
 **Plan reference:** §26 (Research Release), §27 Milestone 6, §29 (Benchmark Matrix), §14 (length ladder)
-**Tests:** 1335 → **1339** (+4) · coverage 94.18% → **94.19%** (floor 90) · `ruff check .` clean
+**Tests:** 1335 → **1349** (+14) · coverage **94.19%** (floor 90) · `ruff check .` clean
 **CI:** run `35597471402` (commit `25e2e56`) green — `lint, test, coverage floor` 6m43s · `suite runs without the optional extras` 35s
 **Status:** **in progress** — the dataset half and the model-free half are done, and the measurement bug the
 model-free half exposed is **fixed and re-measured**. The model runs, §26's document and the Space remain.
@@ -172,16 +172,62 @@ order of the sums in the table above (Mode A carries the conversation, the retri
 tokens), output bounded by `--max-output-tokens` (1,024 in the `standard` preset). The repository deliberately
 ships no price table — multiply by the provider's current price.
 
+## Milestone 6: the Space half of the release
+
+The audit's fourth gap was that §27's "HF Release" milestone was not a release:
+`app.py`, `requirements.txt` and `packages.txt` were Space-ready, but `README.md`
+carried **no Hugging Face front matter**, so a Space created from this repository
+would have had nothing to build, and a Space operator had no way to narrow the
+Evaluation tab without editing source — the kind of edit that drifts from the
+version the tests pin.
+
+What changed:
+
+1. `README.md` opens with the manifest a Space build reads — `sdk: gradio`,
+   `sdk_version: 6.28.0` (the version this checkout is validated against),
+   `app_file: app.py`, title, emoji, licence, short description.
+2. [`docs/deployment.md`](deployment.md) is the operator document: the variable
+   table, two recommended postures (a public retrieval-only Space; a research
+   deployment with the plan's own defaults), and the checklist that ends with
+   "record the Space URL in the README and CONTEXT".
+3. `EvaluationPolicy.from_environment()` (`src/app/evaluation.py`) reads five
+   deployment variables — `BRAINOS_LAB_EVAL_PRESETS`, `..._MAX_TASKS`,
+   `..._MAX_REQUESTS`, `..._ALLOW_GENERATION`, `..._RETENTION_DAYS` — and
+   `create_app()` builds its controller with them. They can only **tighten**:
+   `apply` still enforces the preset's ceilings underneath. A value that cannot
+   be obeyed (an unknown preset, `twenty` where a number belongs) raises at
+   startup with the variable's name in the message, because a public deployment
+   should fail where its operator can see it rather than quietly host the widest
+   policy the code allows.
+4. Ten new tests in `tests/unit/test_deployment_config.py` pin the manifest (its
+   keys, that `app_file` exposes the entry point, and that the manifest's SDK
+   major matches `requirements.txt`), the variable table against the code, and
+   every branch of the narrowing — including that `..._ALLOW_GENERATION=0` makes
+   the tab refuse a run that would spend a visitor's key, and that a policy can
+   never widen a preset's ceiling.
+
+**No Space exists yet.** The MVP checklist's first item is the one item this
+repository cannot satisfy by itself; the checklist in `docs/deployment.md` ends
+with the two files that must name the URL once it does.
+
 ## Verification of the fix
 
 ```bash
-# The suite, every extra installed
+# The suite, every extra installed (after the ceiling fix and the deployment work)
 # Required test coverage of 90.0% reached. Total coverage: 94.19%
-# 1339 passed in 254.64s (0:04:14)
+# 1349 passed in 256.70s (0:04:16)
+
+# The deployment tests do not need the optional extras (the `without-extras` job
+# runs them on a base install)
+$ PYTHONPATH=<base-install-simulator> pytest tests/unit/test_deployment_config.py -q
+# 21 passed in 0.12s
 
 # The live replay, pinned runtime (the new regression test included)
 $ pytest tests/integration/test_baseline_modes_live.py -q
 # 12 passed in 5.67 s
+
+# The shipped surface (114 files once docs/deployment.md joined it)
+# scan_version=scan-v1 files=114 bytes=32850981 findings=0 clean=True
 
 # The store change that goes with it: one full suite failed this test once and
 # never again, so the retry budget is now a constant with a name (1 s, was 0.25 s)

@@ -120,6 +120,22 @@ resolves inside that directory. The sweep runs when a browser run starts and fro
 what the sweep removed. **End session** still deletes a visitor's own rows and
 artifacts immediately.
 
+### Deployment configuration
+
+The same code runs a local checkout and a public Space; what differs is
+configuration, and it is read in exactly two places. `src/app/ui.py` reads the
+server variables (`BRAINOS_LAB_DB`, `BRAINOS_LAB_CONCURRENCY`,
+`BRAINOS_LAB_MAX_QUEUE`, the `GRADIO_*` bindings) in `main()`/`create_app()`, and
+`EvaluationPolicy.from_environment()` (`src/app/evaluation.py`) reads the five
+`BRAINOS_LAB_EVAL_*` variables that narrow the Evaluation tab. `create_app()`
+builds its controller with that policy, so a deployment that sets nothing gets
+the plan's own defaults and a deployment that sets something can only tighten:
+`EvaluationPolicy.apply` still enforces the preset's ceilings underneath, and a
+value that cannot be obeyed stops startup with the variable's name in the
+message. The manifest a Space build reads lives in the first block of
+[`README.md`](../README.md); the operator-facing table, the recommended postures
+and the checklist are in [`deployment.md`](deployment.md).
+
 ## Baseline modes
 
 The evaluation layer supports the same provider and task protocol for all five

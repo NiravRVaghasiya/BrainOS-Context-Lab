@@ -1,3 +1,16 @@
+---
+title: BrainOS Context Lab
+emoji: 🧠
+colorFrom: indigo
+colorTo: purple
+sdk: gradio
+sdk_version: 6.28.0
+app_file: app.py
+pinned: false
+license: mit
+short_description: Bring your model, give it memory, measure context cost.
+---
+
 # BrainOS Context Lab
 
 > Bring your model. Give it memory. Measure context efficiency.
@@ -170,7 +183,7 @@ or one button in the browser.
 A session-scoped `ConversationService` combines the adapter, the retrieval
 policy, the context builder, and the provider factory. Deterministic fakes cover
 the whole pipeline without BrainOS installed; optional live tests exercise the
-pinned runtime. 1339 tests pass and `ruff check .` is clean repository-wide.
+pinned runtime. 1349 tests pass and `ruff check .` is clean repository-wide.
 
 Chat is usable without an API key: BrainOS still observes and retrieves memory,
 and the panels show exactly what the model *would* have been sent. See
@@ -187,7 +200,7 @@ owns (the app entry point, the declared dependencies, a Gradio app that builds).
 
 | §25 item | How to do it |
 | --- | --- |
-| 1 Open the HF Space | Not published yet — the only unmet MVP item. |
+| 1 Open the HF Space | **Not published** — the only unmet MVP item. The repository-side half is in place: the Space manifest is the first block of this README, and [`docs/deployment.md`](docs/deployment.md) carries the operator checklist. |
 | 2–4 Select OpenAI, enter a key, select a model | Sidebar → provider, API key, model → **Connect**. The key stays in server memory and is never returned to the browser. |
 | 5 Start a conversation | Type in the chat box. |
 | 6 Store a fact | State it in a turn; the memory policy keeps durable project facts. |
@@ -348,7 +361,8 @@ benchmarks/
   context_rot/                 # Phase 7 generator, spec, scored dataset, manifest
   fixtures/                    # Deterministic fixtures (Phase 12 scripted answers)
 docs/                          # Architecture, integration, evaluation, threat
-                               #   model, security controls, and per-phase logs
+                               #   model, security controls, deployment, and
+                               #   per-phase logs
 tests/                         # Unit, integration, evaluation, security, and UI
                                #   tests; the §24 traceability ledger; the
                                #   optional-dependency skip policy (conftest.py)
@@ -398,7 +412,7 @@ pip install -e ".[integration]"
 
 ```bash
 pip install -e ".[dev,ui,providers,evaluation,integration]"   # everything
-pytest -q                                                     # 1339 tests
+pytest -q                                                     # 1349 tests
 pytest -q --cov --cov-report=term-missing                     # 94%, floor 90
 ruff check .
 ```
@@ -524,6 +538,35 @@ as a first cost control; the full Phase 15 run budgets (`quick` / `standard` /
 `python -m evaluation.pipeline` composes all of the above and writes the same
 manifest on every artifact it produces, plus a `pipeline_rerun_command` that
 reproduces the whole run.
+
+## Deployment
+
+The repository is shaped like a Hugging Face Space: `README.md` opens with the
+manifest (`sdk: gradio`, `app_file: app.py`) and the build reads
+`requirements.txt` and `packages.txt`. None of that is folklore — the manifest's
+keys, the fact that `app_file` exposes the entry point, the manifest's SDK version
+against the requirement the build installs, and every deployment variable below
+are pinned by `tests/unit/test_deployment_config.py`.
+
+A deployment narrows the Evaluation tab with environment variables instead of
+editing source, and the variables can only tighten — the preset's own ceilings
+are still applied underneath:
+
+```bash
+BRAINOS_LAB_DB=":memory:"             # stateless: no visitor transcript is kept
+BRAINOS_LAB_EVAL_PRESETS="quick"      # a retrieval-only public posture
+BRAINOS_LAB_EVAL_MAX_TASKS="20"
+BRAINOS_LAB_EVAL_MAX_REQUESTS="60"
+BRAINOS_LAB_EVAL_ALLOW_GENERATION="0"
+BRAINOS_LAB_EVAL_RETENTION_DAYS="0"   # no automatic sweep; End session still deletes
+```
+
+**No Space is published yet.** The MVP checklist's first item ("open the HF
+Space") is the one item this repository cannot satisfy by itself; when a Space is
+opened, its URL belongs here and in `CONTEXT.md`. See
+[`docs/deployment.md`](docs/deployment.md) for the full variable table, the two
+recommended postures (public Space vs. research deployment), and the operator
+checklist.
 
 ## Security principles
 

@@ -47,6 +47,7 @@ being reachable by an anonymous visitor on a public Space:
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
 from collections.abc import Callable, Mapping, Sequence
@@ -116,6 +117,51 @@ _SAFE_TOKEN_RE = re.compile(r"[A-Za-z0-9._-]{1,128}")
 #: looking. A directory with thousands of tiers is a listing problem, not a UI.
 MAX_DATASET_CHOICES = 24
 
+#: Phase 20: the deployment variables that narrow the Evaluation tab. They exist
+#: because the Space operator's job ("do not host 7 500-request runs on this box")
+#: should not require editing source, and because an operator who edits source
+#: drifts from the version the tests pin. Every one of them can only tighten: the
+#: preset's own ceilings are still applied underneath (see
+#: :meth:`EvaluationPolicy.apply`).
+POLICY_PRESETS_ENV = "BRAINOS_LAB_EVAL_PRESETS"
+POLICY_MAX_TASKS_ENV = "BRAINOS_LAB_EVAL_MAX_TASKS"
+POLICY_MAX_REQUESTS_ENV = "BRAINOS_LAB_EVAL_MAX_REQUESTS"
+POLICY_ALLOW_GENERATION_ENV = "BRAINOS_LAB_EVAL_ALLOW_GENERATION"
+POLICY_RETENTION_DAYS_ENV = "BRAINOS_LAB_EVAL_RETENTION_DAYS"
+
+#: The five variables above, in the order a deployment doc should list them.
+POLICY_ENVIRONMENT_VARIABLES = (
+    POLICY_PRESETS_ENV,
+    POLICY_MAX_TASKS_ENV,
+    POLICY_MAX_REQUESTS_ENV,
+    POLICY_ALLOW_GENERATION_ENV,
+    POLICY_RETENTION_DAYS_ENV,
+)
+
+#: Strings a deployment uses to mean "off". ``GRADIO_STRICT_CORS`` already reads
+#: flags this way, so a Space that sets one of them expects the other to agree.
+_FALSEY = frozenset({"0", "false", "no", "off", ""})
+
+
+def _policy_integer(source: Mapping[str, str], name: str, *, minimum: int) -> int | None:
+    """Read one integer deployment variable, naming it in any complaint.
+
+    Nothing here is allowed to guess: a typo in a Space's variables must fail at
+    startup with the variable's name in the message, not silently fall back to a
+    ceiling the operator did not choose.
+    """
+
+    raw = source.get(name)
+    if raw is None or not str(raw).strip():
+        return None
+    try:
+        value = int(str(raw).strip())
+    except ValueError:
+        raise ValueError(f"{name} must be an integer, got {raw!r}.") from None
+    if value < minimum:
+        raise ValueError(f"{name} must be at least {minimum}, got {value}.")
+    return value
+
 
 class EvaluationRequestError(ValueError):
     """A run the tab asked for and the runner will not perform.
@@ -160,6 +206,52 @@ class EvaluationPolicy:
     results_retention_seconds: float | None = DEFAULT_RETENTION_SECONDS
     #: Sessions one sweep may remove, so a page load cannot become a purge.
     max_sessions_per_sweep: int = MAX_SESSIONS_PER_SWEEP
+
+    @classmethod
+    def from_environment(cls, environ: Mapping[str, str] | None = None) -> EvaluationPolicy:
+        """Build the policy a deployment asked for, or the defaults.
+
+        Reads ``BRAINOS_LAB_EVAL_PRESETS``, ``..._MAX_TASKS``,
+        ``..._MAX_REQUESTS``, ``..._ALLOW_GENERATION`` and
+        ``..._RETENTION_DAYS`` (see :data:`POLICY_ENVIRONMENT_VARIABLES`); an
+        unset or blank variable keeps this class's default. ``..._RETENTION_DAYS=0``
+        means "no sweep" and is the explicit way to say artifacts stay until the
+        visitor ends the session — an operator should have to write that, rather
+        than get it by forgetting a variable.
+
+        Raises ``ValueError`` for a value that cannot be obeyed, because a
+        misconfigured public deployment should fail where the operator can see it
+        instead of quietly hosting the widest policy the code allows.
+        """
+
+        source = os.environ if environ is None else environ
+        overrides: dict[str, Any] = {}
+
+        raw_presets = str(source.get(POLICY_PRESETS_ENV, "")).strip()
+        if raw_presets:
+            presets = tuple(name.strip().lower() for name in raw_presets.split(",") if name.strip())
+            if not presets:
+                raise ValueError(f"{POLICY_PRESETS_ENV} listed no preset names.")
+            overrides["allowed_presets"] = presets
+
+        for name, field_name in (
+            (POLICY_MAX_TASKS_ENV, "max_tasks"),
+            (POLICY_MAX_REQUESTS_ENV, "max_requests"),
+        ):
+            value = _policy_integer(source, name, minimum=1)
+            if value is not None:
+                overrides[field_name] = value
+
+        raw_flag = source.get(POLICY_ALLOW_GENERATION_ENV)
+        if raw_flag is not None and str(raw_flag).strip() != "":
+            overrides["allow_generation"] = str(raw_flag).strip().lower() not in _FALSEY
+
+        raw_days = source.get(POLICY_RETENTION_DAYS_ENV)
+        if raw_days is not None and str(raw_days).strip() != "":
+            days = _policy_integer(source, POLICY_RETENTION_DAYS_ENV, minimum=0)
+            overrides["results_retention_seconds"] = None if days == 0 else days * 86_400
+
+        return cls(**overrides)
 
     def __post_init__(self) -> None:
         unknown = sorted(set(self.allowed_presets) - set(PRESETS))
