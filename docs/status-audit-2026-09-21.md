@@ -6,6 +6,19 @@ which is `origin/main`), audited on branch `arena/01a0c313-brainos-context-lab`.
 asks for that does not exist yet, and whether the plan's exit criteria,
 milestones, and success criteria have been reached.
 
+**Where its gaps stand now** (added after Phases 19 and 20; the audit body below
+is the snapshot it was written as): gap 1 *no model in the loop* is still open —
+it needs a key and a budget, and nothing else in this repository can substitute
+for it; gap 2 *no research-scale dataset* is closed (the tiers are generated with
+committed manifests); gap 3 *Phase 20 deliverables* is open with the model run;
+gap 4 *Milestone 6 is not a release* is closed on the repository side — the Space
+manifest, the deployment document and the deployment-narrowed Evaluation tab now
+exist — with the Space URL itself still missing; gap 5 *Phase 19 not started* is
+closed; gap 6 *the three missing tests and retention* is closed; gap 7
+*abstention* is open and is a finding a real run will quantify; gap 8 *CWD-relative
+roots* is fixed; gap 9 *no tag or release* is open (an operator decision, and the
+last step of the deployment checklist).
+
 ## Verdict
 
 **Phases 0–18 of the plan's 20 are complete, and the claims they make reproduce
