@@ -306,16 +306,20 @@ this README came from a dry run or a deterministic fake.
 
 Phase 20 (in progress) prepares the run the research question needs. The tiers
 §29 asks for are generated — `standard` (56 tasks, 5k–40k, two variants), the
-plan's `research` ladder (5k–120k) and two smaller slices — with their manifests
-committed and the datasets local (`benchmarks/context_rot/generated/`). Two
-model-free runs over the new tiers are recorded in
-[`docs/phase-20-research-release.md`](docs/phase-20-research-release.md), and they
-found something the smoke tier could not show: **Mode A stops at 4,096 tokens**,
-because the benchmark's replay session uses the product's default `max_tokens`
-ceiling — so above ~4k the "full context" reference is a truncated one, and every
-reduction figure measured against it overstates the saving. That has to be
-settled before the model half is worth its budget; the phase log lists the
-options and the measured cost of the alternative.
+plan's `research` ladder (5k–120k) and three smaller slices — with their manifests
+committed and the datasets local (`benchmarks/context_rot/generated/`). The
+model-free runs over the new tiers, recorded in
+[`docs/phase-20-research-release.md`](docs/phase-20-research-release.md), found
+something the smoke tier could not show: the benchmark's replay session took the
+product's default `max_tokens` ceiling, so above ~4k tokens Mode A — the "full
+context" reference every reduction is priced against — silently became a 4k
+window (4,086 / 4,090 / 4,090 tokens for 5k / 10k / 20k tasks, and one task in
+four *lost its evidence to the truncation*). A replay now sizes its session
+ceiling to the transcript being replayed (`evaluation.modes.replay_ceiling`),
+and the re-measured runs show Mode A carrying the whole conversation again
+(mean 4,307 tokens on the 2k/4k tier, evidence in prompt 1.000) while BrainOS
+stays at 193 tokens. That fix is what makes the model half worth its budget; the
+phase log also records what the harness costs and what is still open.
 
 ## Repository layout
 

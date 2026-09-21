@@ -52,6 +52,22 @@ This project is an experimental evaluation platform, not a claim that BrainOS pr
   `standard`/`research` tiers, multiple variants, and a model in the loop.
   Phase 8 records this in the artifact: `degradation.area_under_degradation_curve`
   is JSON `null` with an explicit note when only one length is present.
+- The evaluation harness replays every message of a task through the normal
+  service path and rebuilds a context for each one, which is what makes its
+  numbers comparable to the product but also means a pass costs more than the
+  tier's token count. Measured: the 9-task `curve` tier × 5 modes takes minutes,
+  the 56-task `standard` tier (99,266 messages ≈ 496,000 context builds) did not
+  finish a local pass in over an hour of one core, and a single 120k-token task
+  in over 50 minutes. The plan's 80k/120k rungs are therefore not practical on
+  one core until the replay is made cheaper (skip the rebuild for turns that only
+  need the transcript) or sharded; `standard` is the honest ceiling today.
+- A benchmark replay sizes its session ceiling to the transcript it replays
+  (`evaluation.modes.replay_ceiling`), so Mode A really is a whole-conversation
+  reference. The product's 4,096-token ceiling is unchanged for live sessions —
+  which means a UI run over a long task can now be *reported* as exceeding a
+  preset's `max_input_tokens` instead of being silently shortened, and the
+  preset ceiling (not the session default) is what decides whether that run is
+  allowed.
 - Faithfulness, Recall@K, evidence-in-prompt, and answer accuracy are four
   different numbers. On the smoke run they disagree on multi-hop (recall 1.0,
   evidence-in-prompt 0.0, scripted accuracy 1.0, faithfulness 0.0 for that

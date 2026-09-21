@@ -7,6 +7,8 @@ the comparison against the pinned BrainOS revision.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import pytest
 
 from app.service import ConversationService
@@ -25,6 +27,7 @@ from evaluation.modes import (
     ModeReplay,
     compare_modes,
     default_service_factory,
+    replay_ceiling,
     replay_task,
     task_evaluator,
 )
@@ -216,3 +219,85 @@ def test_malformed_transcript_entries_are_skipped() -> None:
     replay = replay_task(task, MODE_FULL_CONTEXT, service_factory=_fake_factory)
 
     assert replay.history_messages_considered == 1
+
+
+# --------------------------------------------------------------------------- #
+# Phase 20: the replay's session ceiling
+# --------------------------------------------------------------------------- #
+
+
+def _long_task(messages: int = 460) -> BenchmarkTask:
+    """A transcript whose estimated tokens exceed the product's session ceiling."""
+
+    filler = "Rollout check for the migration window reported no change. "
+    conversation: list[dict[str, str]] = [{"role": "user", "content": FACT}]
+    for index in range(messages):
+        conversation.append({"role": "user", "content": f"{filler}{index}"})
+    return BenchmarkTask(
+        task_id="long",
+        category="cross_session",
+        conversation=conversation,
+        question=QUESTION,
+        expected_answer="PostgreSQL",
+        conversation_length=len(conversation),
+    )
+
+
+def test_the_replay_ceiling_covers_the_transcript_and_never_lowers_the_default() -> None:
+    default = ContextSettings().max_tokens
+    short = _task(filler=2)
+    long = _long_task()
+
+    assert replay_ceiling(short) == default
+    assert replay_ceiling(long) > default
+    assert replay_ceiling(long) > replay_ceiling(short)
+
+
+def _capturing_factory(
+    captured: list[ConversationService],
+) -> Callable[[str], ConversationService]:
+    """A fake-runtime factory that keeps the service it built for inspection."""
+
+    def factory(mode: str) -> ConversationService:
+        service = _fake_factory(mode)
+        captured.append(service)
+        return service
+
+    return factory
+
+
+def test_a_replay_raises_the_session_ceiling_only_when_the_transcript_needs_it() -> None:
+    default = ContextSettings().max_tokens
+    short_sessions: list[ConversationService] = []
+    long_sessions: list[ConversationService] = []
+
+    short = _capturing_factory(short_sessions)
+    long = _capturing_factory(long_sessions)
+
+    replay_task(_task(filler=2), MODE_FULL_CONTEXT, service_factory=short)
+    replay_task(_long_task(), MODE_FULL_CONTEXT, service_factory=long)
+
+    assert short_sessions[0].state.context.max_tokens == default
+    raised = long_sessions[0].state.context
+    assert raised.max_tokens == replay_ceiling(_long_task())
+    # Mode A's history budget *is* the ceiling, so raising one raises the other —
+    # otherwise the wall would move and the window would not.
+    assert raised.recent_turn_budget == raised.max_tokens
+
+
+def test_full_context_carries_a_transcript_larger_than_the_product_ceiling() -> None:
+    """Above ~4k tokens Mode A must replay the conversation, not a 4k window.
+
+    Phase 20 measured the opposite — Mode A flat at ~4.1k tokens for 5k/10k/20k
+    tasks, so every reduction was priced against a truncated reference. This is
+    the regression that keeps it honest.
+    """
+
+    task = _long_task()
+
+    replay = replay_task(task, MODE_FULL_CONTEXT, service_factory=_fake_factory)
+
+    assert replay.full_context_reference_tokens > ContextSettings().max_tokens
+    assert replay.final_context_tokens == replay.full_context_reference_tokens
+    assert replay.expected_answer_in_prompt is True
+    assert replay.context_reduction == 0.0

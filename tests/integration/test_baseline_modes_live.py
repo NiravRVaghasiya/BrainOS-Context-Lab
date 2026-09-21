@@ -103,6 +103,37 @@ def test_live_full_context_replays_everything_and_is_the_reference() -> None:
     assert replay.expected_answer_in_prompt is True
 
 
+def test_live_full_context_carries_a_transcript_larger_than_the_product_ceiling() -> None:
+    """Phase 20: the reference must not be a 4,096-token window.
+
+    The product's session ceiling bounds a live conversation. Applied unchanged
+    to a benchmark replay it silently truncated Mode A above ~4k tokens, which is
+    what the model-free runs measured against 5k/10k/20k tasks. The replay now
+    sizes its own ceiling to the transcript, and this is the live check that a
+    conversation past the default really is carried whole.
+    """
+
+    filler = "Rollout check for the migration window reported no change. "
+    conversation: list[dict[str, str]] = [{"role": "user", "content": FACT}]
+    for index in range(460):
+        conversation.append({"role": "user", "content": f"{filler}{index}"})
+    task = BenchmarkTask(
+        task_id="live-long-transcript",
+        category="cross_session",
+        conversation=conversation,
+        question=QUESTION,
+        expected_answer="PostgreSQL",
+        conversation_length=len(conversation),
+    )
+
+    replay = replay_task(task, MODE_FULL_CONTEXT)
+
+    assert replay.full_context_reference_tokens > 4096
+    assert replay.final_context_tokens == replay.full_context_reference_tokens
+    assert replay.expected_answer_in_prompt is True
+    assert replay.context_reduction == 0.0
+
+
 def test_live_the_sliding_window_loses_the_fact() -> None:
     replay = replay_task(_task(), MODE_SLIDING_WINDOW)
 

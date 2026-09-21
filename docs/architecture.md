@@ -128,11 +128,17 @@ registered in `src/baselines/modes.py`:
 
 | Mode | Selector | Evidence | History window |
 | --- | --- | --- | --- |
-| A | `full_context` | none | unlimited (whole `max_tokens` ceiling) |
+| A | `full_context` | none | unlimited (whole `max_tokens` ceiling¹) |
 | B | `sliding_window` | none | last 8 turns |
 | C | `rag` | lexical top-k transcript chunks | last 2 turns / 256 tokens |
 | D | `brainos` | BrainOS recall | last 2 turns / 256 tokens |
 | E | `brainos_rag` | BrainOS recall + lexical chunks | last 2 turns / 256 tokens |
+
+¹ In the product the ceiling is the session's `max_tokens` (4,096 by default).
+A benchmark replay sizes that ceiling to the transcript it is about to replay
+(`evaluation.modes.replay_ceiling`), because a reference that stops growing at
+4k tokens makes every reduction above 4k an artefact — Phase 20 measured exactly
+that before the fix.
 
 Only the context-management strategy changes in a controlled comparison. Two
 rules keep the comparison meaningful, both derived from the Phase 3 measurement
