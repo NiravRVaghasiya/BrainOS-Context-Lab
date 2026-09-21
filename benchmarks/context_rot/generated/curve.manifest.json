@@ -1,0 +1,26 @@
+{
+  "generator_version": "context-rot-v1",
+  "tier": "custom",
+  "lengths": [
+    5000,
+    10000,
+    20000
+  ],
+  "categories": [
+    "single_hop",
+    "temporal",
+    "abstention"
+  ],
+  "variants": 1,
+  "seed": 20260913,
+  "task_count": 9,
+  "token_counter": "estimate_tokens",
+  "dataset_sha256": "4fce52c4093cedc08d67525c3fe404da45c5b84eb88aaf4e0f882f0ed9557d51",
+  "category_counts": {
+    "single_hop": 3,
+    "temporal": 3,
+    "abstention": 3
+  },
+  "mean_achieved_tokens": 12639.7,
+  "regenerate": "python benchmarks/context_rot/generation.py --tier custom --variants 1 --seed 20260913"
+}

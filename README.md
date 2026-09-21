@@ -304,6 +304,19 @@ length tier, an estimated token counter, and no model in the loop — answer
 accuracy is only measurable once real generations are graded. Every number in
 this README came from a dry run or a deterministic fake.
 
+Phase 20 (in progress) prepares the run the research question needs. The tiers
+§29 asks for are generated — `standard` (56 tasks, 5k–40k, two variants), the
+plan's `research` ladder (5k–120k) and two smaller slices — with their manifests
+committed and the datasets local (`benchmarks/context_rot/generated/`). Two
+model-free runs over the new tiers are recorded in
+[`docs/phase-20-research-release.md`](docs/phase-20-research-release.md), and they
+found something the smoke tier could not show: **Mode A stops at 4,096 tokens**,
+because the benchmark's replay session uses the product's default `max_tokens`
+ceiling — so above ~4k the "full context" reference is a truncated one, and every
+reduction figure measured against it overstates the saving. That has to be
+settled before the model half is worth its budget; the phase log lists the
+options and the measured cost of the alternative.
+
 ## Repository layout
 
 ```text
