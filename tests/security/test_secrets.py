@@ -22,6 +22,28 @@ def test_session_end_clears_provider_key() -> None:
     assert session.brain is None
 
 
+def test_clear_all_clears_every_session_credential() -> None:
+    """The shutdown hook is a credential route too, and the plan requires one.
+
+    ``clear_all`` exists for process shutdown and tests. It must drop the
+    sessions *and* the keys they hold, not just forget the identifiers.
+    """
+
+    manager = SessionManager()
+    sessions = [manager.start() for _ in range(2)]
+    for index, session in enumerate(sessions):
+        session.provider = ProviderConfig(api_key=f"secret-key-{index}", model="test")
+        session.messages.append({"role": "user", "content": "hello"})
+
+    manager.clear_all()
+
+    assert manager.get(sessions[0].session_id) is None
+    assert manager.get(sessions[1].session_id) is None
+    for session in sessions:
+        assert session.provider.api_key == ""
+        assert session.messages == []
+
+
 def test_trace_redacts_secret_bearing_mapping() -> None:
     result = sanitize_trace(
         [{"name": "provider", "detail": "safe", "api_key": "secret-key"}]

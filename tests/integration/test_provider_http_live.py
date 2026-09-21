@@ -148,6 +148,7 @@ def test_the_sdk_reaches_a_base_url_and_normalizes_the_response(stub) -> None:  
     assert provider.list_models() == [STUB_MODEL]
 
 
+@pytest.mark.requires_runtime
 def test_a_generated_cli_run_records_usage_without_the_credential(
     stub, tmp_path, monkeypatch
 ) -> None:  # type: ignore[no-untyped-def]

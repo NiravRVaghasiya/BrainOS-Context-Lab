@@ -37,6 +37,14 @@ def controller() -> UIController:
     return instance
 
 
+def _fake_adapter(**kwargs: object) -> BrainOSAdapter:
+    """Adapter over ``LooseFakeRuntime``, bound to the session being created."""
+
+    return BrainOSAdapter(
+        LooseFakeRuntime(str(kwargs["session_id"]), str(kwargs["actor_id"]))
+    )
+
+
 def _connected(controller: UIController) -> str:
     view = controller.connect(
         None,
@@ -219,8 +227,12 @@ def test_turn_and_message_limits_are_enforced(controller: UIController) -> None:
     long_view = controller.chat(session_id, "x" * 9000)
     assert "characters" in long_view.status
 
+    # The second controller takes the same fake adapter as the fixture: the
+    # limits under test are the controller's, not BrainOS's, so this test has no
+    # business needing the pinned runtime installed.
     limited = UIController(
         provider_factory=FakeLLMProvider,
+        adapter_factory=_fake_adapter,
         limits=UILimits(max_turns=1, max_message_chars=100),
     )
     sid = limited.connect(None, provider="openai", model="m", api_key=KEY).session_id

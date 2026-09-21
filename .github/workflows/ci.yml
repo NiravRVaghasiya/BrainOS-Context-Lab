@@ -1,0 +1,69 @@
+# Phase 18: the suite is a contract, so it runs on every change.
+#
+# Two jobs, because the repository makes two claims that are easy to break
+# without noticing:
+#
+#   verify          — the full suite (unit, integration, evaluation, security,
+#                     UI) plus `ruff`, with the coverage floor from
+#                     `pyproject.toml`. The integration tests exercise the
+#                     pinned BrainOS revision, so the `integration` extra is
+#                     installed; without it those modules skip themselves.
+#   without-extras  — the same suite with only the base package installed, which
+#                     is the documented property that deterministic fakes cover
+#                     the whole pipeline without BrainOS, Gradio, or an SDK.
+#                     Live tests decide this from `pytest.importorskip`.
+#
+# The shipped-surface credential scan is a test
+# (`tests/security/test_artifact_scan.py::test_nothing_this_project_ships_contains_a_credential`),
+# so it runs inside both jobs rather than as a separate step that could be
+# deleted without failing anything.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: ["main"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: lint, test, coverage floor
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install the validated environment
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,ui,providers,evaluation,integration]"
+      - name: Lint
+        run: ruff check .
+      - name: Test with the coverage floor
+        run: pytest -q --cov --cov-report=term-missing
+
+  without-extras:
+    name: suite runs without the optional extras
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install the base package only
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+      - name: Test (optional-dependency tests skip themselves)
+        run: pytest -q -rs

@@ -28,6 +28,7 @@ def test_run_parser_does_not_accept_an_abbreviated_credential_flag() -> None:
     assert "api_key_env" in {action.dest for action in parser._actions}
 
 
+@pytest.mark.requires_runtime
 def test_an_ungraded_run_prints_no_accuracy(tmp_path, capsys) -> None:
     output = tmp_path / "ungraded.json"
 
@@ -73,6 +74,7 @@ def test_an_incompatible_endpoint_fails_before_any_request(tmp_path, monkeypatch
     assert not (tmp_path / "o.json").exists()
 
 
+@pytest.mark.requires_runtime
 def test_generated_run_grades_its_own_answers_and_records_usage(
     tmp_path, monkeypatch
 ) -> None:

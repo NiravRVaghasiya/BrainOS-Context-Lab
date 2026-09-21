@@ -120,6 +120,7 @@ def _secret_task(turns: int = 10) -> BenchmarkTask:
     )
 
 
+@pytest.mark.requires_runtime
 def test_a_default_replay_holds_no_provider_credential_at_all() -> None:
     """The replay path configures no provider, so there is nothing to leak."""
 
@@ -156,6 +157,7 @@ def test_a_replay_with_a_session_key_redacts_it_from_the_prompt() -> None:
     assert KEY not in str(replay.to_dict()["retrieved_chunk_ids"])
 
 
+@pytest.mark.requires_runtime
 def test_a_keyless_replay_has_no_credential_to_redact() -> None:
     """Documents the boundary rather than asserting a defect.
 

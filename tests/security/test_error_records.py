@@ -17,6 +17,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from evaluation import errors
 from evaluation.datasets import load_jsonl
 from evaluation.experiment import ExperimentPlan, run_controlled_experiment
@@ -43,6 +45,7 @@ def _failing_run() -> dict:
     return run.to_dict()
 
 
+@pytest.mark.requires_runtime
 def test_the_redacted_artifact_still_carries_no_key_into_the_report(tmp_path) -> None:
     artifact = _failing_run()
     assert KEY not in json.dumps(artifact)
@@ -63,6 +66,7 @@ def test_the_redacted_artifact_still_carries_no_key_into_the_report(tmp_path) ->
         assert "api_key" not in rendered
 
 
+@pytest.mark.requires_runtime
 def test_the_failure_record_is_built_from_named_fields_not_the_whole_artifact() -> None:
     """A configuration field the taxonomy does not read cannot leak by default."""
 
@@ -80,6 +84,7 @@ def test_the_failure_record_is_built_from_named_fields_not_the_whole_artifact() 
     assert "api_key" not in rendered
 
 
+@pytest.mark.requires_runtime
 def test_provenance_records_paths_and_digests_not_environment_values(tmp_path) -> None:
     run_path = tmp_path / "run.json"
     run_path.write_text(json.dumps(_failing_run()), encoding="utf-8")

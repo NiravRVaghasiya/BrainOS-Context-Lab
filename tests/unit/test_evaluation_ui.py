@@ -122,6 +122,7 @@ def test_policy_marks_disallowed_presets_and_hides_them_from_the_dropdown(
         runner.preview(session_id=SESSION, preset_name="research")
 
 
+@pytest.mark.requires_runtime
 def test_policy_can_disable_generation_and_says_so_before_a_run(
     tmp_path: Path,
 ) -> None:
@@ -180,6 +181,7 @@ def test_policy_rejects_an_unknown_preset_and_a_non_positive_ceiling() -> None:
         EvaluationPolicy(max_tasks=0)
 
 
+@pytest.mark.requires_runtime
 def test_a_run_tightened_by_policy_records_the_tightened_ceiling(tmp_path: Path) -> None:
     runner = _runner(tmp_path, policy=EvaluationPolicy(max_tasks=1, max_requests=3))
 
@@ -351,6 +353,7 @@ def test_the_ablations_keyword_always_includes_the_full_system(tmp_path: Path) -
 # --------------------------------------------------------------------------- #
 
 
+@pytest.mark.requires_runtime
 def test_a_dry_run_writes_the_four_directories_and_persists_a_summary(
     tmp_path: Path,
 ) -> None:
@@ -384,6 +387,7 @@ def test_a_dry_run_writes_the_four_directories_and_persists_a_summary(
     assert "report_markdown" not in json.dumps(saved, default=str)
 
 
+@pytest.mark.requires_runtime
 def test_a_run_renders_figures_into_the_plots_directory(tmp_path: Path) -> None:
     pytest.importorskip("matplotlib", reason="figures need matplotlib")
     runner = _runner(tmp_path)
@@ -395,6 +399,7 @@ def test_a_run_renders_figures_into_the_plots_directory(tmp_path: Path) -> None:
     assert all(path.endswith(".png") for path in view.plots)
 
 
+@pytest.mark.requires_runtime
 def test_a_run_records_history_for_its_session_only(tmp_path: Path) -> None:
     runner = _runner(tmp_path)
 
@@ -421,6 +426,7 @@ def test_forget_drops_the_history_index(tmp_path: Path) -> None:
     assert runner.run_count(SESSION) == 0
 
 
+@pytest.mark.requires_runtime
 def test_discard_removes_the_session_artifacts_from_disk(tmp_path: Path) -> None:
     runner = _runner(tmp_path)
     view = runner.run(session_id=SESSION, preset_name="quick", limit=1, render_plots=False)
@@ -436,6 +442,7 @@ def test_discard_removes_the_session_artifacts_from_disk(tmp_path: Path) -> None
     assert runner.discard("") == 0
 
 
+@pytest.mark.requires_runtime
 def test_a_run_without_a_store_is_still_a_successful_run(tmp_path: Path) -> None:
     runner = UIEvaluationRunner(results_root=tmp_path / "results")
 
@@ -445,6 +452,7 @@ def test_a_run_without_a_store_is_still_a_successful_run(tmp_path: Path) -> None
     assert view.persisted is False
 
 
+@pytest.mark.requires_runtime
 def test_a_failing_store_does_not_lose_the_run(tmp_path: Path) -> None:
     from tests.fakes import RaisingStore
 
@@ -457,6 +465,7 @@ def test_a_failing_store_does_not_lose_the_run(tmp_path: Path) -> None:
     assert Path(view.report_path).is_file()
 
 
+@pytest.mark.requires_runtime
 def test_a_generated_run_uses_the_session_key_and_never_the_environment(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -496,6 +505,7 @@ def test_a_generated_run_uses_the_session_key_and_never_the_environment(
     assert manifest["generation"]["settings"]
 
 
+@pytest.mark.requires_runtime
 def test_a_generated_run_grades_answers_so_accuracy_is_a_number(tmp_path: Path) -> None:
     runner = _runner(tmp_path)
 
@@ -513,6 +523,7 @@ def test_a_generated_run_grades_answers_so_accuracy_is_a_number(tmp_path: Path) 
     assert all(row["accuracy"] is not None for row in graded)
 
 
+@pytest.mark.requires_runtime
 def test_a_retrieval_only_run_leaves_answer_metrics_unset(tmp_path: Path) -> None:
     runner = _runner(tmp_path)
 
@@ -523,6 +534,7 @@ def test_a_retrieval_only_run_leaves_answer_metrics_unset(tmp_path: Path) -> Non
     assert "unset, not zero" in view.status
 
 
+@pytest.mark.requires_runtime
 def test_the_view_exposes_the_stages_and_the_reproducibility_manifest(
     tmp_path: Path,
 ) -> None:
@@ -590,6 +602,7 @@ def test_controller_preview_is_a_cost_disclosure_not_a_run(tmp_path: Path) -> No
     assert _paths(tmp_path) == []
 
 
+@pytest.mark.requires_runtime
 def test_controller_run_renders_tables_figures_and_the_report(tmp_path: Path) -> None:
     pytest.importorskip("matplotlib", reason="figures need matplotlib")
     controller = _controller(tmp_path)
@@ -631,6 +644,7 @@ def test_controller_refuses_generation_without_a_sidebar_key(tmp_path: Path) -> 
     assert "retrieval-only" in view.status
 
 
+@pytest.mark.requires_runtime
 def test_controller_never_renders_the_session_key(tmp_path: Path) -> None:
     controller = _controller(tmp_path)
     sid = controller.ensure_session(None).session_id

@@ -8,7 +8,7 @@ This repository integrates BrainOS as an upstream dependency. It does **not** mo
 
 ## Current status
 
-Phases 1–17 are complete and validated against the pinned BrainOS runtime. The
+Phases 1–18 are complete and validated against the pinned BrainOS runtime. The
 app persists conversations and memory mirrors to SQLite with hard session
 isolation, offers the full data-control set (clear conversation, clear memory,
 export session, end/delete session), can run the same conversation through all
@@ -143,10 +143,20 @@ or one button in the browser.
   lets a deployment narrow what the tab offers; `End session` deletes the
   session's persisted rows *and* its artifacts.
 
+- **Phase 18** turns the suite into a checked contract: a §24 ledger that maps
+  every test requirement the plan names to a named test and fails when one is
+  renamed or deleted, a log-hygiene module for "the API key never appears in
+  logs" (the one §24 security rule no test had ever exercised), the provider
+  adapter's untested edge paths (79% → 100%), the controlled experiment's CLI
+  exit codes, a `requires_runtime` marker so a base install *skips* instead of
+  failing the 86 tests that need the pinned runtime, a 90% coverage floor, and
+  CI that runs the suite both with the pinned runtime and without any of the
+  optional extras.
+
 A session-scoped `ConversationService` combines the adapter, the retrieval
 policy, the context builder, and the provider factory. Deterministic fakes cover
 the whole pipeline without BrainOS installed; optional live tests exercise the
-pinned runtime. 1179 tests pass and `ruff check .` is clean repository-wide.
+pinned runtime. 1248 tests pass and `ruff check .` is clean repository-wide.
 
 Chat is usable without an API key: BrainOS still observes and retrieves memory,
 and the panels show exactly what the model *would* have been sent. See
@@ -281,7 +291,9 @@ benchmarks/
   fixtures/                    # Deterministic fixtures (Phase 12 scripted answers)
 docs/                          # Architecture, integration, evaluation, threat
                                #   model, security controls, and per-phase logs
-tests/                         # Unit, integration, security, and evaluation tests
+tests/                         # Unit, integration, evaluation, security, and UI
+                               #   tests; the §24 traceability ledger; the
+                               #   optional-dependency skip policy (conftest.py)
 results/                       # Generated results (not committed by default):
                                #   raw/ aggregated/ plots/ report/, plus ui/ for
                                #   the Evaluation tab's session-scoped runs
@@ -323,6 +335,37 @@ wired. Install the optional integration extra to use the live runtime:
 ```bash
 pip install -e ".[integration]"
 ```
+
+### Test suite
+
+```bash
+pip install -e ".[dev,ui,providers,evaluation,integration]"   # everything
+pytest -q                                                     # 1248 tests
+pytest -q --cov --cov-report=term-missing                     # 94%, floor 90
+ruff check .
+```
+
+The same two commands are the two jobs in
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) (`verify` and
+`without-extras`), and they run on every pull request.
+
+Two optional dependencies change what the suite can do, and neither is required
+to run it:
+
+- **the pinned BrainOS runtime** (`[integration]`) — tests that exercise the
+  application's real composition (the evaluation pipeline, the Evaluation-tab
+  runner, the reproducibility artifacts) carry `@pytest.mark.requires_runtime`
+  and skip with an install hint when it is absent. A base install
+  (`pip install -e ".[dev]"`) runs `1073 passed, 98 skipped, 0 failed`.
+- **matplotlib** (`[evaluation]`) — figure tests carry
+  `@pytest.mark.requires_figures`.
+
+The suite is organized as `tests/unit`, `tests/integration`, `tests/evaluation`,
+`tests/security`, and `tests/ui`. `tests/unit/test_plan_traceability.py` is the
+ledger for the implementation plan's §24: it names the test that carries each
+requirement, checks that the plan still states that requirement, and runs the
+suite's own collection so a rename or a delete fails the build instead of
+silently dropping a guarantee.
 
 ### Provider adapter smoke test
 

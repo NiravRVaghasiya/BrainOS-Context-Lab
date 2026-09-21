@@ -269,6 +269,7 @@ def test_statistical_analysis_and_report_schema() -> None:
     assert set(report["series"]) == set(PLOT_NAMES)
 
 
+@pytest.mark.requires_figures
 def test_statistical_plot_series_and_rendering_all_six_plots(tmp_path: Path) -> None:
     runs = [
         _run("brainos", accuracy=0.9, tokens=200, trial=0, length=800),
@@ -292,6 +293,7 @@ def test_statistical_plot_series_and_rendering_all_six_plots(tmp_path: Path) -> 
         assert p.stat().st_size > 0
 
 
+@pytest.mark.requires_figures
 def test_compare_cli_with_stats_and_plots_dir(tmp_path: Path) -> None:
     run1 = tmp_path / "brainos-t0.json"
     run2 = tmp_path / "brainos-t1.json"
