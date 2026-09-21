@@ -247,12 +247,19 @@ scan_version=scan-v1 files=102 bytes=1787889 findings=0 clean=True
 New modules: `src/checkout.py` 100%, `src/app/retention.py` 95%,
 `src/app/evaluation.py` 94% (all above the 90% floor).
 
-Both CI jobs pass on the pushed branch (run
-[`35582619453`](https://github.com/NiravRVaghasiya/BrainOS-Context-Lab/actions/runs/35582619453)):
+Both CI jobs pass on the pushed branch — the pre-fix run
+[`35582619453`](https://github.com/NiravRVaghasiya/BrainOS-Context-Lab/actions/runs/35582619453)
+and the run that carries the WAL fix
+[`35585990332`](https://github.com/NiravRVaghasiya/BrainOS-Context-Lab/actions/runs/35585990332):
 
 ```text
+35582619453  (9cb5338 → 50f5289)
 lint, test, coverage floor                pass    6m17s
 suite runs without the optional extras    pass      25s
+
+35585990332  (d1a8f6a, finding 7)
+lint, test, coverage floor                pass    5m57s
+suite runs without the optional extras    pass      27s
 ```
 
 The `verify` job failed once more on the commit that recorded the run above
