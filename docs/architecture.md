@@ -99,6 +99,27 @@ session/conversation identity, and all reads and deletes filter on it to
 prevent cross-session leakage. The memory table is a mirror for inspection
 and export — the BrainOS runtime remains authoritative for recall.
 
+### Locations and retention
+
+Every repository-owned location — the committed dataset, the dataset root, the
+browser run artifacts under `results/ui/`, the CLIs' `--dataset` default, and the
+unset SQLite default — is resolved through `src/checkout.py`. Inside the checkout
+the paths stay exactly as the plan writes them (relative), which is what keeps
+artifacts and re-run commands portable between machines; a process started
+elsewhere (an installed console script, a supervisor with its own working
+directory) anchors them to the checkout instead of creating a second `results/`
+wherever it happened to start. `BRAINOS_LAB_DB` still overrides the database
+location, and `:memory:` still means "no file".
+
+`src/app/retention.py` owns the lifetime of `results/ui/`: a session directory is
+removed when its **newest** file is older than the retention window (7 days by
+default, `None` disables), oldest first and capped per sweep, and only if it is a
+direct child of `ui/`, a single safe path segment, not a symlink, and still
+resolves inside that directory. The sweep runs when a browser run starts and from
+`python -m app.retention`; each run's manifest records the window it ran under and
+what the sweep removed. **End session** still deletes a visitor's own rows and
+artifacts immediately.
+
 ## Baseline modes
 
 The evaluation layer supports the same provider and task protocol for all five

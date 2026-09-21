@@ -87,6 +87,7 @@ from brain.tokenizers import (
     estimate_tokens,
     tiktoken_counter,
 )
+from checkout import repo_anchored
 from reproducibility.run_provenance import (
     BENCHMARK_VERSION as REPRO_BENCHMARK_VERSION,
 )
@@ -129,7 +130,20 @@ BENCHMARK_VERSION = "context-rot-v1"
 #: it as provenance because every token figure depends on it).
 CONTEXT_BUDGET = 4096
 
+#: The committed dataset, as the plan names it.
 DEFAULT_DATASET = Path("benchmarks/context_rot/dataset.jsonl")
+
+
+def default_dataset_path() -> Path:
+    """The committed dataset, anchored to the checkout when the CLI runs outside it.
+
+    Phase 19: resolved at call time, not at import time, so the console script
+    works from any working directory — and so the value an artifact records is
+    still the plan's relative path when the process *is* in the checkout (see
+    :mod:`checkout`).
+    """
+
+    return repo_anchored(DEFAULT_DATASET, must_exist=True)
 
 
 class ExperimentError(RuntimeError):
@@ -970,7 +984,7 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--trials", type=int, help="Repeated trials per (task, mode).")
-    parser.add_argument("--dataset", type=Path, default=DEFAULT_DATASET)
+    parser.add_argument("--dataset", type=Path, default=default_dataset_path())
     parser.add_argument(
         "--limit",
         type=int,
@@ -1294,6 +1308,7 @@ __all__ = [
     "BILLING_NOTICE",
     "CONTEXT_BUDGET",
     "DEFAULT_DATASET",
+    "default_dataset_path",
     "EXPERIMENT_VERSION",
     "ExperimentError",
     "ExperimentPlan",

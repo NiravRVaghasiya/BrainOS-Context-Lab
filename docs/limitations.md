@@ -63,6 +63,16 @@ This project is an experimental evaluation platform, not a claim that BrainOS pr
   (`estimate_tokens`); runs using a different counter are not comparable, and
   `stats.token_counter` is what records which one produced a figure.
 - Provider behavior, model changes, and stochastic generation can affect results.
+- Retention of browser artifacts runs on **use**, not on a timer: the sweep
+  happens when a run starts and when an operator runs `python -m app.retention`.
+  A Space with no traffic and no scheduled job keeps every abandoned session's
+  files, and a `--dry-run` sweep is the honest way to see what would go.
+- Path anchoring fixes the working-directory bug for a source checkout (the
+  documented deployment, including an editable install on a Space), but an
+  installed distribution that does not contain `benchmarks/` still has no
+  committed dataset: the anchored path is only used when it exists, and the error
+  then names the plan's relative path. The SQLite location remains
+  operator-controlled through `BRAINOS_LAB_DB`.
 - Session-local persistence is not a multi-user account system.
 - Evaluation results are only meaningful when baselines use the same models, prompts, and scoring rules.
 

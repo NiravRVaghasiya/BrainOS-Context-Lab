@@ -77,6 +77,7 @@ from brain.tokenizers import (
     tiktoken_counter,
 )
 from brain.trace import sanitize_value
+from checkout import repo_anchored
 from reproducibility.run_provenance import build_manifest
 from security.findings import summarize_security
 from security.scan import scan_paths
@@ -119,8 +120,20 @@ RESULT_DIRECTORIES: tuple[str, ...] = ("raw", "aggregated", "plots", "report")
 #: Default root, matching the repository's ``results/`` (contents Git-ignored).
 DEFAULT_OUTPUT_DIR = Path("results")
 
-#: Default dataset: the committed smoke tier.
+#: Default dataset: the committed smoke tier, as the plan names it.
 DEFAULT_DATASET = Path("benchmarks/context_rot/dataset.jsonl")
+
+
+def default_dataset_path() -> Path:
+    """The committed dataset, anchored to the checkout when the CLI runs outside it.
+
+    Phase 19: resolved at call time, not at import time, so the console script
+    works from any working directory — and so the value an artifact records is
+    still the plan's relative path when the process *is* in the checkout (see
+    :mod:`checkout`).
+    """
+
+    return repo_anchored(DEFAULT_DATASET, must_exist=True)
 
 # Stage names, in execution order. ``STAGES`` is also the default selection.
 STAGE_EXPERIMENT = "experiment"
@@ -1417,7 +1430,7 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--trials", type=int, help="Repeated trials per (task, mode).")
-    parser.add_argument("--dataset", type=Path, default=DEFAULT_DATASET)
+    parser.add_argument("--dataset", type=Path, default=default_dataset_path())
     parser.add_argument(
         "--limit",
         type=int,
@@ -1721,6 +1734,7 @@ def _fmt(value: Any, *, digits: int = 3) -> str:
 
 __all__ = [
     "DEFAULT_DATASET",
+    "default_dataset_path",
     "DEFAULT_OUTPUT_DIR",
     "EXIT_ABORTED",
     "EXIT_OK",

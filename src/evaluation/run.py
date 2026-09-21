@@ -40,6 +40,7 @@ from pathlib import Path
 
 from baselines.modes import ABLATION_ORDER, MODE_ORDER
 from brain.tokenizers import TokenizerUnavailableError, estimate_tokens, tiktoken_counter
+from checkout import repo_anchored
 from reproducibility.run_provenance import (
     app_version,
     brainos_version,
@@ -60,7 +61,20 @@ from .modes import task_evaluator
 from .runner import EvaluationConfig, EvaluationRunner
 from .scoring import AnswerSet, score_record
 
+#: The committed dataset, as the plan names it.
 DEFAULT_DATASET = Path("benchmarks/context_rot/dataset.jsonl")
+
+
+def default_dataset_path() -> Path:
+    """The committed dataset, anchored to the checkout when the CLI runs outside it.
+
+    Phase 19: resolved at call time, not at import time, so
+    ``brainos-context-evaluate`` works from any working directory — and so the
+    value an artifact records is still the plan's relative path when the process
+    *is* in the checkout (see :mod:`checkout`).
+    """
+
+    return repo_anchored(DEFAULT_DATASET, must_exist=True)
 
 
 def dataset_sha256(path: Path) -> str:
@@ -110,7 +124,7 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--benchmark", default="context_rot")
-    parser.add_argument("--dataset", type=Path, default=DEFAULT_DATASET)
+    parser.add_argument("--dataset", type=Path, default=default_dataset_path())
     parser.add_argument(
         "--answers",
         type=Path,

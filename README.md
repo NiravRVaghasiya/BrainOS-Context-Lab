@@ -8,7 +8,7 @@ This repository integrates BrainOS as an upstream dependency. It does **not** mo
 
 ## Current status
 
-Phases 1–18 are complete and validated against the pinned BrainOS runtime. The
+Phases 1–19 are complete and validated against the pinned BrainOS runtime. The
 app persists conversations and memory mirrors to SQLite with hard session
 isolation, offers the full data-control set (clear conversation, clear memory,
 export session, end/delete session), can run the same conversation through all
@@ -152,16 +152,57 @@ or one button in the browser.
   failing the 86 tests that need the pinned runtime, a 90% coverage floor, and
   CI that runs the suite both with the pinned runtime and without any of the
   optional extras.
+- **Phase 19** walks the plan's §25 MVP checklist instead of asserting it: one
+  ordered session (connect → chat → store a fact → four unrelated turns →
+  retrieve it → inspect memory → inspect context → compare with full-context
+  mode → token usage → a small benchmark → export), one test per item, plus a
+  ledger table that parses the checklist out of the plan. It also closes the
+  three gaps the 2026-09-21 audit named — the request timeout is now triggered by
+  a provider that really blocks, the SQLite stores are exercised by eight
+  concurrent threads rather than by a comment, and `results/ui/` gains retention
+  for the session nobody ends (`python -m app.retention`, age-based, capped,
+  dry-runnable). Audit bug: the Evaluation tab resolved the dataset and its
+  output root against the working directory, so starting the app from anywhere
+  but the checkout raised `Dataset not found` and wrote a stray `results/`; the
+  repository now knows where it is (`src/checkout.py`) and anchors its own paths
+  without changing the relative paths the plan documents.
 
 A session-scoped `ConversationService` combines the adapter, the retrieval
 policy, the context builder, and the provider factory. Deterministic fakes cover
 the whole pipeline without BrainOS installed; optional live tests exercise the
-pinned runtime. 1248 tests pass and `ruff check .` is clean repository-wide.
+pinned runtime. 1331 tests pass and `ruff check .` is clean repository-wide.
 
 Chat is usable without an API key: BrainOS still observes and retrieves memory,
 and the panels show exactly what the model *would* have been sent. See
-[`CONTEXT.md`](CONTEXT.md) for the living implementation state and the Phase
-0–17 logs in `docs/`.
+[`CONTEXT.md`](CONTEXT.md) for the living implementation state, the Phase 0–19
+logs in `docs/`, and [`docs/status-audit-2026-09-21.md`](docs/status-audit-2026-09-21.md)
+for the audit that motivates Phase 19.
+
+### The MVP checklist (plan §25)
+
+Every item below is walkable today and walked by
+`tests/integration/test_mvp_walkthrough.py`, with the exception of the first —
+publishing a Space is an operator action, and the repository checks the half it
+owns (the app entry point, the declared dependencies, a Gradio app that builds).
+
+| §25 item | How to do it |
+| --- | --- |
+| 1 Open the HF Space | Not published yet — the only unmet MVP item. |
+| 2–4 Select OpenAI, enter a key, select a model | Sidebar → provider, API key, model → **Connect**. The key stays in server memory and is never returned to the browser. |
+| 5 Start a conversation | Type in the chat box. |
+| 6 Store a fact | State it in a turn; the memory policy keeps durable project facts. |
+| 7 Continue the conversation | Keep talking — the fact is no longer in recent history. |
+| 8 Retrieve the fact later | Ask for it; the prompt contains the memory block. |
+| 9–10 Inspect BrainOS memory / retrieved context | Memory and Context tabs, including why each memory was selected and what was dropped. |
+| 11 Compare with full-context mode | Sidebar → context mode → `full_context`, ask the same question, compare the token accounting. |
+| 12 See token usage | Usage tab: per-turn and per-session ceilings, requests, and timeouts. |
+| 13 Run a small benchmark | Evaluation tab → preset → **Preview** (cost ceiling) → **Run**. A dry run needs no key. |
+| 14 Export results | Session export (transcript, usage, runs) and the run's own `results/ui/<session>/<run>/` artifacts. |
+
+Benchmark artifacts under `results/ui/` are kept for **7 days** after the last
+file in that session was written and then swept automatically; **End session**
+deletes a visitor's own artifacts (and persisted rows) immediately.
+`python -m app.retention --dry-run` shows what a sweep would remove.
 
 ### Measured behaviour so far
 
@@ -340,7 +381,7 @@ pip install -e ".[integration]"
 
 ```bash
 pip install -e ".[dev,ui,providers,evaluation,integration]"   # everything
-pytest -q                                                     # 1248 tests
+pytest -q                                                     # 1331 tests
 pytest -q --cov --cov-report=term-missing                     # 94%, floor 90
 ruff check .
 ```

@@ -13,13 +13,28 @@ directories the plan's §28 lays out (``tests/unit``, ``tests/integration``,
 ``tests/evaluation``, ``tests/security``); this file is the index, not a fifth
 copy.
 
-Two properties are deliberate:
+Phase 19 extends the same instrument to §25, the MVP checklist. That section is
+a different shape of requirement — fourteen things a *user* can do, in order,
+rather than fourteen components — so it gets its own table and its own
+properties:
 
-* **It reads the plan.** If a future edit removes §24 or renames a category, the
-  ledger's own premise is gone and this module says so instead of quietly
-  checking a stale list.
+* one row per item, in the plan's order, with the walkthrough test that
+  demonstrates it and the focused test that pins the behaviour;
+* **item 1 ("open the HF Space") is recorded as external**, with the reason
+  spelled out. Deploying to Hugging Face is an operator action: this repository
+  can test that the checkout *is* deployable — app entry point, declared
+  dependencies, a Gradio app that builds — and cannot test that a Space is
+  running. The row says which half it covers instead of implying the other.
+
+Three properties are deliberate:
+
+* **It reads the plan.** If a future edit removes §24 or §25, or renames an item
+  or a category, the ledger's own premise is gone and this module says so
+  instead of quietly checking a stale list.
 * **It names tests that already exist.** Nothing here was written to make the
   ledger green; the mappings point at the tests that carry each guarantee today.
+* **The MVP rows are ordered and complete.** §25 is a sequence, so a row that is
+  missing, duplicated, or reordered is a failure, not a formatting detail.
 """
 
 from __future__ import annotations
@@ -227,6 +242,155 @@ REQUIREMENTS: tuple[Requirement, ...] = (
 )
 
 
+@dataclass(frozen=True)
+class MVPItem:
+    """One numbered item from plan §25 and the evidence that it is walkable."""
+
+    number: int
+    item: str
+    tests: tuple[str, ...] = ()
+    #: Set for an item this repository cannot verify on its own behalf. ``tests``
+    #: must stay empty for such a row: the honest record is an operator action.
+    external: str = ""
+
+
+MVP_ITEMS: tuple[MVPItem, ...] = (
+    MVPItem(
+        number=1,
+        item="Open the HF Space",
+        external=(
+            "Deploying to a Space is an operator action, not a code path. The "
+            "rows below check that this checkout is deployable (app entry point, "
+            "declared dependencies, a building Gradio app); whether a Space is "
+            "running is recorded in the phase log, not claimed here."
+        ),
+        tests=(
+            "tests/unit/test_deployment_config.py::test_app_py_exists_and_bootstraps_the_source_path",
+            "tests/unit/test_deployment_config.py::test_requirements_txt_lists_the_runtime_dependencies",
+            "tests/ui/test_ui.py::test_app_builds_and_registers_every_callback",
+        ),
+    ),
+    MVPItem(
+        number=2,
+        item="Select OpenAI",
+        tests=(
+            "tests/integration/test_mvp_walkthrough.py::test_item_2_through_4_a_visitor_selects_openai_a_key_and_a_model",
+            "tests/unit/test_controller.py::test_connect_lists_models_and_clears_the_key_box",
+            "tests/unit/test_controller.py::test_connect_rejects_an_invalid_configuration",
+        ),
+    ),
+    MVPItem(
+        number=3,
+        item="Enter an API key",
+        tests=(
+            "tests/integration/test_mvp_walkthrough.py::test_item_3_the_key_is_never_returned_to_the_browser",
+            "tests/unit/test_controller.py::test_connect_keeps_the_key_in_server_memory_only",
+            "tests/ui/test_ui.py::test_connect_callback_clears_the_key_box_and_names_no_secret",
+        ),
+    ),
+    MVPItem(
+        number=4,
+        item="Select a model",
+        tests=(
+            "tests/integration/test_mvp_walkthrough.py::test_item_4_the_selected_model_is_the_one_the_turn_used",
+            "tests/integration/test_baseline_modes_live.py::test_live_the_controller_reports_the_mode_that_ran",
+        ),
+    ),
+    MVPItem(
+        number=5,
+        item="Start a conversation",
+        tests=(
+            "tests/integration/test_mvp_walkthrough.py::test_item_5_a_conversation_starts_and_the_provider_is_called",
+            "tests/integration/test_chat_controller_live.py::test_live_panels_show_a_fact_recalled_many_turns_later",
+        ),
+    ),
+    MVPItem(
+        number=6,
+        item="Store a fact",
+        tests=(
+            "tests/integration/test_mvp_walkthrough.py::test_item_6_the_fact_is_stored_in_brainos_memory",
+            "tests/unit/test_controller.py::test_chat_records_the_fact_in_the_memory_panel",
+            "tests/unit/test_memory_policy.py::test_extract_candidates_keeps_project_facts_and_skips_chatter",
+        ),
+    ),
+    MVPItem(
+        number=7,
+        item="Continue the conversation",
+        tests=(
+            "tests/integration/test_mvp_walkthrough.py::test_item_7_the_conversation_continues_past_the_fact",
+            "tests/unit/test_baseline_modes.py::test_full_context_replays_the_whole_conversation",
+        ),
+    ),
+    MVPItem(
+        number=8,
+        item="Retrieve the fact later",
+        tests=(
+            "tests/integration/test_mvp_walkthrough.py::test_item_8_the_fact_is_retrieved_later_into_the_prompt",
+            "tests/unit/test_baseline_modes.py::test_brainos_keeps_the_fact_the_sliding_window_lost",
+            "tests/integration/test_baseline_modes_live.py::test_live_brainos_keeps_the_fact_for_the_same_cost_as_the_window",
+        ),
+    ),
+    MVPItem(
+        number=9,
+        item="Inspect BrainOS memory",
+        tests=(
+            "tests/integration/test_mvp_walkthrough.py::test_item_9_the_memory_panel_shows_what_brainos_holds",
+            "tests/unit/test_panels.py::test_memory_rows_match_the_declared_columns",
+            "tests/unit/test_controller.py::test_chat_records_the_fact_in_the_memory_panel",
+        ),
+    ),
+    MVPItem(
+        number=10,
+        item="Inspect retrieved context",
+        tests=(
+            "tests/integration/test_mvp_walkthrough.py::test_item_10_the_context_panel_shows_the_prompt_and_its_accounting",
+            "tests/integration/test_mvp_walkthrough.py::test_item_10_the_retrieved_context_is_attributed",
+            "tests/unit/test_panels.py::test_retrieved_rows_show_only_what_reached_the_prompt",
+            "tests/unit/test_panels.py::test_context_summary_reports_the_baseline_next_to_the_savings",
+        ),
+    ),
+    MVPItem(
+        number=11,
+        item="Compare BrainOS against full-context mode",
+        tests=(
+            "tests/integration/test_mvp_walkthrough.py::test_item_11_brainos_and_full_context_are_compared_on_the_same_session",
+            "tests/integration/test_mvp_walkthrough.py::test_item_11_the_mode_is_visible_in_the_session_payload",
+            "tests/integration/test_baseline_modes_live.py::test_live_full_context_replays_everything_and_is_the_reference",
+        ),
+    ),
+    MVPItem(
+        number=12,
+        item="See token usage",
+        tests=(
+            "tests/integration/test_mvp_walkthrough.py::test_item_12_token_usage_is_visible_per_turn_and_per_session",
+            "tests/unit/test_chat_limits_controller.py::test_turn_view_carries_usage_summary_and_report",
+            "tests/unit/test_chat_limits_controller.py::test_turn_view_usage_never_carries_the_key",
+        ),
+    ),
+    MVPItem(
+        number=13,
+        item="Run a small benchmark",
+        tests=(
+            "tests/integration/test_mvp_walkthrough.py::test_item_13_a_small_benchmark_runs_from_the_tab",
+            "tests/integration/test_mvp_walkthrough.py::test_item_13_the_run_discloses_its_cost_before_it_is_trusted",
+            "tests/integration/test_mvp_walkthrough.py::test_item_13_the_run_writes_a_report_and_a_reproducibility_manifest",
+            "tests/ui/test_ui.py::test_run_callback_feeds_the_tables_the_figures_and_the_report",
+            "tests/ui/test_ui.py::test_preview_callback_shows_a_ceiling_and_writes_nothing",
+        ),
+    ),
+    MVPItem(
+        number=14,
+        item="Export results",
+        tests=(
+            "tests/integration/test_mvp_walkthrough.py::test_item_14_the_session_exports_with_its_transcript_usage_and_runs",
+            "tests/integration/test_mvp_walkthrough.py::test_item_14_the_export_is_key_free",
+            "tests/ui/test_ui.py::test_export_callback_writes_a_credential_free_json_file",
+            "tests/integration/test_chat_controller_live.py::test_live_export_contains_the_conversation",
+        ),
+    ),
+)
+
+
 @pytest.fixture(scope="module")
 def plan_text() -> str:
     return PLAN.read_text(encoding="utf-8")
@@ -337,33 +501,33 @@ def test_every_requirement_from_the_plan_has_a_row() -> None:
     assert len(mapped) == len(REQUIREMENTS), "duplicate requirement rows"
 
 
-def test_every_mapped_test_still_exists(collected_tests: set[str]) -> None:
-    """A renamed or deleted test breaks the requirement it was carrying.
+def _is_satisfied(node_id: str, collected_tests: set[str]) -> bool:
+    """Return True when the mapped test still exists under that id.
 
     A mapped id may name a parametrized test by its function id; pytest then
     reports one collected id per parameter set (``::test_x[id]``), and any of
-    them satisfies the mapping.
+    them satisfies the mapping. A module skipped for a missing optional
+    dependency reports no ids at all, so the source is consulted — but only in
+    that case, so a rename inside a *collected* module still fails.
     """
 
-    def satisfied(node_id: str) -> bool:
-        if any(
-            collected == node_id or collected.startswith(f"{node_id}[")
-            for collected in collected_tests
-        ):
-            return True
-        module = node_id.split("::")[0]
-        # A module skipped for a missing optional dependency reports no ids at
-        # all. Fall back to the source in that case — but only in that case, so
-        # a rename inside a *collected* module still fails here.
-        return not _module_was_collected(module, collected_tests) and _defined_in_source(
-            node_id
-        )
+    if any(
+        collected == node_id or collected.startswith(f"{node_id}[")
+        for collected in collected_tests
+    ):
+        return True
+    module = node_id.split("::")[0]
+    return not _module_was_collected(module, collected_tests) and _defined_in_source(node_id)
+
+
+def test_every_mapped_test_still_exists(collected_tests: set[str]) -> None:
+    """A renamed or deleted test breaks the requirement it was carrying."""
 
     missing = sorted(
         node_id
         for requirement in REQUIREMENTS
         for node_id in requirement.tests
-        if not satisfied(node_id)
+        if not _is_satisfied(node_id, collected_tests)
     )
 
     assert missing == [], f"the ledger points at tests that no longer exist: {missing}"
@@ -419,3 +583,119 @@ def test_every_rule_shaped_requirement_spans_more_than_one_file() -> None:
     ]
 
     assert thin == []
+
+
+# --------------------------------------------------------------------------- #
+# §25 — the MVP checklist
+# --------------------------------------------------------------------------- #
+
+
+def test_the_plan_still_defines_the_mvp_checklist(plan_text: str) -> None:
+    assert "Phase 19 — MVP Definition" in plan_text
+    assert "The MVP is complete when the user can:" in plan_text
+
+    items = _plan_mvp_items(plan_text)
+    assert len(items) == 14, f"the plan's MVP checklist changed shape: {len(items)} items"
+    assert items[0].lower().startswith("open the hf space")
+    assert items[-1].lower().startswith("export results")
+
+
+def test_every_mvp_item_has_exactly_one_row_in_the_plan_s_order() -> None:
+    numbers = [entry.number for entry in MVP_ITEMS]
+
+    assert numbers == list(range(1, 15)), f"the MVP rows are out of order: {numbers}"
+    assert len({entry.item for entry in MVP_ITEMS}) == len(MVP_ITEMS)
+
+
+def test_every_mvp_row_names_the_plan_item_it_traces() -> None:
+    """The row's text is the plan's text, modulo the numbering the plan adds."""
+
+    plan_items = _plan_mvp_items(PLAN.read_text(encoding="utf-8"))
+
+    for entry, plan_item in zip(MVP_ITEMS, plan_items, strict=True):
+        assert entry.item.lower() == plan_item.lower(), (entry.number, entry.item, plan_item)
+
+
+def test_every_mvp_item_maps_to_at_least_two_tests() -> None:
+    thin = [entry.number for entry in MVP_ITEMS if len(entry.tests) < 2]
+
+    assert thin == [], f"MVP items with fewer than two mapped tests: {thin}"
+
+
+def test_every_mvp_mapped_test_still_exists(collected_tests: set[str]) -> None:
+    missing = sorted(
+        node_id
+        for entry in MVP_ITEMS
+        for node_id in entry.tests
+        if not _is_satisfied(node_id, collected_tests)
+    )
+
+    assert missing == [], f"the MVP rows point at tests that no longer exist: {missing}"
+
+
+def test_the_mvp_walkthrough_covers_every_item_that_is_not_external() -> None:
+    """Every non-external item is demonstrated by the walkthrough, not just pinned.
+
+    The focused tests pin behaviour; the walkthrough is what proves the fourteen
+    steps survive being taken in order, in one session. An item with no
+    walkthrough test is an item nobody has walked end to end.
+    """
+
+    walkthrough = "tests/integration/test_mvp_walkthrough.py::"
+    unpaced = [
+        entry.number
+        for entry in MVP_ITEMS
+        if not any(node_id.startswith(walkthrough) for node_id in entry.tests)
+    ]
+
+    # Item 1 is the deployment row: it is checked, but it is not a chat step.
+    assert unpaced == [1], f"MVP items with no walkthrough test: {unpaced}"
+
+
+def test_only_the_deployment_row_may_be_external_and_it_says_why() -> None:
+    external = [entry for entry in MVP_ITEMS if entry.external]
+
+    assert [entry.number for entry in external] == [1]
+    reason = external[0].external.lower()
+    assert "operator" in reason
+    assert "space" in reason
+    # The row still checks the half this repository owns.
+    assert external[0].tests
+
+
+def _plan_mvp_items(plan_text: str) -> list[str]:
+    """Extract §25's numbered checklist from the plan."""
+
+    section = plan_text.split("# 25. Phase 19 — MVP Definition", 1)[1]
+    section = section.split("# 26.", 1)[0]
+    return [
+        match.group("item").strip().rstrip(".")
+        for match in re.finditer(
+            r"^\s*(?P<number>\d+)\.\s*(?P<item>.+?)\s*$", section, re.M
+        )
+    ]
+
+
+def test_the_readme_claims_the_checklist_is_walked_and_the_window_it_states() -> None:
+    """Phase 18's rule: a README claim needs something that fails when it stops being true.
+
+    The README tells a reader that every MVP item is walkable, names the file
+    that walks them, and states the retention window in days. Both halves are
+    checked against the code rather than trusted: the walkthrough file must be
+    the one the ledger maps to, and the stated window must be the default
+    :class:`~app.retention.RetentionPolicy` actually uses.
+    """
+
+    from app.retention import DEFAULT_RETENTION_SECONDS
+
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+
+    assert "tests/integration/test_mvp_walkthrough.py" in readme
+    days = DEFAULT_RETENTION_SECONDS / 86_400
+    assert f"**{days:g} days**" in readme, "the README no longer states the retention window"
+    walkthrough = "tests/integration/test_mvp_walkthrough.py::"
+    assert all(
+        any(node_id.startswith(walkthrough) for node_id in entry.tests)
+        for entry in MVP_ITEMS
+        if entry.number != 1
+    )

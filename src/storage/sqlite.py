@@ -36,6 +36,8 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from checkout import repo_anchored
+
 from .conversations import ConversationMessage
 
 DEFAULT_DATABASE_ENV = "BRAINOS_LAB_DB"
@@ -122,7 +124,13 @@ def default_database_path() -> Path | str:
     configured = os.getenv(DEFAULT_DATABASE_ENV, "").strip()
     if configured == MEMORY_DATABASE_SENTINEL:
         return MEMORY_DATABASE_SENTINEL
-    return Path(configured) if configured else DEFAULT_DATABASE_PATH
+    if configured:
+        return Path(configured)
+    # Phase 19: the repository default is anchored to the checkout when the
+    # process runs outside it, so a supervisor that starts the app from `/` does
+    # not silently disable persistence by trying to write `/data/`. Inside the
+    # checkout this stays the relative path Phase 14 documented and tested.
+    return repo_anchored(DEFAULT_DATABASE_PATH)
 
 
 def persistence_enabled() -> bool:
