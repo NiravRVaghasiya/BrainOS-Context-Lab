@@ -3,9 +3,9 @@
 > Living hand-off context for implementation work. This file records the
 > repository state and decisions that should be preserved between phases.
 
-**Last updated:** 2026-09-18
-**Branch:** `arena/01a0b45a-brainos-context-lab`
-**Baseline:** `bf94792` (`origin/main`, the PR #17 merge that includes Phase 16); this branch adds Phase 17 on top
+**Last updated:** 2026-09-21
+**Branch:** `arena/01a0c2db-brainos-context-lab`
+**Baseline:** `dab23c0` (`origin/main`, the PR #18 merge that includes Phase 17); this branch adds Phase 18 on top
 **Implementation plan:** [`BrainOS_Context_Lab_Implementation_Plan.md`](BrainOS_Context_Lab_Implementation_Plan.md)
 
 ## Product boundary
@@ -38,7 +38,8 @@ layer that helps select historical context.
 | **Phase 15 — Cost Controls** | Complete | `ChatLimits` (7 ceilings: `max_input_tokens`, `max_output_tokens`, `max_turns`, `max_message_chars`, `max_session_tokens`, `max_session_requests`, `request_timeout_seconds`) + `ChatBudget` (mutable session accounting with `check_turn()`, `charge()`, `record_turn()`, `record_refusal()`, `snapshot()`) + `ChatLimitExceeded` (credential-blind refusal); `UILimits` expanded from 2 to 7 fields with `chat_limits()` bridge; `update_costs()` callback wired to 4 sidebar widgets; service gains `request_timeout` wrapping the provider call in `concurrent.futures` + `_TimeoutError`; `ConversationTurn.usage` carries prompt/completion tokens, timeout, and failure flags; Usage tab added to the inspection panels; turn view carries `usage_summary`, `usage_report`, `turn_usage`; export includes `usage` block; `clear_conversation()` resets the budget. 1015 → **1048 tests**; `ruff check .` clean; 90 shipped files scan clean. |
 | **Phase 16 — Reproducibility** | Complete (landed via PR #17) | One `src/reproducibility/` package is the single source of the §22 vocabulary: `app_version()` (installed-metadata read with `fallback:` origin tag), `brainos_version()` (`unvalidated` / `pinned:` / live read plus the `pin:` commit), `build_manifest()` (versions + environment + config + task ids + dataset path/digest + aggregate metrics + a credential-free `--rerun` string), `rerun_command()`, `global_overrides()`, `persist_run()` (secret-stripping store write). `python -m evaluation.run` writes a top-level `repro` block **and** the fallback `config.application_version` / `config.brainos_version` / `config.benchmark_version` / `config.output` fields; `evaluation.experiment` carries a matching `repro` block and routes its `provenance` version fields through the same functions; `evaluation.errors` records the version pair in `provenance`. The chat export gains `limits` (the Phase 15 constraint), `versions`, and a `chat_history_sha256` transcript digest; `connect()` drops model ids that echo the session key. Fixed the latent split-vocabulary bug (`context_rot-v1` vs the dataset's `context-rot-v1`), unified on `context-rot-v1` and pinned by a test. 1048 → **1070 tests**; `ruff check .` clean; 87 shipped files scan clean. |
 | **Phase 17 — Automated Evaluation Pipeline** | **Complete in this turn** | `python -m evaluation.pipeline` composes the seven existing stages (`experiment → raw → comparison → statistics → errors → plots → report`) into the plan's §23 `results/{raw,aggregated,plots,report}` layout in one command: `STAGE_DEPENDENCIES` + `expand_stages` add the stages a selected stage is made of, a stage with no input is *skipped with a reason*, `run_pipeline` never raises for a failing stage, and the exit code distinguishes complete (0), uncontrolled (2), ceiling-truncated (3), and incomplete-or-leaked (4). Every artifact carries the Phase 16 `repro` manifest plus a `pipeline_rerun_command`; `markdown_report` renders twelve sections with the honesty rules (`—` for ungraded answer-side metrics, `Partial pipeline` when fewer than seven stages ran, a task-ceiling "remaining" column); `analysis.compare_error_distributions` compares failure *mixes* (per-mode label shares + total variation) rather than accuracies. Two-pass credential scan (stages 1–6, then report+manifest) now **quarantines**: implicated files inside the run's own output directory are deleted, known secrets scrubbed from the in-memory artifact, the report text suppressed if `report.md` itself leaked, `QUARANTINED.txt` + a `## Quarantine` section left behind, exit 4. The browser gets the same pipeline through `app/evaluation.py` (`UIEvaluationRunner`, `EvaluationPolicy`): a full-width **Evaluation** tab with preset catalogue, `estimate_ceiling` cost preview before any spend, run, figures, report, history, session-scoped `results/ui/<session>/<run>`, generation with the sidebar key (never an environment variable), `persist_run` storage, and `End session` deleting rows *and* artifacts. Fixed an import cycle through the root `app.py` shim that also made the benchmark CLI load Gradio. 1070 → **1179 tests** (incl. 7 live pipeline tests against the pinned runtime); `ruff check .` clean; 91 shipped files scan clean. Also fixed: a full run labelling itself `Partial pipeline`, a plan whose dataset digest reached the manifest but not the run files, a report naming a distribution baseline the run never chose, and a WAL-blind credential test — `security.scan` now expands a named database's `-wal`/`-shm`/`-journal` sidecars. |
-| Phases 18–20 | Pending | Test suite completion, MVP polish, research release. |
+| **Phase 18 — Test Suite** | **Complete in this turn** | The plan's §24 as an enforced contract. `tests/unit/test_plan_traceability.py` maps every §24 item (unit · integration · evaluation · security) to named tests, re-reads the plan, and runs the suite's own collection so a rename or delete fails the build; `tests/security/test_log_hygiene.py` closes the one §24 security rule nothing had ever exercised (no test in the repository used `caplog`, a handler, or a captured stderr for a credential claim) and pins the "no logger at all" property from both sides; `tests/unit/test_provider_adapter_edges.py` closes §24's first unit item (79% → **100%** on `providers/openai.py`); `tests/evaluation/test_experiment_cli.py` covers the experiment CLI's summary and 0 / 2 / 3 exit codes, including the precedence rule that a coverage-truncating ceiling stop exits 2, not 3. Found and fixed the suite's documentation claim: **a base install failed 86 tests** (82 with no extras at all) because they exercise the application's real composition, which builds a BrainOS adapter — `tests/conftest.py` now turns `@pytest.mark.requires_runtime` / `@pytest.mark.requires_figures` into skips, 2 of the 86 were fixed properly instead of skipped (the controller's limits test takes the fake adapter factory the rest of its module uses; the ledger falls back to source inspection for a module skipped wholesale), and the base install is now `1073 passed, 98 skipped, 0 failed`. Coverage floor (`fail_under = 90`, `source = ["src"]`, `pytest-cov` in `dev`) and a two-job CI workflow (`.github/workflows/ci.yml`: full environment with the coverage floor · base install where optional tests skip). 1179 → **1248 tests**; 93% → **94%** (9067 stmts, 543 missed); `ruff check .` clean; no `src/` change was needed. |
+| Phases 19–20 | Pending | MVP definition (plan §25's 14-item checklist) and the research release (§26). |
 
 Detailed logs are available in
 [`docs/phase-0-research-baseline.md`](docs/phase-0-research-baseline.md),
@@ -60,7 +61,148 @@ Detailed logs are available in
 [`docs/phase-16-reproducibility.md`](docs/phase-16-reproducibility.md), and
 [`docs/phase-17-automated-pipeline.md`](docs/phase-17-automated-pipeline.md).
 
-## What was done in Phase 17 (this turn)
+## What was done in Phase 18 (this turn)
+
+§24 asks for a test suite. Phases 1–17 had already written the tests their own
+phases required (1179 of them), so Phase 18's real job was to **prove** each §24
+item is covered by name, close the gaps that proof finds, and make the proof part
+of the build. Three findings came out of it: the log surface had never been
+tested, the provider adapter was the least-covered module in the project, and a
+**base install failed 86 tests** rather than skipping them.
+
+### New / changed files
+
+| File | Purpose |
+| --- | --- |
+| [`tests/unit/test_plan_traceability.py`](tests/unit/test_plan_traceability.py) (new, 12) | The §24 ledger: `Requirement(section, item, category, tests)` rows for every plan item, checked against a `--collect-only` subprocess, with the plan text itself re-read (`Phase 18 — Test Suite`, the four headings, the four security phrases) so a renumbered §24 fails instead of validating a stale list. Two structural rules: ≥2 tests per requirement, and rule-shaped requirements (integration · security) must span >1 file. |
+| [`tests/security/test_log_hygiene.py`](tests/security/test_log_hygiene.py) (new, 9) | §24's "API key never appears in logs" + §13's first rule. Static: importing every shipped package installs no sink; no shipped module configures logging or emits a record (AST scan, `src/` + `app.py`). Dynamic: `captured_io()` collects root-logger records, warnings, stdout, stderr around a refused connect, a failed chat, a failing store, a full controller session, a pasted key, and both CLIs — the sentinel key must appear in none of them, and no record may come from this repository's namespaces at all. |
+| [`tests/unit/test_provider_adapter_edges.py`](tests/unit/test_provider_adapter_edges.py) (new, 21 → 34) | The adapter's edges: missing optional SDK, client construction from the session configuration (base URL + timeout, built once), an exploding client constructor, blank credentials, unusable model-list entries, `data=None`, credential kwargs (`api_key` / `authorization` / `headers`) refused, message validation, blank model ids, `max_tokens=None`, empty/absent/non-sequence choices, content-part and usage normalization, unrenderable responses, and raw metadata that drops secret-named fields. |
+| [`tests/evaluation/test_experiment_cli.py`](tests/evaluation/test_experiment_cli.py) (new, 11) | The CLI a researcher types: the billing notice and ungraded wording, `--quiet`, a graded summary, exit 2 (gateway routes elsewhere) with "do not report these numbers", exit 3 (a ceiling stop that keeps coverage — a second trial), exit 2 when a ceiling stop also truncates coverage, per-mode run files with no key in them, an auth-failing adapter over the real `OpenAIProvider` leaving nothing in stdout/stderr/artifact, the missing-credential message naming the variable only, `--trials 0`, and `--api-key` not abbreviating `--api-key-env`. |
+| [`tests/conftest.py`](tests/conftest.py) (was a docstring) | `OPTIONAL_DEPENDENCIES` + `pytest_collection_modifyitems`: `requires_runtime` → skip when `brainos_runtime` is absent, `requires_figures` → skip when `matplotlib` is absent, both with install hints. Registered in `pyproject.toml`. |
+| [`tests/unit/test_tokenizers.py`](tests/unit/test_tokenizers.py) (+2) · [`tests/security/test_secrets.py`](tests/security/test_secrets.py) (+1) | The tiktoken setup path (named encoding, model encoding, default model, unknown encoding) with `tiktoken` stubbed into `sys.modules`; `SessionManager.clear_all` clearing every session's key *and* transcript. |
+| [`pyproject.toml`](pyproject.toml) | `pytest-cov>=5.0` in `dev`; `[tool.coverage.run] source = ["src"]`; `[tool.coverage.report] fail_under = 90, show_missing, skip_covered, exclude_also`; the two markers registered. |
+| [`.github/workflows/ci.yml`](.github/workflows/ci.yml) (new) | `verify` (ruff + `pytest -q --cov` with the floor, Python 3.11, extras `dev,ui,providers,evaluation,integration`) and `without-extras` (`pip install -e ".[dev]"`, `pytest -q -rs`). The shipped-surface credential scan is a test, so it runs in both jobs. |
+| 84 tests across 15 modules + 2 figure tests | `@pytest.mark.requires_runtime` / `@pytest.mark.requires_figures`, so a base install skips rather than fails. |
+
+### Decisions later phases must not undo
+
+1. **An optional dependency skips; it never fails.** `@pytest.mark.requires_runtime`
+   for the pinned runtime, `@pytest.mark.requires_figures` for matplotlib; inline
+   `pytest.importorskip("brainos_runtime")` stays the convention for a module
+   that is live end to end (`tests/integration/*`).
+2. **A base install stays supported.** `pip install -e ".[dev]"` + `pytest -q`
+   must stay green (with skips). Do not "fix" a future failure by making the
+   extras mandatory, and do not delete the `without-extras` CI job — it is the
+   only enforcement of the README's fake-backed claim.
+3. **The ledger names tests, and it reads the plan.** A rename or delete of a
+   mapped test fails; so does a §24 edit that renumbers the requirement.
+4. **The ledger's fallback is narrow.** A mapped id is satisfied by collection,
+   or by source inspection *only* for a module that contributed no ids at all
+   (skipped wholesale). A rename inside a collected module still fails.
+5. **The application has no logger, and that is tested.** Diagnostics are
+   `print(..., file=sys.stderr)` carrying an exception *type*
+   (`app.service._warn_storage`). Adding a logger is a security change:
+   `test_no_shipped_module_configures_logging_or_emits_a_record` and
+   `test_importing_every_shipped_package_installs_no_log_sink` fail until the
+   redaction route is reviewed.
+6. **Coverage is an instrument with a floor, not a target.** 90 sits below the
+   measured 94; raise it only after the missing lines are covered for a reason.
+7. **`verify` and `without-extras` both run per change.** The suite is the
+   contract; a guarantee that only holds when every extra is installed is a
+   guarantee about the development machine.
+
+### Bugs and gaps found while building it
+
+1. **No test in the repository touched the log surface.** 1179 tests and not one
+   `caplog`, handler, or credential assertion over captured stderr. §24's
+   "API key never appears in logs" held only because no logger exists — a
+   property that would have disappeared the day one was added. **Fixed** by
+   §24's rule having a home, including the AST scan that makes adding a logger a
+   reviewed change.
+2. **`src/providers/openai.py` was the least-covered module in the project
+   (79%)** — and §24's *first* unit item. **Fixed**: 100%, with the ambiguous
+   paths now pinned (a `data=None` model list is empty, a non-sequence `content`
+   is stringified, junk usage counters are dropped rather than guessed).
+3. **A base install failed 86 tests** (82 with no extras at all, 86 with the UI
+   and provider extras but no runtime), concentrated in the files that run the
+   application's real composition: `test_experiment.py` 16, `test_pipeline.py`
+   15, `test_evaluation_ui.py` 14, `test_pipeline_secrets.py` 12,
+   `test_experiment_cli.py` 8, plus 24 across seven other modules. Root cause was
+   one thing: the default adapter factory builds a BrainOS adapter.
+   **Fixed** by the marker policy — but two of the 86 were fixed *properly*
+   rather than skipped (see 4 and 5).
+4. **`tests/unit/test_controller.py::test_turn_and_message_limits_are_enforced`
+   needed BrainOS for no reason.** It built its second controller with the
+   default adapter factory while the limits under test were the controller's.
+   **Fixed** by passing the fake adapter factory the rest of the module already
+   uses: the test now runs in a base install.
+5. **The ledger's first design was wrong, and the base install found it.**
+   `--collect-only` reports no ids for a module skipped for a missing
+   dependency, so a healthy skip looked like a deleted test. **Fixed** with the
+   narrow fallback in decision 4; the ledger now runs in *both* environments.
+6. **Two figure tests sat outside the suite's `importorskip("matplotlib")`
+   convention** (`tests/evaluation/test_analysis.py`), so they failed rather than
+   skipped in the documented minimal environment. **Fixed** with the figures
+   marker.
+7. **A new CLI test asserted the wrong exit code.** A ceiling stop that truncates
+   mode/task coverage produces both a ceiling abort (3) and a controlled
+   comparison violation (2), and 2 wins by design — the run must not look
+   reportable. The behaviour is right and is now pinned twice: a coverage-keeping
+   ceiling stop (a repeated trial) exits 3; a truncating one exits 2.
+
+### Measured behaviour
+
+```bash
+# Full environment: the suite and the coverage floor
+.venv/bin/python -m pytest -q --cov --cov-report=term-missing:skip-covered
+# 13 files skipped due to complete coverage.
+# TOTAL   9067   543   94%
+# Required test coverage of 90.0% reached. Total coverage: 94.01%
+# 1248 passed in 325.77s (0:05:25)
+
+# Base install — what CI's `without-extras` job runs
+/tmp/civenv/bin/python -m pytest -q --tb=line -rs
+# SKIPPED [1] tests/integration/test_brainos_runtime.py:13: could not import
+#              'brainos_runtime': No module named 'brainos_runtime'
+# SKIPPED [1] tests/unit/test_run_provenance.py:61: the pinned BrainOS runtime is
+#              not installed (pip install -e '.[integration]')
+# 1073 passed, 98 skipped in 10.56s
+
+# The ledger on its own
+.venv/bin/python -m pytest tests/unit/test_plan_traceability.py -q
+# 12 passed in 3.72s
+
+.venv/bin/ruff check .
+# All checks passed!
+```
+
+Coverage deltas the audit produced: `providers/openai.py` 79 → **100%**,
+`evaluation/experiment.py` 83 → 94%, `brain/tokenizers.py` 85 → 99%,
+`app/session.py` 81 → 100%, project total 93 → 94% (missed statements 643 → 543,
+fully-covered files 11 → 13). Deliberately still below 90%: `brain/adapter.py`
+(87%, defensive branches the pinned contract makes unreachable here) and
+`evaluation/analysis.py` (89%, report branches no committed fixture produces).
+`app/__init__.py` and `storage/evaluations.py` report 0% because they contain no
+executable logic — a re-export module and a `Protocol`.
+
+### Constraints carried into Phase 19+
+
+1. **Plan §25's 14-item MVP checklist has no single test.** It is spread across
+   unit, UI, and integration files. A Phase 19 artifact that walks all 14 items
+   in one session (and registers in the ledger) is the natural next step.
+2. **CI is the enforcement point now.** A phase that changes a guarantee should
+   change the test that names it in the ledger.
+3. **The base install is part of the contract.** Any new test that needs the
+   pinned runtime must carry the marker; the `without-extras` job will say so if
+   it does not.
+4. **Documentation claims need enforcement.** The 86-failure finding was a README
+   claim no test backed. When Phase 19 documents the MVP, something must fail
+   when a visitor cannot do what the README says.
+5. **The two Phase 16/17 gaps are still open**: a `SlowProvider` timeout test and
+   a multi-threaded stress test, and retention for `results/ui/` on a public
+   Space (an abandoned session is ended by nobody).
+
+## What was done in Phase 17 (landed via PR #18)
 
 Phase 17 turns seven commands a researcher had to run in the right order into one,
 and puts that one in the browser. Before it, `evaluation.run`,
@@ -2061,43 +2203,24 @@ and the localhost stub.
 
 ## Next safe step
 
-Phase 17 is complete and validated (1179 tests, `ruff check .` clean, 91 shipped
-files scan clean, the pipeline writes the plan's whole §23 `results/` layout in
-one command and the Evaluation tab drives the same entry point). The suggested
-next phase is **Phase 18 — Test Suite** (plan §24), which is now mostly a
-completion-and-hardening pass over a suite that already covers the plan's list:
+Phase 18 is complete and validated (1248 tests with every extra installed,
+`1073 passed / 98 skipped / 0 failed` in a base install, `ruff check .` clean,
+94% coverage against a 90% floor, two CI jobs). The suggested next phase is
+**Phase 19 — MVP Definition** (plan §25), which is a verification phase rather
+than a build phase: the MVP is defined as fourteen things a user can do.
 
-* **Unit:** provider adapters, API key redaction, context builder, token
-  budgeting, memory filtering, session isolation, conflict handling — all present
-  (`tests/unit/`), but §24 asks for them to be *exhaustive*, not representative.
-* **Integration:** `user input → observe → recall → context → provider → response
-  → memory update` is covered end to end by
-  `tests/integration/test_context_pipeline.py` and the live suites.
-* **Evaluation:** §24's "deterministic mock models to verify that benchmark
-  calculations are correct" now has a one-call home —
-  `run_pipeline(plan, tasks, ModelSpec(...), RecordingProvider(...))` — so
-  metric arithmetic can be pinned end to end rather than per module.
-* **Security:** §24's four pins exist (key never in logs/artifacts, session
-  isolation, retrieved memory cannot override system instructions, no user data
-  in diagnostics) and Phase 17 added the pipeline's own.
-
-Carry these constraints into Phase 18:
-
-1. **Do not weaken Phase 17's pins.** The credential-freedom and quarantine tests
-   in `tests/security/test_pipeline_secrets.py`, the `—`-not-`0.000` honesty rules,
-   and the registered-callback count (19) in `tests/ui/test_ui.py` are load-bearing.
-2. **The two gaps Phase 17 named are still open.** (a) A `SlowProvider` timeout
-   test and a multi-threaded stress test (deferred since Phase 16). (b) Retention
-   for `results/ui/`: runs are deleted with their session, but an *abandoned*
-   session is ended by nobody, so a public Space accumulates artifacts. Phase 19
-   should add a sweep (or a temp root) before the tab is enabled publicly with
-   generation on.
-3. **Tighten `EvaluationPolicy` for a public Space rather than editing the tab:**
-   `EvaluationPolicy(allowed_presets=("quick",), allow_generation=False,
-   max_tasks=20, max_requests=60)` is a defensible default.
-4. **Live re-proof after any change to the generation path.** A generated run must
-   still keep the session key out of every artifact, out of the environment, and
-   out of every rendered field — and must still quarantine if a provider echoes it.
-5. **No number produced so far validates a model.** Every measurement in this
-   repository came from dry runs or deterministic fakes. The research claim needs
-   a real `--preset research` run with a real key, which is Phase 20's job.
+1. **Walk the checklist in one place.** Open the Space → select OpenAI → enter a
+   key → select a model → start a conversation → store a fact → continue →
+   retrieve the fact later → inspect BrainOS memory → inspect the retrieved
+   context → compare BrainOS against full context → see token usage → run a
+   small benchmark → export results. Twelve of the fourteen have tests today,
+   but no single test walks the sequence, and two ("open the Space",
+   "select OpenAI") are deployment facts rather than behaviours.
+2. **Register the checklist in the ledger.** `tests/unit/test_plan_traceability.py`
+   is where a §25 row belongs, so the MVP checklist cannot rot the way the base
+   install did.
+3. **Carry Phase 18's constraint:** a README claim needs a test that fails when
+   it stops being true.
+4. **Still open from Phases 16/17:** a `SlowProvider` timeout test, a
+   multi-threaded stress test, and retention for `results/ui/` before the
+   Evaluation tab is enabled publicly with generation on.

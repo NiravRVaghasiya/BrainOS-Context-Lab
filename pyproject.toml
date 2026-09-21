@@ -29,6 +29,7 @@ evaluation = [
 ]
 dev = [
   "pytest>=8.0",
+  "pytest-cov>=5.0",
   "ruff>=0.6"
 ]
 # Pinned after the Phase 0 upstream validation. The distribution is named
@@ -52,6 +53,12 @@ where = ["src"]
 pythonpath = ["src"]
 testpaths = ["tests"]
 addopts = "-ra"
+# Phase 18: tests that need the optional integration extra are marked, and
+# `tests/conftest.py` turns the marker into a skip when the runtime is absent.
+markers = [
+  "requires_runtime: needs the pinned BrainOS runtime (pip install -e '.[integration]')",
+  "requires_figures: needs matplotlib (pip install -e '.[evaluation]')",
+]
 
 [tool.ruff]
 line-length = 100
@@ -59,3 +66,21 @@ target-version = "py310"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP"]
+
+# Phase 18. Coverage is an audit instrument here, not a target to game: it is
+# what found the provider adapter's untested branches and the absence of any
+# log-surface test. The floor sits below the measured number so a real
+# regression trips it while ordinary edits do not.
+[tool.coverage.run]
+source = ["src"]
+
+[tool.coverage.report]
+fail_under = 90
+show_missing = true
+skip_covered = true
+exclude_also = [
+  "if TYPE_CHECKING:",
+  "raise NotImplementedError",
+  "@overload",
+  "if __name__ == .__main__.:",
+]

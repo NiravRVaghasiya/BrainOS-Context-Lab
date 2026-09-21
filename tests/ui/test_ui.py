@@ -329,6 +329,7 @@ def test_preview_callback_shows_a_ceiling_and_writes_nothing(tmp_path: Path) -> 
     assert list((tmp_path / "results").rglob("*.json")) == []
 
 
+@pytest.mark.requires_runtime
 def test_run_callback_feeds_the_tables_the_figures_and_the_report(
     tmp_path: Path,
 ) -> None:

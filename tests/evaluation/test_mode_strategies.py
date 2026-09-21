@@ -54,6 +54,7 @@ def _fake_factory(mode: str) -> ConversationService:
     return ConversationService(state, adapter=BrainOSAdapter(FakeRuntime()))
 
 
+@pytest.mark.requires_runtime
 def test_the_default_factory_builds_a_memory_less_provider_less_service() -> None:
     """A replay must not call a model or touch disk."""
 
@@ -65,6 +66,7 @@ def test_the_default_factory_builds_a_memory_less_provider_less_service() -> Non
     assert service._memory_store is None
 
 
+@pytest.mark.requires_runtime
 def test_each_mode_gets_its_own_session() -> None:
     """One task's memory must not leak into the next mode's replay."""
 

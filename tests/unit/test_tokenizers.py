@@ -104,3 +104,68 @@ def test_tiktoken_counter_reports_a_missing_dependency() -> None:
         assert counter("hello world") > 0
         with pytest.raises(TokenizerUnavailableError):
             tiktoken_counter("definitely-not-a-real-model")
+
+
+def test_tiktoken_counter_uses_a_named_encoding_or_the_model_encoding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The exact counter is validated without the optional dependency installed.
+
+    A stub in ``sys.modules`` exercises both branches of the counter's setup —
+    ``encoding_name`` wins when supplied, and the model decides otherwise — and
+    the returned closure, so the fallback path is not the only one this suite
+    can see.
+    """
+
+    import sys
+    from types import SimpleNamespace
+
+    requested: list[object] = []
+
+    def encode(text: str, **kwargs: object) -> list[int]:
+        return [ord(character) for character in text]
+
+    def get_encoding(name: str) -> SimpleNamespace:
+        requested.append(("encoding", name))
+        return SimpleNamespace(encode=encode)
+
+    def encoding_for_model(model: str) -> SimpleNamespace:
+        requested.append(("model", model))
+        return SimpleNamespace(encode=encode)
+
+    monkeypatch.setitem(
+        sys.modules,
+        "tiktoken",
+        SimpleNamespace(get_encoding=get_encoding, encoding_for_model=encoding_for_model),
+    )
+
+    named = tiktoken_counter("gpt-4o-mini", encoding_name="cl100k_base")
+    assert named("abc") == 3
+    assert named("") == 0
+    assert requested == [("encoding", "cl100k_base")]
+
+    by_model = tiktoken_counter("gpt-4o-mini")
+    assert by_model("de") == 2
+    assert requested[-1] == ("model", "gpt-4o-mini")
+
+    assert tiktoken_counter(None)("a") == 1
+    assert requested[-1] == ("model", "gpt-4o-mini")
+
+
+def test_tiktoken_counter_reports_an_unknown_encoding_as_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import sys
+    from types import SimpleNamespace
+
+    def explode(name: str) -> None:
+        raise KeyError(name)
+
+    monkeypatch.setitem(
+        sys.modules,
+        "tiktoken",
+        SimpleNamespace(get_encoding=explode, encoding_for_model=explode),
+    )
+
+    with pytest.raises(TokenizerUnavailableError, match="No tiktoken encoding"):
+        tiktoken_counter("definitely-not-a-real-model")

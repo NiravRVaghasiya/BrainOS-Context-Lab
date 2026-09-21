@@ -58,6 +58,7 @@ def test_brainos_version_is_unvalidated_when_the_runtime_is_missing(
     assert brainos_version() == UNVALIDATED
 
 
+@pytest.mark.requires_runtime
 def test_brainos_version_attaches_the_pin_when_the_runtime_reports_one() -> None:
     """With the runtime present, the pinned Phase 0 revision travels with the number."""
 

@@ -97,6 +97,7 @@ def test_planned_requests_counts_tasks_modes_and_trials() -> None:
 # --------------------------------------------------------------------------- #
 
 
+@pytest.mark.requires_runtime
 def test_dry_run_measures_prompts_without_calling_a_model() -> None:
     run = run_controlled_experiment(_plan(), TASKS)
 
@@ -116,6 +117,7 @@ def test_dry_run_measures_prompts_without_calling_a_model() -> None:
     assert run.mode_result(MODE_FULL_CONTEXT).aggregate_metrics["retrieval_recall"] == 0.0
 
 
+@pytest.mark.requires_runtime
 def test_generated_run_grades_answers_and_records_latency() -> None:
     # One task whose accepted answers contain the text the provider returns, so
     # the graded outcome is deterministic rather than a property of the dataset.
@@ -151,6 +153,7 @@ def test_run_requires_a_model_and_a_provider_together() -> None:
 # --------------------------------------------------------------------------- #
 
 
+@pytest.mark.requires_runtime
 def test_constants_record_the_controls_that_held() -> None:
     provider = RecordingProvider(text="MongoDB 7")
 
@@ -168,6 +171,7 @@ def test_constants_record_the_controls_that_held() -> None:
     assert constants["generated_requests"] == len(TASKS) * 2
 
 
+@pytest.mark.requires_runtime
 def test_a_gateway_that_routes_elsewhere_is_a_violation() -> None:
     provider = RecordingProvider(text="MongoDB 7", report_model="some-other-model")
 
@@ -258,6 +262,7 @@ def test_check_constants_detects_mixed_token_counters() -> None:
 # --------------------------------------------------------------------------- #
 
 
+@pytest.mark.requires_runtime
 def test_dataset_is_truncated_by_the_task_limit() -> None:
     plan = _plan(limits=RunLimits(max_tasks=1))
 
@@ -268,6 +273,7 @@ def test_dataset_is_truncated_by_the_task_limit() -> None:
     assert any("truncated" in message for message in run.warnings)
 
 
+@pytest.mark.requires_runtime
 def test_a_run_level_limit_stops_the_run_and_keeps_partial_results() -> None:
     plan = _plan(modes=(MODE_FULL_CONTEXT, MODE_BRAINOS), limits=RunLimits(max_requests=3))
     provider = RecordingProvider(text="MongoDB 7")
@@ -288,6 +294,7 @@ def test_a_run_level_limit_stops_the_run_and_keeps_partial_results() -> None:
     assert any("cost limit" in message for message in run.warnings)
 
 
+@pytest.mark.requires_runtime
 def test_an_oversized_prompt_is_skipped_not_sent() -> None:
     plan = _plan(modes=(MODE_FULL_CONTEXT,), limits=RunLimits(max_input_tokens=1))
     provider = RecordingProvider(text="MongoDB 7")
@@ -302,6 +309,7 @@ def test_an_oversized_prompt_is_skipped_not_sent() -> None:
     assert any("skipped" in message for message in run.warnings)
 
 
+@pytest.mark.requires_runtime
 def test_stochastic_sampling_without_trials_is_flagged() -> None:
     provider = RecordingProvider(text="MongoDB 7")
     warm = ModelSpec(model="fake-model", temperature=0.7)
@@ -311,6 +319,7 @@ def test_stochastic_sampling_without_trials_is_flagged() -> None:
     assert any("single trial" in message for message in run.warnings)
 
 
+@pytest.mark.requires_runtime
 def test_a_run_without_a_dataset_hash_says_so() -> None:
     run = run_controlled_experiment(_plan(), TASKS)
 
@@ -322,6 +331,7 @@ def test_a_run_without_a_dataset_hash_says_so() -> None:
 # --------------------------------------------------------------------------- #
 
 
+@pytest.mark.requires_runtime
 def test_mode_run_files_match_the_run_file_schema() -> None:
     provider = RecordingProvider(text="MongoDB 7")
 
@@ -340,6 +350,7 @@ def test_mode_run_files_match_the_run_file_schema() -> None:
     assert [row["mode"] for row in comparison] == [MODE_FULL_CONTEXT, MODE_BRAINOS]
 
 
+@pytest.mark.requires_runtime
 def test_artifact_carries_provenance_and_no_credential_fields() -> None:
     provider = RecordingProvider(text="MongoDB 7")
 
@@ -361,6 +372,7 @@ def test_artifact_carries_provenance_and_no_credential_fields() -> None:
     assert payload["headline"][0]["tasks"] == len(TASKS)
 
 
+@pytest.mark.requires_runtime
 def test_cross_model_matrix_reports_a_row_per_model_and_mode() -> None:
     provider = RecordingProvider(text="MongoDB 7")
     small = ModelSpec(name="small", model="fake-small")
@@ -386,6 +398,7 @@ def test_cross_model_matrix_reports_a_row_per_model_and_mode() -> None:
 # --------------------------------------------------------------------------- #
 
 
+@pytest.mark.requires_runtime
 def test_cli_dry_run_writes_an_artifact_without_a_credential(tmp_path) -> None:
     output = tmp_path / "dry.json"
 
@@ -433,6 +446,7 @@ def test_cli_rejects_an_unknown_mode(tmp_path) -> None:
     assert "Unknown baseline mode" in str(error.value)
 
 
+@pytest.mark.requires_runtime
 def test_cli_writes_per_mode_run_files(tmp_path) -> None:
     runs_dir = tmp_path / "raw"
 
@@ -457,6 +471,7 @@ def test_cli_writes_per_mode_run_files(tmp_path) -> None:
     ] == MODE_BRAINOS
 
 
+@pytest.mark.requires_runtime
 def test_experiment_run_statistical_summary_with_multiple_trials() -> None:
     provider = RecordingProvider(text="MongoDB 7")
     plan = _plan(trials=2)
@@ -475,6 +490,7 @@ def test_experiment_run_statistical_summary_with_multiple_trials() -> None:
     assert payload["statistical_summary"]["metrics_version"] == "metrics-v1"
 
 
+@pytest.mark.requires_runtime
 def test_cli_renders_plots_when_plots_dir_is_supplied(tmp_path) -> None:
     plots_dir = tmp_path / "plots"
     code = main(

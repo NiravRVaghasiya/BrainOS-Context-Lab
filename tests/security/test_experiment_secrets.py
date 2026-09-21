@@ -43,6 +43,7 @@ def _plan() -> ExperimentPlan:
     )
 
 
+@pytest.mark.requires_runtime
 def test_provider_error_carrying_the_key_never_reaches_the_artifact() -> None:
     provider = RecordingProvider(fail=f"401 unauthorized: Bearer {KEY} (api_key={KEY})")
 
@@ -58,6 +59,7 @@ def test_provider_error_carrying_the_key_never_reaches_the_artifact() -> None:
     assert run.mode_result("brainos").aggregate_metrics["graded_answer_count"] == 0
 
 
+@pytest.mark.requires_runtime
 def test_no_artifact_surface_carries_a_credential() -> None:
     provider = RecordingProvider(text="MongoDB 7")
 

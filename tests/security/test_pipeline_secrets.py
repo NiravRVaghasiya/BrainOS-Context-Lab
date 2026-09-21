@@ -92,6 +92,7 @@ def test_a_provider_error_carrying_the_key_never_reaches_an_artifact(tmp_path: P
     assert result.artifact["generation"]["credential_source"] == "environment:TEST_KEY"
 
 
+@pytest.mark.requires_runtime
 def test_the_scan_covers_both_passes_and_names_the_files_it_read(
     tmp_path: Path,
 ) -> None:
@@ -110,6 +111,7 @@ def test_the_scan_covers_both_passes_and_names_the_files_it_read(
     assert "Second pass" in report_scan["note"]
 
 
+@pytest.mark.requires_runtime
 def test_the_scan_still_runs_when_the_report_stage_is_skipped(tmp_path: Path) -> None:
     from evaluation.pipeline import expand_stages
 
@@ -129,6 +131,7 @@ def test_the_scan_still_runs_when_the_report_stage_is_skipped(tmp_path: Path) ->
     assert "did not run" in check["note"]
 
 
+@pytest.mark.requires_runtime
 def test_figures_are_scanned_too(tmp_path: Path) -> None:
     pytest.importorskip("matplotlib", reason="figures need matplotlib")
 
@@ -144,6 +147,7 @@ def test_figures_are_scanned_too(tmp_path: Path) -> None:
 # --------------------------------------------------------------------------- #
 
 
+@pytest.mark.requires_runtime
 def test_a_credential_echoed_into_an_answer_is_quarantined(tmp_path: Path) -> None:
     provider = RecordingProvider(text=f"Sure — the key is api_key={KEY}, enjoy.")
 
@@ -172,6 +176,7 @@ def test_a_credential_echoed_into_an_answer_is_quarantined(tmp_path: Path) -> No
     assert KEY not in json.dumps(result.artifact, default=str)
 
 
+@pytest.mark.requires_runtime
 def test_quarantine_detects_a_credential_it_was_not_told_about(tmp_path: Path) -> None:
     # No ``secrets=``: the scanner still recognises a credential-shaped string,
     # which is the difference between a guard and a checklist.
@@ -187,6 +192,7 @@ def test_quarantine_detects_a_credential_it_was_not_told_about(tmp_path: Path) -
     assert scan_paths([str(tmp_path)]).clean
 
 
+@pytest.mark.requires_runtime
 def test_quarantine_only_ever_deletes_this_runs_own_output(tmp_path: Path) -> None:
     outside = tmp_path / "keep-me.json"
     outside.write_text(json.dumps({"note": f"api_key={KEY}"}), encoding="utf-8")
@@ -206,6 +212,7 @@ def test_quarantine_only_ever_deletes_this_runs_own_output(tmp_path: Path) -> No
     assert outside.is_file()
 
 
+@pytest.mark.requires_runtime
 def test_a_quarantined_report_is_not_handed_back_to_a_browser(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -235,6 +242,7 @@ def test_a_quarantined_report_is_not_handed_back_to_a_browser(
     )
 
 
+@pytest.mark.requires_runtime
 def test_a_quarantined_manifest_is_rewritten_without_its_prose(tmp_path: Path) -> None:
     provider = RecordingProvider(text=f"api_key={KEY}")
 
@@ -262,6 +270,7 @@ def test_a_quarantined_manifest_is_rewritten_without_its_prose(tmp_path: Path) -
 # --------------------------------------------------------------------------- #
 
 
+@pytest.mark.requires_runtime
 def test_the_cli_reads_a_key_from_the_environment_and_never_writes_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -329,6 +338,7 @@ def _ui_runner(tmp_path: Path, store: InMemoryEvaluationStore) -> UIEvaluationRu
     )
 
 
+@pytest.mark.requires_runtime
 def test_a_session_key_is_never_exported_to_the_environment(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -354,6 +364,7 @@ def test_a_session_key_is_never_exported_to_the_environment(
     assert scan_paths([str(tmp_path)], secrets=(KEY,)).clean
 
 
+@pytest.mark.requires_runtime
 def test_the_persisted_row_holds_no_credential(tmp_path: Path) -> None:
     store = InMemoryEvaluationStore()
     runner = _ui_runner(tmp_path, store)
@@ -375,6 +386,7 @@ def test_the_persisted_row_holds_no_credential(tmp_path: Path) -> None:
     assert scan_paths([str(tmp_path)], secrets=(KEY,)).clean
 
 
+@pytest.mark.requires_runtime
 def test_the_controller_redacts_a_session_key_out_of_every_rendered_field(
     tmp_path: Path,
 ) -> None:

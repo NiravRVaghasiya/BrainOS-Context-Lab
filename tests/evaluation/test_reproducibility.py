@@ -14,6 +14,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from evaluation import run as run_cli
 from evaluation.experiment import run_controlled_experiment
 from evaluation.generation import ModelSpec
@@ -28,6 +30,7 @@ from tests.fakes import RecordingProvider
 DATASET = Path("benchmarks/context_rot/dataset.jsonl")
 
 
+@pytest.mark.requires_runtime
 def test_a_run_writes_a_repro_manifest_without_a_credential(tmp_path) -> None:
     output = tmp_path / "run.json"
 
@@ -50,6 +53,7 @@ def test_a_run_writes_a_repro_manifest_without_a_credential(tmp_path) -> None:
     assert '"api_key"' not in rendered
 
 
+@pytest.mark.requires_runtime
 def test_a_run_records_the_repro_vocabulary_on_config(tmp_path) -> None:
     """``config`` keeps the §22 keys so a consumer older than Phase 16 still works."""
 
@@ -63,6 +67,7 @@ def test_a_run_records_the_repro_vocabulary_on_config(tmp_path) -> None:
     assert config["output"] == str(output)
 
 
+@pytest.mark.requires_runtime
 def test_an_experiment_writes_a_repro_block_matching_the_manifest() -> None:
     provider = RecordingProvider(text="MongoDB 7")
     model = ModelSpec(model="fake-model", temperature=0.0, max_tokens=64)
@@ -90,6 +95,7 @@ def test_an_experiment_writes_a_repro_block_matching_the_manifest() -> None:
     assert '"api_key":' not in rendered
 
 
+@pytest.mark.requires_runtime
 def test_an_error_report_records_the_repro_versions_in_provenance(tmp_path) -> None:
     """Phase 12 consumers also carry the §22 vocabulary in their provenance block."""
 

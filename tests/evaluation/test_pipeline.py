@@ -99,6 +99,7 @@ def test_layout_to_dict_records_every_directory(tmp_path: Path) -> None:
 # --------------------------------------------------------------------------- #
 
 
+@pytest.mark.requires_runtime
 def test_dry_run_writes_raw_aggregated_and_report_artifacts(tmp_path: Path) -> None:
     result = _dry_run(tmp_path)
 
@@ -118,6 +119,7 @@ def test_dry_run_writes_raw_aggregated_and_report_artifacts(tmp_path: Path) -> N
     assert (tmp_path / "report" / "report.md").exists()
 
 
+@pytest.mark.requires_runtime
 def test_every_stage_is_recorded_with_a_status_and_artifacts(tmp_path: Path) -> None:
     result = _dry_run(tmp_path)
 
@@ -137,6 +139,7 @@ def test_every_stage_is_recorded_with_a_status_and_artifacts(tmp_path: Path) -> 
         assert all(Path(path).exists() for path in stage.artifacts)
 
 
+@pytest.mark.requires_runtime
 def test_raw_run_files_carry_their_own_reproducibility_manifest(tmp_path: Path) -> None:
     _dry_run(tmp_path)
 
@@ -151,6 +154,7 @@ def test_raw_run_files_carry_their_own_reproducibility_manifest(tmp_path: Path) 
         assert f"--mode {name}" in repro["rerun_command"]
 
 
+@pytest.mark.requires_runtime
 def test_plots_stage_renders_one_figure_per_report_chart(tmp_path: Path) -> None:
     pytest.importorskip("matplotlib", reason="figures need matplotlib")
 
@@ -162,6 +166,7 @@ def test_plots_stage_renders_one_figure_per_report_chart(tmp_path: Path) -> None
     assert result.skipped_stages() == ()
 
 
+@pytest.mark.requires_runtime
 def test_report_markdown_renders_the_sections_a_reader_needs(tmp_path: Path) -> None:
     result = _dry_run(tmp_path)
     report = result.report_markdown
@@ -192,6 +197,7 @@ def test_report_markdown_renders_the_sections_a_reader_needs(tmp_path: Path) -> 
     assert written == report
 
 
+@pytest.mark.requires_runtime
 def test_report_discloses_a_changed_distribution_baseline(tmp_path: Path) -> None:
     """A mode that failed nothing cannot anchor a failure distribution.
 
@@ -234,6 +240,7 @@ def test_report_discloses_a_changed_distribution_baseline(tmp_path: Path) -> Non
     assert "The run asked for" not in clean
 
 
+@pytest.mark.requires_runtime
 def test_manifest_preview_is_capped_and_the_full_report_is_on_disk(tmp_path: Path) -> None:
     result = _dry_run(tmp_path)
     manifest = _manifest(tmp_path)
@@ -260,6 +267,7 @@ def test_manifest_records_versions_stages_and_the_exit_code(tmp_path: Path) -> N
     }
 
 
+@pytest.mark.requires_runtime
 def test_generated_run_records_the_model_and_the_credential_route(tmp_path: Path) -> None:
     from evaluation.generation import ModelSpec
 
@@ -304,6 +312,7 @@ def test_expand_stages_rejects_an_unknown_stage() -> None:
         expand_stages(["vibes"])
 
 
+@pytest.mark.requires_runtime
 def test_a_partial_run_discloses_which_stages_ran(tmp_path: Path) -> None:
     result = run_pipeline(
         _plan(),
@@ -323,6 +332,7 @@ def test_a_partial_run_discloses_which_stages_ran(tmp_path: Path) -> None:
     assert list((tmp_path / "plots").glob("*.png")) == []
 
 
+@pytest.mark.requires_runtime
 def test_a_failing_stage_does_not_raise_and_fails_the_pipeline(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -374,6 +384,7 @@ def test_a_later_stage_is_skipped_when_its_dependency_failed(
 # --------------------------------------------------------------------------- #
 
 
+@pytest.mark.requires_runtime
 def test_cli_dry_run_writes_the_layout_and_exits_zero(tmp_path: Path) -> None:
     code = main(
         [
@@ -394,6 +405,7 @@ def test_cli_dry_run_writes_the_layout_and_exits_zero(tmp_path: Path) -> None:
     assert (tmp_path / "aggregated" / "comparison.json").exists()
 
 
+@pytest.mark.requires_runtime
 def test_cli_prints_a_summary_with_the_caveats(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -454,6 +466,7 @@ def test_cli_rejects_an_unknown_stage(tmp_path: Path) -> None:
         main(["--dry-run", "--stages", "vibes", "--output-dir", str(tmp_path)])
 
 
+@pytest.mark.requires_runtime
 def test_cli_modes_ablations_always_include_the_full_system(tmp_path: Path) -> None:
     code = main(
         [
@@ -479,6 +492,7 @@ def test_cli_modes_ablations_always_include_the_full_system(tmp_path: Path) -> N
     ]
 
 
+@pytest.mark.requires_runtime
 def test_cli_baseline_mode_is_recorded_and_validated(tmp_path: Path) -> None:
     code = main(
         [
@@ -564,6 +578,7 @@ def test_every_preset_reports_a_planned_request_ceiling() -> None:
         assert entry.modes, name
 
 
+@pytest.mark.requires_runtime
 def test_artifact_lists_every_path_the_pipeline_wrote(tmp_path: Path) -> None:
     result = _dry_run(tmp_path)
     listing = result.artifact["artifacts"]
