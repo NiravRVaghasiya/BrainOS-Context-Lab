@@ -2277,8 +2277,8 @@ and the localhost stub.
 
 ## Next safe step
 
-Phase 19 is complete and validated (1335 tests with every extra installed,
-94.14% coverage against a 90% floor, `ruff check .` clean). Phase 20 has started:
+Phase 19 is complete and validated (1339 tests with every extra installed,
+94.19% coverage against a 90% floor, `ruff check .` clean). Phase 20 has started:
 the dataset half is generated with committed manifests, the model-free runs are
 recorded in `docs/phase-20-research-release.md`, and the ceiling bug they found
 is **fixed and re-measured** — Mode A carries a transcript larger than the

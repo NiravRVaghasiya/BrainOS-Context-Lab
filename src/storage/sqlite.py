@@ -49,6 +49,15 @@ DEFAULT_DATABASE_PATH = Path("data") / "brainos_lab.sqlite3"
 #: desired but the SQLite code paths should still be exercised.
 MEMORY_DATABASE_SENTINEL = ":memory:"
 
+#: How many times a fresh connection tries the one-time journal-mode switch
+#: before leaving it to the next connection, and how long it waits between
+#: attempts. SQLite answers ``SQLITE_BUSY`` immediately for this pragma (the
+#: busy handler is not consulted for a journal-mode change), so the wait is a
+#: deliberate back-off: N connections opening a cold file at once will each
+#: lose the race a few times before one of them sees the file already in WAL.
+WAL_SWITCH_ATTEMPTS = 20
+WAL_SWITCH_RETRY_SECONDS = 0.05
+
 _SECRET_FIELD_NAMES = frozenset(
     {
         "api_key",
@@ -238,24 +247,25 @@ class SqliteStore:
         ``database is locked`` before doing any work at all. The threaded Phase 19
         tests found it (~5% of runs, 8 concurrent writers).
 
-        The read is cheap and lock-free in WAL mode; the set is retried briefly
-        and then given up on, because a deployment whose file is already WAL (or
-        whose first connection won the race) does not need it, and a caller's
-        real work must not fail over a mode switch that a later connection will
+        The read is cheap and lock-free in WAL mode; the set is retried for
+        ``WAL_SWITCH_ATTEMPTS x WAL_SWITCH_RETRY_SECONDS`` (a second) and then
+        given up on, because a deployment whose file is already WAL (or whose
+        first connection won the race) does not need it, and a caller's real
+        work must not fail over a mode switch that a later connection will
         complete.
         """
 
         row = connection.execute("PRAGMA journal_mode").fetchone()
         if row is not None and str(row[0]).strip().lower() == "wal":
             return
-        for _ in range(5):
+        for _ in range(WAL_SWITCH_ATTEMPTS):
             try:
                 connection.execute("PRAGMA journal_mode=WAL")
                 return
             except sqlite3.OperationalError:
                 # Another connection is holding the schema lock to do exactly
                 # this. Wait a moment and look again rather than failing a write.
-                time.sleep(0.05)
+                time.sleep(WAL_SWITCH_RETRY_SECONDS)
         # Still not WAL: the caller proceeds. Writes still work (they contend
         # more), and the next connection re-attempts the switch.
         return

@@ -2,6 +2,7 @@
 
 **Plan reference:** §26 (Research Release), §27 Milestone 6, §29 (Benchmark Matrix), §14 (length ladder)
 **Tests:** 1335 → **1339** (+4) · coverage 94.18% → **94.19%** (floor 90) · `ruff check .` clean
+**CI:** run `35597471402` (commit `25e2e56`) green — `lint, test, coverage floor` 6m43s · `suite runs without the optional extras` 35s
 **Status:** **in progress** — the dataset half and the model-free half are done, and the measurement bug the
 model-free half exposed is **fixed and re-measured**. The model runs, §26's document and the Space remain.
 **Nothing here is a model result.**
@@ -170,6 +171,24 @@ budget is arithmetic on the run's own numbers: 56 tasks × 5 modes = **280 reque
 order of the sums in the table above (Mode A carries the conversation, the retrieval modes carry a few hundred
 tokens), output bounded by `--max-output-tokens` (1,024 in the `standard` preset). The repository deliberately
 ships no price table — multiply by the provider's current price.
+
+## Verification of the fix
+
+```bash
+# The suite, every extra installed
+# Required test coverage of 90.0% reached. Total coverage: 94.19%
+# 1339 passed in 254.64s (0:04:14)
+
+# The live replay, pinned runtime (the new regression test included)
+$ pytest tests/integration/test_baseline_modes_live.py -q
+# 12 passed in 5.67 s
+
+# The store change that goes with it: one full suite failed this test once and
+# never again, so the retry budget is now a constant with a name (1 s, was 0.25 s)
+# and the test reports which of its two invariants broke first
+$ pytest tests/unit/test_sqlite_concurrency.py tests/security/test_artifact_scan.py -q
+# 86 passed in 3.94 s
+```
 
 ## Constraints carried forward
 

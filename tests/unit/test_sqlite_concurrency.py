@@ -26,6 +26,7 @@ import pytest
 
 from storage.conversations import ConversationMessage
 from storage.sqlite import (
+    WAL_SWITCH_ATTEMPTS,
     SqliteConversationStore,
     SqliteEvaluationStore,
     SqliteMemoryStore,
@@ -34,6 +35,14 @@ from storage.sqlite import (
 THREADS = 8
 WRITES_PER_THREAD = 25
 OPENS = 16
+#: How long a party may take to reach the first-open rendezvous. It is a hang
+#: guard, not a schedule. A 30-second value turned a stalled process into sixteen
+#: ``BrokenBarrierError``s that said nothing about the store: the full suite run
+#: that failed on it took 25 seconds longer than a passing one, and the store
+#: raised nothing (a probe also rules out the obvious suspect — pysqlite releases
+#: the GIL while the busy handler waits). The window is wide enough to absorb
+#: that, and still bounded, so a real deadlock cannot hang CI.
+OPENS_RENDEZVOUS_TIMEOUT = 120
 
 
 def _run_threads(worker: Callable[[int], None], count: int = THREADS) -> list[BaseException]:
@@ -45,7 +54,7 @@ def _run_threads(worker: Callable[[int], None], count: int = THREADS) -> list[Ba
 
     def target(index: int) -> None:
         try:
-            barrier.wait(timeout=30)  # maximize overlap; nothing starts early
+            barrier.wait(timeout=OPENS_RENDEZVOUS_TIMEOUT)  # overlap, nothing early
             worker(index)
         except BaseException as exc:  # noqa: BLE001 - reported, not swallowed
             with lock:
@@ -252,7 +261,7 @@ def test_concurrent_first_opens_do_not_race_the_journal_mode_switch(tmp_path: Pa
 
         def opener(index: int) -> None:
             try:
-                barrier.wait(timeout=30)
+                barrier.wait(timeout=OPENS_RENDEZVOUS_TIMEOUT)
                 connection = store._connect()  # the seam under test
                 try:
                     connection.execute("SELECT 1").fetchone()
@@ -280,7 +289,12 @@ def test_concurrent_first_opens_do_not_race_the_journal_mode_switch(tmp_path: Pa
         for thread in threads:
             thread.join(timeout=120)
 
+        stuck = [thread.name for thread in threads if thread.is_alive()]
+        assert stuck == [], f"openers never finished: {stuck}"
         assert failures == [], failures
+        # The file-level fact the whole test is about. ``journal_mode()`` opens
+        # its own connection, which completes the switch if every opener above
+        # lost the race and gave up, so this is the contract and not a hope.
         assert store.journal_mode() == "wal"
         for index in range(OPENS):
             assert len(store.list_messages(f"session-{index}", "c1")) == 1
@@ -364,4 +378,4 @@ def test_a_switch_that_keeps_losing_does_not_fail_the_opening_connection(
 
     store._ensure_wal(connection)  # type: ignore[arg-type]
 
-    assert connection.switches() == 5
+    assert connection.switches() == WAL_SWITCH_ATTEMPTS

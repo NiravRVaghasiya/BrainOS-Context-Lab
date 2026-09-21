@@ -170,7 +170,7 @@ or one button in the browser.
 A session-scoped `ConversationService` combines the adapter, the retrieval
 policy, the context builder, and the provider factory. Deterministic fakes cover
 the whole pipeline without BrainOS installed; optional live tests exercise the
-pinned runtime. 1335 tests pass and `ruff check .` is clean repository-wide.
+pinned runtime. 1339 tests pass and `ruff check .` is clean repository-wide.
 
 Chat is usable without an API key: BrainOS still observes and retrieves memory,
 and the panels show exactly what the model *would* have been sent. See
@@ -398,7 +398,7 @@ pip install -e ".[integration]"
 
 ```bash
 pip install -e ".[dev,ui,providers,evaluation,integration]"   # everything
-pytest -q                                                     # 1335 tests
+pytest -q                                                     # 1339 tests
 pytest -q --cov --cov-report=term-missing                     # 94%, floor 90
 ruff check .
 ```

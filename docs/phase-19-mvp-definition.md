@@ -183,6 +183,25 @@ the re-run command the plan documents.
    a caller's write must not fail over a mode switch a later connection will
    complete. The old code was in every store since Phase 14; the tests that found
    it are this phase's own.
+   *Postscript (Phase 20).* Two coverage-instrumented full-suite runs failed this
+   test once each — roughly one run in four — while 60 solo runs, 1500 stress
+   rounds of the same shape and three plain full suites stayed clean. The second
+   failure kept its traceback, and it was **not** the store: sixteen
+   `BrokenBarrierError`s, no `database is locked`, every opener thread finished,
+   and the run itself took 25 seconds longer than a passing one. Something
+   outside the database held the process for ~30 seconds — enough for the
+   rendezvous to expire before every thread had reached it. (The obvious suspect
+   was tested and cleared: a connection blocked in SQLite's busy handler does
+   *not* hold the GIL — a spinner thread ran 37 million iterations during a
+   2-second block.) What changed because of it: the retry budget is a named
+   constant (`WAL_SWITCH_ATTEMPTS = 20` x `WAL_SWITCH_RETRY_SECONDS = 0.05`, one
+   second instead of a quarter of one, because a cold file opened by thirty
+   Gradio workers can lose the race more than five times); the rendezvous timeout
+   is `OPENS_RENDEZVOUS_TIMEOUT = 120`, a hang guard rather than a schedule; and
+   the test asserts the opener threads finished *before* it asserts the file
+   reached WAL, so the next failure names which invariant broke. The store's own
+   invariant — a fresh database opened by a crowd never raises — held in every
+   run.
 
 ## Measured behaviour
 
