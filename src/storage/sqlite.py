@@ -32,6 +32,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import time
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -209,13 +210,14 @@ class SqliteStore:
                 parent.mkdir(parents=True, exist_ok=True)
             connection = sqlite3.connect(str(path), timeout=30.0)
         connection.row_factory = sqlite3.Row
+        # ``busy_timeout`` goes on before anything that can contend, so the
+        # statements below wait instead of failing immediately.
+        connection.execute("PRAGMA busy_timeout=30000")
         # Phase 14: WAL mode lets concurrent Gradio worker threads read while a
         # writer commits, which eliminates the "database is locked" errors a
-        # multi-visitor Space would otherwise see under light load. ``busy_timeout``
-        # is an additional safety net in case a checkpoint is in progress.
+        # multi-visitor Space would otherwise see under light load.
         if not is_memory:
-            connection.execute("PRAGMA journal_mode=WAL")
-        connection.execute("PRAGMA busy_timeout=30000")
+            self._ensure_wal(connection)
         connection.execute("PRAGMA synchronous=NORMAL")
         # Phase 13: zero deleted content instead of merely unlinking the rows.
         # ``secure_delete`` is per-connection, so it has to be set on every one;
@@ -224,6 +226,39 @@ class SqliteStore:
         for statement in self._ddl:
             connection.execute(statement)
         return connection
+
+    def _ensure_wal(self, connection: sqlite3.Connection) -> None:
+        """Put the database file into WAL mode once, tolerating a concurrent opener.
+
+        Journal mode is a property of the *file*, so this only has to succeed the
+        first time. Re-issuing ``PRAGMA journal_mode=WAL`` on every connection —
+        which is what this method replaced — is a schema-level operation that
+        SQLite does **not** retry through ``busy_timeout``: two Gradio workers
+        opening the store at the same moment could therefore raise
+        ``database is locked`` before doing any work at all. The threaded Phase 19
+        tests found it (~5% of runs, 8 concurrent writers).
+
+        The read is cheap and lock-free in WAL mode; the set is retried briefly
+        and then given up on, because a deployment whose file is already WAL (or
+        whose first connection won the race) does not need it, and a caller's
+        real work must not fail over a mode switch that a later connection will
+        complete.
+        """
+
+        row = connection.execute("PRAGMA journal_mode").fetchone()
+        if row is not None and str(row[0]).strip().lower() == "wal":
+            return
+        for _ in range(5):
+            try:
+                connection.execute("PRAGMA journal_mode=WAL")
+                return
+            except sqlite3.OperationalError:
+                # Another connection is holding the schema lock to do exactly
+                # this. Wait a moment and look again rather than failing a write.
+                time.sleep(0.05)
+        # Still not WAL: the caller proceeds. Writes still work (they contend
+        # more), and the next connection re-attempts the switch.
+        return
 
     def secure_delete_enabled(self) -> bool:
         """Whether this database file reports ``secure_delete`` as on.

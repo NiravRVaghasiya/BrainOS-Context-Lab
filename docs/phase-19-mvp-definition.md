@@ -2,7 +2,7 @@
 
 **Plan reference:** §25 (Phase 19 — MVP Definition), §21 (UI), §23 (automated pipeline), §19 (privacy)
 **Status:** complete in this turn
-**Tests:** 1248 → **1331** (+83) · coverage 94% → **94%** (floor 90) · `ruff check .` clean · shipped-surface credential scan: 101 files, 0 findings
+**Tests:** 1248 → **1335** (+87) · coverage 94% → **94%** (floor 90) · `ruff check .` clean · shipped-surface credential scan: 102 files, 0 findings
 
 ## Goals
 
@@ -162,11 +162,27 @@ the re-run command the plan documents.
    skipping it. The `without-extras` CI job caught this on the first push; the
    two tests now carry `@pytest.mark.requires_runtime`, and the path resolution
    they are about is still exercised without the runtime by the preview and
-   sweeper tests beside them (`1132 passed, 104 skipped, 0 failed` in a base
+   sweeper tests beside them (`1136 passed, 104 skipped, 0 failed` in a base
    install).
-5. **The retention notice made `policy_notice()` longer than the tab's header
+6. **The retention notice made `policy_notice()` longer than the tab's header
    budget.** The sentence is written to be the shortest honest version of the
    policy; if a deployment turns retention off, it says that instead.
+7. **Every SQLite connection re-issued `PRAGMA journal_mode=WAL` — and that
+   pragma can fail on a healthy database.** Found by chasing a `verify` job that
+   failed once on GitHub and could not be reproduced locally: the threaded
+   concurrency tests flaked in about 5% of solo runs, always with
+   `sqlite3.OperationalError('database is locked')` raised inside `_connect`. An
+   8-thread repro (`conversation.append` + 25 memory writes + `save_run`, fresh
+   file per iteration) failed at iteration 38 and pointed at the line:
+   `_connect` ran the WAL switch *before* `PRAGMA busy_timeout=30000`, and SQLite
+   does not route a journal-mode change through the busy handler — two Gradio
+   workers opening a fresh Store-2 database at the same moment could therefore
+   raise before doing any work. Journal mode is a property of the *file*, so
+   `_ensure_wal` now reads the mode (lock-free in WAL) and only switches when the
+   file is not already WAL, retrying a lost race five times and then proceeding:
+   a caller's write must not fail over a mode switch a later connection will
+   complete. The old code was in every store since Phase 14; the tests that found
+   it are this phase's own.
 
 ## Measured behaviour
 
@@ -176,7 +192,24 @@ $ .venv/bin/python -m pytest tests/integration/test_mvp_walkthrough.py \
       tests/unit/test_retention.py tests/unit/test_checkout_paths.py \
       tests/unit/test_chat_timeout.py tests/unit/test_sqlite_concurrency.py \
       tests/unit/test_plan_traceability.py -q
-# 91 passed
+# 96 passed
+
+# The concurrency bug, before and after the fix
+$ for i in $(seq 1 40); do .venv/bin/python -m pytest -q \
+      tests/unit/test_sqlite_concurrency.py; done
+# before (4 tests): 2 failed runs in 40, both sqlite3.OperationalError: database is locked
+# after  (8 tests): 0 failed runs in 60
+
+# The regression the fix added, run against the old code
+$ for i in $(seq 1 20); do .venv/bin/python -m pytest -q \
+      tests/unit/test_sqlite_concurrency.py::test_concurrent_first_opens_do_not_race_the_journal_mode_switch; done
+# old code: 1 failed run in 20 (database is locked, raised by the WAL preamble)
+# new code: 0 failed runs in 25 + this file's thread tests
+
+# The 8-thread repro (8 appends + 25 memory writes + save_run, fresh file each round)
+$ .venv/bin/python /tmp/repro_locked.py
+# before: iteration 38 -> PRAGMA journal_mode=WAL -> database is locked
+# after:  no failures in 60 iterations
 
 # The retention tool, by hand — dry run, then the real sweep
 $ .venv/bin/python -m app.retention --root /tmp/retention-demo --dry-run
@@ -201,14 +234,14 @@ exit_code=0
 
 # The suite and the shipped-surface scan
 $ .venv/bin/python -m pytest -q --cov --cov-report=term
-# Required test coverage of 90.0% reached. Total coverage: 94.14%
-# 1331 passed in 232.13s (0:03:52)
+# Required test coverage of 90.0% reached. Total coverage: 94.19%
+# 1335 passed in 219.98s (0:03:39)
 $ .venv/bin/ruff check .
 # All checks passed!
 $ .venv/bin/python -m security.scan src docs README.md CONTEXT.md benchmarks \
       app.py requirements.txt packages.txt pyproject.toml \
       BrainOS_Context_Lab_Implementation_Plan.md
-scan_version=scan-v1 files=101 bytes=1744538 findings=0 clean=True
+scan_version=scan-v1 files=102 bytes=1787889 findings=0 clean=True
 ```
 
 New modules: `src/checkout.py` 100%, `src/app/retention.py` 95%,
@@ -222,12 +255,26 @@ lint, test, coverage floor                pass    6m17s
 suite runs without the optional extras    pass      25s
 ```
 
+The `verify` job failed once more on the commit that recorded the run above
+([`35583466031`](https://github.com/NiravRVaghasiya/BrainOS-Context-Lab/actions/runs/35583466031):
+`Test with the coverage floor`, 3m32s; `without-extras` passed in 32s). Its logs
+were not retrievable — the log endpoint returned `results-receiver: unexpected
+EOF` and the job annotations only carried "Process completed with exit code 1."
+— so the failure was chased from the one reproducible signal instead: the local
+suite at that commit passes in full (1335 tests, 94.19%), so the difference had
+to be a flake. Forty solo runs of the new threaded test file produced two
+failures, and both were the same real bug (finding 7), not a test artefact.
+The tests for it were hardened alongside the fix: the delete-under-load test now
+asserts the rows are gone *under* load and only then scans the file and its WAL
+sidecar for deleted bytes after `vacuum()`, and the generous-timeout test moved
+from a 5-second ceiling to 60 seconds with an explicit `elapsed < 30` bound.
+
 The `without-extras` job failed on the first push and is worth recording: a
 pipeline run builds a BrainOS adapter for *every* mode, including the baselines,
 so in a base install the experiment stage fails (exit 4) rather than skipping —
 two of this phase's checkout tests asserted a successful run without declaring
 the dependency. They now carry `@pytest.mark.requires_runtime`, and the local
-base-install run is `1132 passed, 104 skipped, 0 failed`.
+base-install run is `1136 passed, 104 skipped, 0 failed`.
 
 ## Constraints carried into Phase 20+
 

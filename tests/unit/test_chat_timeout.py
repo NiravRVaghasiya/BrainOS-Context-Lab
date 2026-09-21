@@ -46,7 +46,7 @@ class BlockingProvider:
     answer immediately, because connect() must not be the thing that blocks.
     """
 
-    def __init__(self, config: ProviderConfig, *, wait_seconds: float = 10.0) -> None:
+    def __init__(self, config: ProviderConfig, *, wait_seconds: float = 30.0) -> None:
         self.config = config
         self.wait_seconds = wait_seconds
         self.calls: list[list[dict[str, str]]] = []
@@ -188,15 +188,23 @@ def test_the_session_survives_and_the_next_turn_still_works(blockers: Any) -> No
 
 
 def test_a_generous_timeout_leaves_a_normal_slow_call_alone(blockers: Any) -> None:
-    """The timeout must not fire early: 0.25s is the trigger, seconds are fine."""
+    """The timeout must not fire early, with a margin a loaded runner cannot eat.
 
-    controller = _controller(blockers, timeout=5.0)
+    The provider answers after 0.2 s against a 60 s ceiling: a 300× margin, so a
+    slow CI box cannot turn "slow but fine" into a timeout — while a timeout that
+    fired early would still be caught here.
+    """
+
+    controller = _controller(blockers, timeout=60.0)
     sid = controller.connect(None, provider="openai", model="gpt-4o-mini", api_key=KEY).session_id
     provider = controller.service(sid).provider()
     threading.Timer(0.2, provider.release.set).start()
 
+    started = time.monotonic()
     view = controller.chat(sid, SESSION_TEXT)
+    elapsed = time.monotonic() - started
 
+    assert elapsed < 30, f"a 0.2s answer took {elapsed:.1f}s under a 60s timeout"
     assert view.turn_usage.get("timed_out") is not True
     assert view.turn_usage["completion_tokens"] == 2
     assert "late answer" in [message["content"] for message in view.history]
