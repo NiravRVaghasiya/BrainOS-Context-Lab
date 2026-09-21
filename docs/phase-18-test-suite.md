@@ -46,7 +46,7 @@ provider adapter was the least-covered module in the project, and a base install
 | [`tests/conftest.py`](../tests/conftest.py) (was a docstring) | The optional-dependency policy: `@pytest.mark.requires_runtime` / `@pytest.mark.requires_figures` become skips when the module is absent, so a base install reports skips instead of failures. |
 | [`tests/unit/test_tokenizers.py`](../tests/unit/test_tokenizers.py) (+2) · [`tests/security/test_secrets.py`](../tests/security/test_secrets.py) (+1) | The tiktoken setup path (encoding by name, by model, unknown encoding) with the dependency stubbed; `SessionManager.clear_all` clearing every session's credential. |
 | [`pyproject.toml`](../pyproject.toml) | `pytest-cov` in the `dev` extra; `[tool.coverage.run] source = ["src"]`; `[tool.coverage.report] fail_under = 90`; the two optional-dependency markers registered. |
-| [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) (new) | Two jobs: `verify` (ruff + the full suite with the coverage floor, `integration` extra installed) and `without-extras` (the base package only, where optional tests skip themselves). The shipped-surface credential scan is already a test, so it runs inside both. **Not yet executing on GitHub:** `gh api repos/…/actions/workflows` returns `total_count: 0`, i.e. Actions is not enabled for this repository. Both jobs' commands were reproduced locally instead (see Measured behaviour), and the workflow starts running as soon as Actions is enabled. |
+| [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) (new) | Two jobs: `verify` (ruff + the full suite with the coverage floor, `integration` extra installed) and `without-extras` (the base package only, where optional tests skip themselves). The shipped-surface credential scan is already a test, so it runs inside both. Verified on GitHub: run [`35576154648`](https://github.com/NiravRVaghasiya/BrainOS-Context-Lab/actions/runs/35576154648) — `lint, test, coverage floor` **pass** (5m46s) and `suite runs without the optional extras` **pass** (29s). |
 
 Nothing in `src/` changed. Phase 18 is the phase that measures the others; a
 test-suite phase that needs a production edit to pass is a bug report, and none
@@ -155,9 +155,9 @@ inspection for a module that was skipped wholesale. The other 84 carry
    lines are covered for a reason.
 6. **CI runs the suite twice, on purpose.** `verify` proves the pinned-runtime
    path; `without-extras` proves the fake-backed path a Space or a contributor
-   with no extras gets. Deleting the second job deletes the claim. (The jobs
-   execute once GitHub Actions is enabled for this repository; until then both
-   commands are also documented in the README so a contributor can run them.)
+   with no extras gets. Deleting the second job deletes the claim. Both jobs
+   pass on GitHub (run `35576154648`), and their commands are also in the README
+   so a contributor can reproduce them locally.
 7. **A base install stays supported.** `pip install -e ".[dev]"` and
    `pytest -q` must stay green (with skips). Do not "fix" a future failure by
    making the extras mandatory.
@@ -227,11 +227,20 @@ themselves at import (`tests/integration/*`, `tests/ui`); those modules' 77
 tests are not collected at all without their extras, which is why the base
 install collects 1171 items instead of 1248.
 
-Those two commands are exactly the two CI jobs, run by hand because **GitHub
-Actions is not enabled for this repository** (`gh api
-repos/NiravRVaghasiya/BrainOS-Context-Lab/actions/workflows` → `total_count: 0`,
-and no run is created for a pushed branch). The workflow file is the definition;
-enabling Actions in the repository settings is what activates it.
+Those two commands are exactly the two CI jobs. Both were run by hand first and
+then by GitHub on the pushed branch:
+
+```text
+$ gh pr checks 19
+lint, test, coverage floor                pass    5m46s
+suite runs without the optional extras    pass    29s
+```
+
+The workflow had no runs when it was first pushed — Actions reported zero
+workflows for the repository, which is why the doc originally recorded the
+commands rather than a run — and GitHub picked the workflow up afterwards, on
+the same commit. The two jobs are now the enforcement point for everything in
+"Decisions later phases must not undo".
 
 Live proof that the new guarantees hold against the pinned runtime comes from
 the existing live files, which run in the full environment and skip in the base
@@ -252,8 +261,8 @@ than reaching a network.
    session is the natural Phase 19 artifact, and this phase's ledger is where it
    gets registered.
 2. **CI is now the enforcement point.** `.github/workflows/ci.yml` runs on every
-   PR; a phase that changes a guarantee should change the test that names it in
-   the ledger, not just the code.
+   PR and both jobs pass (run `35576154648`); a phase that changes a guarantee
+   should change the test that names it in the ledger, not just the code.
 3. **Phase 20 (research release) should publish the numbers, not the suite.**
    The measured behaviour sections in `docs/phase-*.md` are the raw material;
    the release documents the benchmark methodology and results, and it should
