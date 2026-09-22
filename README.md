@@ -428,7 +428,7 @@ to run it:
   application's real composition (the evaluation pipeline, the Evaluation-tab
   runner, the reproducibility artifacts) carry `@pytest.mark.requires_runtime`
   and skip with an install hint when it is absent. A base install
-  (`pip install -e ".[dev]"`) runs `1073 passed, 98 skipped, 0 failed`.
+  (`pip install -e ".[dev]"`) runs `1149 passed, 104 skipped, 0 failed`.
 - **matplotlib** (`[evaluation]`) — figure tests carry
   `@pytest.mark.requires_figures`.
 
