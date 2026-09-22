@@ -17,6 +17,7 @@ Security properties this file must preserve:
 
 from __future__ import annotations
 
+import importlib.util
 import os
 import tempfile
 from dataclasses import dataclass, field
@@ -369,7 +370,15 @@ def _build_evaluation(gr: Any, controller: UIController) -> EvaluationComponents
                     value=False,
                     label="Call my model (spends my sidebar API key)",
                 )
-                render_plots = gr.Checkbox(value=True, label="Render figures")
+                plots_available = importlib.util.find_spec("matplotlib") is not None
+                render_plots = gr.Checkbox(
+                    value=plots_available,
+                    interactive=plots_available,
+                    label=(
+                        "Render figures" if plots_available
+                        else "Figures unavailable on this deployment (tables remain available)"
+                    ),
+                )
                 with gr.Row():
                     preview_btn = gr.Button("Preview cost")
                     run_btn = gr.Button("Run benchmark", variant="primary")

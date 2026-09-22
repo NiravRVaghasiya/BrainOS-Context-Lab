@@ -343,8 +343,10 @@ def test_vercel_installs_the_deployment_requirements_and_checks_startup() -> Non
     """An empty base dependency list must not become the deployment environment."""
 
     config = json.loads((REPO_ROOT / "vercel.json").read_text(encoding="utf-8"))
-    assert config["installCommand"] == "uv pip install -r requirements.txt"
-    assert config["buildCommand"] == "python scripts/check_vercel_runtime.py"
+    assert config["installCommand"] == "uv pip install -r requirements-vercel.txt"
+    assert config["buildCommand"] == (
+        "python scripts/prepare_vercel_bundle.py && python scripts/check_vercel_runtime.py"
+    )
     assert (REPO_ROOT / "scripts/check_vercel_runtime.py").is_file()
 
 
@@ -366,7 +368,7 @@ def test_deployment_smoke_check_does_not_accept_a_missing_fastapi() -> None:
 
 def test_deployment_smoke_check_in_the_installed_environment() -> None:
     for dependency in (
-        "fastapi", "uvicorn", "gradio", "openai", "brainos_runtime", "matplotlib", "pandas"
+        "fastapi", "uvicorn", "gradio", "openai", "brainos_runtime", "pandas"
     ):
         if importlib.util.find_spec(dependency) is None:
             pytest.skip(f"{dependency} is not installed")

@@ -44,7 +44,7 @@ def test_app_builds_and_registers_every_callback() -> None:
     # per-page session bootstrap, 4 Phase 15 cost-control widget callbacks, and
     # the 3 Phase 17 Evaluation-tab callbacks (preview, run, history).
     assert len(demo.fns) == 19
-    assert any(block_fn.targets == [(0, "load")] for block_fn in demo.fns.values())
+    assert any(block_fn.targets == [(demo._id, "load")] for block_fn in demo.fns.values())
     assert any(
         block_fn.targets and block_fn.targets[0][1] == "change"
         for block_fn in demo.fns.values()
@@ -413,3 +413,23 @@ def test_the_evaluation_tab_never_renders_the_session_key(tmp_path: Path) -> Non
         for path in tmp_path.rglob("*")
         if path.is_file()
     )
+
+
+def test_figure_control_is_disabled_without_optional_renderer(monkeypatch) -> None:
+    import app.ui as ui
+
+    real_find_spec = ui.importlib.util.find_spec
+    monkeypatch.setattr(
+        ui.importlib.util, "find_spec",
+        lambda name, *args, **kwargs: (
+            None if name == "matplotlib" else real_find_spec(name, *args, **kwargs)
+        ),
+    )
+    demo = create_app(_controller())
+    controls = [
+        block for block in demo.blocks.values()
+        if "Figures unavailable" in (getattr(block, "label", None) or "")
+    ]
+    assert len(controls) == 1
+    assert controls[0].value is False
+    assert controls[0].interactive is False

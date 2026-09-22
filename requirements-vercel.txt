@@ -1,0 +1,10 @@
+# Vercel-only runtime: no optional matplotlib/chart-rendering stack.
+# Pin Gradio because prepare_vercel_bundle.py prunes specific unused assets.
+gradio==6.28.0
+fastapi>=0.110
+uvicorn>=0.29
+openai>=1.0
+brainos-cli @ git+https://github.com/NiravRVaghasiya/BrainOS.git@1d9eb7a0ca537e7278e29809cda4f4c5da6c1dcc
+# Required by Gradio's tables even though chart rendering is omitted.
+pandas>=2.0
+-e .

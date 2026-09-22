@@ -67,3 +67,24 @@ jobs:
           pip install -e ".[dev]"
       - name: Test (optional-dependency tests skip themselves)
         run: pytest -q -rs
+
+  vercel-runtime:
+    name: lean Vercel dependency budget and startup
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install and validate the actual Vercel profile in a clean venv
+        env:
+          VERCEL: "1"
+          GRADIO_ANALYTICS_ENABLED: "False"
+        run: |
+          python -m pip install uv
+          uv venv .venv
+          . .venv/bin/activate
+          uv pip install -r requirements-vercel.txt
+          python scripts/prepare_vercel_bundle.py
+          python scripts/check_vercel_runtime.py
