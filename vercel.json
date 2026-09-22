@@ -1,0 +1,23 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "rewrites": [
+    { "source": "/(.*)", "destination": "/api/index" }
+  ],
+  "functions": {
+    "api/index.py": {
+      "maxDuration": 60,
+      "memory": 1024,
+      "includeFiles": "src/**"
+    }
+  },
+  "env": {
+    "BRAINOS_LAB_DB": ":memory:",
+    "BRAINOS_LAB_EVAL_ALLOW_GENERATION": "0",
+    "BRAINOS_LAB_EVAL_PRESETS": "quick",
+    "BRAINOS_LAB_EVAL_MAX_TASKS": "5",
+    "BRAINOS_LAB_EVAL_MAX_REQUESTS": "15",
+    "BRAINOS_LAB_CONCURRENCY": "1",
+    "BRAINOS_LAB_MAX_QUEUE": "8",
+    "PYTHONPATH": "src"
+  }
+}

@@ -9,6 +9,8 @@
 
 # Web framework
 gradio>=6.0
+fastapi>=0.110
+uvicorn>=0.29
 
 # Providers (OpenAI + OpenAI-compatible)
 openai>=1.0
