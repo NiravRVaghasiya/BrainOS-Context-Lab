@@ -56,8 +56,13 @@ BRAINOS_LAB_EVAL_MAX_TASKS=5
 BRAINOS_LAB_EVAL_MAX_REQUESTS=15
 BRAINOS_LAB_CONCURRENCY=1
 BRAINOS_LAB_MAX_QUEUE=8
-PYTHONPATH=src
 ```
+
+**Do not set `PYTHONPATH` in Vercel.** If you copied an earlier version of
+this guide, delete that variable from Project → Settings → Environment
+Variables (Production and Preview), then redeploy. Vercel manages the import
+path for its bundled dependencies; `api/index.py` already prepends the absolute
+`src/` directory without replacing that path.
 
 Optional but recommended:
 
@@ -68,7 +73,25 @@ RESULTS_ROOT=/tmp/results
 
 ### 4. `requirements.txt` for Vercel
 
-Vercel installs from `requirements.txt` by default. Add `fastapi` and `uvicorn`:
+**Do not rely on manifest auto-detection.** This repository has both
+`requirements.txt` and `pyproject.toml`. The base project intentionally declares
+`dependencies = []`; the UI, provider SDK, and BrainOS live in optional extras.
+Vercel's Python installer can select that project manifest without installing
+`requirements.txt`, leaving even FastAPI out of the deployed function.
+
+`vercel.json` now explicitly configures:
+
+```json
+"installCommand": "uv pip install -r requirements.txt",
+"buildCommand": "python scripts/check_vercel_runtime.py"
+```
+
+The install command uses Vercel's build virtual environment. The build check
+imports every deployment dependency, starts the ASGI application, and requires
+both a healthy API and the Gradio page. It does not call a model or need API keys.
+The base package remains dependency-free for local CLI/testing use.
+
+The deployment dependencies in `requirements.txt` are:
 
 ```txt
 gradio>=6.0
@@ -83,10 +106,11 @@ uvicorn>=0.29
 
 > Note: `brainos-cli` from git increases cold start. Consider vendoring a wheel if it exceeds 250MB.
 
-### 5. Test locally with Vercel's runtime
+### 5. Test the deployment app locally
 
 ```bash
-pip install fastapi uvicorn
+pip install -r requirements.txt
+python scripts/check_vercel_runtime.py
 BRAINOS_LAB_DB=:memory: BRAINOS_LAB_EVAL_ALLOW_GENERATION=0 python -m uvicorn api.index:app --host 0.0.0.0 --port 7860 --reload
 # Open http://localhost:7860
 # API docs at http://localhost:7860/docs
@@ -184,6 +208,62 @@ your-domain.com (Vercel Next.js) -> chat demo (Vercel Python)
 ```
 
 ## Troubleshooting Vercel
+
+### `ModuleNotFoundError: No module named 'fastapi'`
+
+If this appears both in `app.vercel_app` and in `_degraded_app`, the function
+cannot import FastAPI at all. The fallback needs FastAPI too, so it cannot rescue
+an incomplete dependency installation. This is not a Gradio queue or timeout
+failure.
+
+Deploy the revision containing the explicit install/build commands above, with
+Vercel's Root Directory set to the repository root. Clear conflicting dashboard
+Install/Build Command overrides and redeploy **without the existing build cache**.
+The build logs must show `uv pip install -r requirements.txt` followed by
+`Vercel runtime smoke check passed`. Redeploying the old commit alone does not
+apply the fix. Then check `/api/health` and `/` in the new deployment.
+
+### Build succeeds, but “This page is unavailable” / function temporarily failed
+
+A successful build does not prove the function starts or serves a request.
+Open the failing deployment's **Logs**, request `/api/health`, and inspect the
+first Python exception (not just the final `FUNCTION_INVOCATION_FAILED` line).
+
+1. Confirm the dependency install and smoke check above ran successfully.
+   Remove any custom `PYTHONPATH` variable from Vercel project/team settings.
+   The old configuration set it to `src`, which can replace the runtime's
+   dependency search path. The checked-in config no longer overrides it.
+   A failure before `api/index.py` loads cannot be handled by its fallback.
+2. Deploy the updated revision. Environment-variable changes apply to new
+   deployments, not the deployment already serving traffic.
+3. Check **both** `/api/health` and `/`. Health should return JSON with
+   `"status": "ok"`; `/` should return the Gradio HTML page. HTTP 200 alone is
+   insufficient: the import fallback reports `"status": "degraded"`, and the
+   API can start even if mounting Gradio fails.
+4. If it still fails, use the runtime traceback to distinguish a missing module,
+   a read-only filesystem write, a startup/lifespan exception, or a timeout.
+   Do not increase memory or change dependencies blindly. Share the traceback
+   with credentials redacted.
+
+Local smoke check with the deployment dependencies installed:
+
+```bash
+VERCEL=1 GRADIO_ANALYTICS_ENABLED=False python - <<'PYTHON'
+from fastapi.testclient import TestClient
+from api.index import app
+
+with TestClient(app) as client:
+    health = client.get("/api/health")
+    assert health.status_code == 200, health.text
+    assert health.json()["status"] == "ok", health.text
+    page = client.get("/")
+    assert page.status_code == 200, page.text
+    assert "text/html" in page.headers["content-type"]
+PYTHON
+```
+
+This exercises ASGI startup and page serving locally, not Vercel's production
+runtime. A passing smoke check does not replace checking deployment logs.
 
 ### Build fails: `Found app.py, api/index.py but none define a top-level "app" FastAPI instance`
 

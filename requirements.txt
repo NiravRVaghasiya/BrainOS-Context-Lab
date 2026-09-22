@@ -1,4 +1,6 @@
-# Hugging Face Space runtime dependencies.
+# Hugging Face Space and Vercel runtime dependencies.
+# Vercel explicitly installs this file via vercel.json; pyproject.toml keeps
+# the base library dependency-free for CLI/tests without optional extras.
 #
 # The application is a BYOK (bring-your-own-key) Gradio app. No shared provider
 # key lives anywhere in source: the user enters an API key in the sidebar, it is

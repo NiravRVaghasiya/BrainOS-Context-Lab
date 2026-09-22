@@ -133,7 +133,6 @@ BRAINOS_LAB_DB=:memory:
 BRAINOS_LAB_EVAL_ALLOW_GENERATION=0
 BRAINOS_LAB_CONCURRENCY=1
 GRADIO_SERVER_NAME=0.0.0.0
-PYTHONPATH=src
 ```
 
 4. `requirements.txt` for Vercel: same as HF but add `fastapi`, `uvicorn`. Ensure `gradio>=6.0` compatible with `fastapi`.

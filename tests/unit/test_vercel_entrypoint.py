@@ -36,8 +36,10 @@ import ast
 import builtins
 import contextlib
 import importlib.util
+import json
 import os
 import re
+import subprocess
 import sys
 from collections.abc import Iterator
 from pathlib import Path
@@ -102,6 +104,7 @@ def _load_entrypoint() -> Iterator[object]:
     """
 
     saved_env = dict(os.environ)
+    saved_path = list(sys.path)
     saved_modules = dict(sys.modules)
     spec = importlib.util.spec_from_file_location(_ENTRYPOINT_MODULE, ENTRYPOINT)
     assert spec is not None and spec.loader is not None
@@ -113,6 +116,7 @@ def _load_entrypoint() -> Iterator[object]:
     finally:
         sys.modules.clear()
         sys.modules.update(saved_modules)
+        sys.path[:] = saved_path
         os.environ.clear()
         os.environ.update(saved_env)
 
@@ -274,3 +278,105 @@ def test_the_space_launcher_does_not_shadow_the_source_package() -> None:
     finally:
         sys.modules.clear()
         sys.modules.update(saved_modules)
+
+
+def test_vercel_config_leaves_the_runtime_pythonpath_alone() -> None:
+    """The entrypoint adds src/; deployment config must not replace vendor paths."""
+
+    config = json.loads((REPO_ROOT / "vercel.json").read_text(encoding="utf-8"))
+    for section in ("env", "build", "builds"):
+        value = config.get(section, {})
+        assert '"PYTHONPATH"' not in json.dumps(value), (
+            "Do not override Vercel's dependency path with PYTHONPATH=src"
+        )
+
+
+def test_entrypoint_preserves_the_runtime_dependency_path(monkeypatch, tmp_path) -> None:
+    pytest.importorskip("fastapi")
+    vendor = str(tmp_path / "_vendor")
+    monkeypatch.setenv("PYTHONPATH", vendor)
+    monkeypatch.syspath_prepend(vendor)
+
+    with _load_entrypoint():
+        assert sys.path[0] == str(REPO_ROOT / "src")
+        assert vendor in sys.path
+        assert os.environ["PYTHONPATH"] == vendor
+
+
+def test_vercel_startup_serves_the_ui_not_just_health() -> None:
+    """The API can be healthy even when the optional Gradio mount failed."""
+
+    for dependency in ("fastapi", "httpx", "gradio"):
+        if importlib.util.find_spec(dependency) is None:
+            pytest.skip(f"{dependency} is not installed")
+
+    # A cold process is essential: the import-isolation helper above unwinds
+    # sys.modules, whereas native modules such as NumPy cannot be reloaded.
+    script = """
+from api.index import app
+from fastapi.testclient import TestClient
+
+with TestClient(app) as client:
+    health = client.get("/api/health")
+    assert health.status_code == 200, health.text
+    assert health.json()["status"] == "ok", health.text
+    page = client.get("/")
+    assert page.status_code == 200, page.text
+    assert "text/html" in page.headers["content-type"]
+    assert "gradio" in page.text.lower()
+    config = client.get("/config")
+    assert config.status_code == 200, config.text
+    assert config.json()["components"]
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=REPO_ROOT,
+        env={**os.environ, "VERCEL": "1", "GRADIO_ANALYTICS_ENABLED": "False"},
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_vercel_installs_the_deployment_requirements_and_checks_startup() -> None:
+    """An empty base dependency list must not become the deployment environment."""
+
+    config = json.loads((REPO_ROOT / "vercel.json").read_text(encoding="utf-8"))
+    assert config["installCommand"] == "uv pip install -r requirements.txt"
+    assert config["buildCommand"] == "python scripts/check_vercel_runtime.py"
+    assert (REPO_ROOT / "scripts/check_vercel_runtime.py").is_file()
+
+
+def test_deployment_smoke_check_does_not_accept_a_missing_fastapi() -> None:
+    # No site-packages (-S) reproduces the incomplete runtime in the logs.
+    # The deployment check must fail, not skip or accept the degraded app.
+    result = subprocess.run(
+        [sys.executable, "-S", "scripts/check_vercel_runtime.py"],
+        cwd=REPO_ROOT,
+        env={**os.environ, "PYTHONPATH": ""},
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode != 0
+    assert "No module named 'fastapi'" in result.stderr
+    assert "Vercel runtime smoke check passed" not in result.stdout
+
+
+def test_deployment_smoke_check_in_the_installed_environment() -> None:
+    for dependency in (
+        "fastapi", "uvicorn", "gradio", "openai", "brainos_runtime", "matplotlib", "pandas"
+    ):
+        if importlib.util.find_spec(dependency) is None:
+            pytest.skip(f"{dependency} is not installed")
+    result = subprocess.run(
+        [sys.executable, "scripts/check_vercel_runtime.py"],
+        cwd=REPO_ROOT,
+        env={**os.environ, "VERCEL": "1", "GRADIO_ANALYTICS_ENABLED": "False"},
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "Vercel runtime smoke check passed" in result.stdout
