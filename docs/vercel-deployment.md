@@ -56,8 +56,13 @@ BRAINOS_LAB_EVAL_MAX_TASKS=5
 BRAINOS_LAB_EVAL_MAX_REQUESTS=15
 BRAINOS_LAB_CONCURRENCY=1
 BRAINOS_LAB_MAX_QUEUE=8
-PYTHONPATH=src
 ```
+
+**Do not set `PYTHONPATH` in Vercel.** If you copied an earlier version of
+this guide, delete that variable from Project → Settings → Environment
+Variables (Production and Preview), then redeploy. Vercel manages the import
+path for its bundled dependencies; `api/index.py` already prepends the absolute
+`src/` directory without replacing that path.
 
 Optional but recommended:
 
@@ -66,27 +71,49 @@ GRADIO_SERVER_NAME=0.0.0.0
 RESULTS_ROOT=/tmp/results
 ```
 
-### 4. `requirements.txt` for Vercel
+### 4. Explicit, size-bounded Vercel dependencies
 
-Vercel installs from `requirements.txt` by default. Add `fastapi` and `uvicorn`:
+**Do not rely on manifest auto-detection.** The base `pyproject.toml` intentionally
+has `dependencies = []`. Selecting it without the deployment requirements leaves
+FastAPI out of the function. Conversely, installing the full HF requirements
+produced a 295.30 MB bundle against this deployment's 225 MB function limit.
 
-```txt
-gradio>=6.0
-openai>=1.0
-brainos-cli @ git+https://github.com/NiravRVaghasiya/BrainOS.git@1d9eb7a0ca537e7278e29809cda4f4c5da6c1dcc
-matplotlib>=3.7
-pandas>=2.0
-fastapi>=0.110
-uvicorn>=0.29
--e .
+`vercel.json` explicitly configures:
+
+```json
+"installCommand": "uv pip install -r requirements-vercel.txt",
+"buildCommand": "python scripts/prepare_vercel_bundle.py && python scripts/check_vercel_runtime.py"
 ```
 
-> Note: `brainos-cli` from git increases cold start. Consider vendoring a wheel if it exceeds 250MB.
+The Vercel profile preserves FastAPI, Gradio, OpenAI, the pinned BrainOS runtime,
+and Pandas/NumPy (required by Gradio). It omits optional matplotlib and its font
+and rendering dependencies. **Chat and evaluation tables remain available;
+figure rendering is disabled in this profile.** Full local/HF installs still use
+`requirements.txt` and retain chart rendering.
 
-### 5. Test locally with Vercel's runtime
+The preparation script removes only three unused Gradio asset directories from
+the disposable build virtual environment: the browser FFmpeg transcoder, Node
+SSR bundle, and sample media. The app has no audio/video inputs and explicitly
+disables SSR. Python modules, native libraries, and frontend JS/CSS are kept.
+The script also updates Gradio's wheel RECORD so Vercel does not count or try
+to copy deleted files. Gradio is pinned to the asset layout validated by the
+script; version upgrades require revalidation.
+
+The preparation step enforces a **210 MB dependency budget**, leaving room below
+the reported 225 MB limit for app code and platform files. This is not a measure
+of the final Vercel artifact. A clean Python 3.11 validation measured 200.58 MB
+of dependencies after removing 48.08 MB of unused assets. Vercel's final bundle
+check remains authoritative, and different Python/platform wheels can vary.
+
+The post-trim smoke check requires dependency imports, ASGI startup, API health,
+Gradio configuration, and the HTML page's JS/CSS assets to succeed. It does not
+call a model or require credentials.
+
+### 5. Test the deployment app locally
 
 ```bash
-pip install fastapi uvicorn
+pip install -r requirements-vercel.txt
+python scripts/check_vercel_runtime.py
 BRAINOS_LAB_DB=:memory: BRAINOS_LAB_EVAL_ALLOW_GENERATION=0 python -m uvicorn api.index:app --host 0.0.0.0 --port 7860 --reload
 # Open http://localhost:7860
 # API docs at http://localhost:7860/docs
@@ -185,6 +212,62 @@ your-domain.com (Vercel Next.js) -> chat demo (Vercel Python)
 
 ## Troubleshooting Vercel
 
+### `ModuleNotFoundError: No module named 'fastapi'`
+
+If this appears both in `app.vercel_app` and in `_degraded_app`, the function
+cannot import FastAPI at all. The fallback needs FastAPI too, so it cannot rescue
+an incomplete dependency installation. This is not a Gradio queue or timeout
+failure.
+
+Deploy the revision containing the explicit install/build commands above, with
+Vercel's Root Directory set to the repository root. Clear conflicting dashboard
+Install/Build Command overrides and redeploy **without the existing build cache**.
+The build logs must show `uv pip install -r requirements-vercel.txt` followed by
+`Vercel runtime smoke check passed`. Redeploying the old commit alone does not
+apply the fix. Then check `/api/health` and `/` in the new deployment.
+
+### Build succeeds, but “This page is unavailable” / function temporarily failed
+
+A successful build does not prove the function starts or serves a request.
+Open the failing deployment's **Logs**, request `/api/health`, and inspect the
+first Python exception (not just the final `FUNCTION_INVOCATION_FAILED` line).
+
+1. Confirm the dependency install and smoke check above ran successfully.
+   Remove any custom `PYTHONPATH` variable from Vercel project/team settings.
+   The old configuration set it to `src`, which can replace the runtime's
+   dependency search path. The checked-in config no longer overrides it.
+   A failure before `api/index.py` loads cannot be handled by its fallback.
+2. Deploy the updated revision. Environment-variable changes apply to new
+   deployments, not the deployment already serving traffic.
+3. Check **both** `/api/health` and `/`. Health should return JSON with
+   `"status": "ok"`; `/` should return the Gradio HTML page. HTTP 200 alone is
+   insufficient: the import fallback reports `"status": "degraded"`, and the
+   API can start even if mounting Gradio fails.
+4. If it still fails, use the runtime traceback to distinguish a missing module,
+   a read-only filesystem write, a startup/lifespan exception, or a timeout.
+   Do not increase memory or change dependencies blindly. Share the traceback
+   with credentials redacted.
+
+Local smoke check with the deployment dependencies installed:
+
+```bash
+VERCEL=1 GRADIO_ANALYTICS_ENABLED=False python - <<'PYTHON'
+from fastapi.testclient import TestClient
+from api.index import app
+
+with TestClient(app) as client:
+    health = client.get("/api/health")
+    assert health.status_code == 200, health.text
+    assert health.json()["status"] == "ok", health.text
+    page = client.get("/")
+    assert page.status_code == 200, page.text
+    assert "text/html" in page.headers["content-type"]
+PYTHON
+```
+
+This exercises ASGI startup and page serving locally, not Vercel's production
+runtime. A passing smoke check does not replace checking deployment logs.
+
 ### Build fails: `Found app.py, api/index.py but none define a top-level "app" FastAPI instance`
 
 The builder detected FastAPI (it is in `requirements.txt`) and then looked for the
@@ -217,14 +300,21 @@ what an import produces.
 
 Vercel's build log shows `Failed to build`. Fix:
 
-- Add `git` to `packages.txt`? No, Vercel uses Nix, not apt. Use `vercel.json` `installCommand`: `pip install --upgrade pip && pip install -r requirements.txt`
+- Check the explicit install command ran and the build can reach the pinned Git revision. `packages.txt` is for HF Spaces, not Vercel.
 - Or vendor: `pip wheel brainos-cli @ git+... -w wheels/` and commit wheel, then `requirements.txt` points to wheel file.
 
-### Function size exceeds 250MB
+### Function bundle exceeds the reported 225 MB limit
 
-- Check `pip install` size: `du -sh $(python -c "import site; print(site.getsitepackages()[0])")`
-- Gradio + matplotlib + pandas + openai is ~200MB, BrainOS may push over.
-- Solution: Use `vercel.json` `includeFiles`/`excludeFiles` or move BrainOS to external service.
+Deploy the lean profile and preparation step in section 4, without the existing
+build cache. Do not remove Pandas/NumPy or shared libraries: Gradio needs them.
+Do not increase `memory` or `maxDuration`: they do not change the size cap.
+`includeFiles: "src/**"` adds source files; it is not a dependency whitelist.
+
+Expect build logs showing the removed asset bytes, the remaining dependency
+size, and `Vercel runtime smoke check passed`. If the dependency budget fails,
+inspect the installed package sizes and revalidate dependency versions. If only
+the final Vercel check fails, inspect platform-added files and bundled repository
+artifacts as well; the dependency budget intentionally is not a final-bundle claim.
 
 ### Gradio UI blank / WebSocket error
 
@@ -259,7 +349,8 @@ Fix: Disable generation (`ALLOW_GENERATION=0`), limit to 5 tasks, or offload to 
 - [ ] `api/index.py` exists and exports `app` **at module scope** (`app = _build_app()`)
 - [ ] `pyproject.toml` declares `[tool.vercel] entrypoint = "api.index:app"`
 - [ ] `vercel.json` rewrites to `/api/index`
-- [ ] `requirements.txt` includes `fastapi`, `uvicorn`
+- [ ] `requirements-vercel.txt` is explicitly installed
+- [ ] Bundle preparation and post-trim startup/asset checks pass
 - [ ] Env vars set: `BRAINOS_LAB_DB=:memory:`, `EVAL_ALLOW_GENERATION=0`
 - [ ] Test locally: `uvicorn api.index:app --port 7860`
 - [ ] `vercel --prod` succeeds

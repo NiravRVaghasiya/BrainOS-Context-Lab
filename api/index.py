@@ -57,6 +57,8 @@ from typing import Any
 
 # ---------------------------------------------------------------------------
 # Path bootstrap - same as app.py
+# Do not set PYTHONPATH=src in Vercel configuration: the runtime owns its
+# dependency search path. Prepending here preserves the bundled dependencies.
 # ---------------------------------------------------------------------------
 repo_root = Path(__file__).resolve().parents[1]
 src_dir = repo_root / "src"

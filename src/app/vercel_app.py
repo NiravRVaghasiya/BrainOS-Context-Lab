@@ -343,7 +343,7 @@ def _try_mount_gradio() -> Any:
         except Exception:
             pass
 
-        mounted = gr.mount_gradio_app(fastapi_app, demo, path="/")
+        mounted = gr.mount_gradio_app(fastapi_app, demo, path="/", ssr_mode=False)
         return mounted
     except Exception as exc:
         print(

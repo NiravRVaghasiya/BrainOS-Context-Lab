@@ -133,10 +133,9 @@ BRAINOS_LAB_DB=:memory:
 BRAINOS_LAB_EVAL_ALLOW_GENERATION=0
 BRAINOS_LAB_CONCURRENCY=1
 GRADIO_SERVER_NAME=0.0.0.0
-PYTHONPATH=src
 ```
 
-4. `requirements.txt` for Vercel: same as HF but add `fastapi`, `uvicorn`. Ensure `gradio>=6.0` compatible with `fastapi`.
+4. Vercel now uses `requirements-vercel.txt` plus a build-time asset preparation and startup check. The full HF requirements exceeded the reported 225 MB cap. See `docs/vercel-deployment.md` for the current size-bounded configuration.
 
 **Limitations of minimal lift:**
 - Sessions lost on cold start / different instance (no sticky)
