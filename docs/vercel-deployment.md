@@ -22,6 +22,16 @@ Best for: demo, landing page, portfolio.
 - `api/index.py` - Vercel entry, sets `BRAINOS_LAB_DB=:memory:` and mounts Gradio via FastAPI
 - `src/app/vercel_app.py` - FastAPI-native REST API (`/api/chat`, `/api/health`, etc.) + optional Gradio mount
 - `vercel.json` - rewrites + function config
+- `pyproject.toml` - `[tool.vercel] entrypoint = "api.index:app"` names the entrypoint, so the builder is told where the app lives instead of guessing between the two candidate files it finds
+
+> **`app` has to be assigned at module scope.** Vercel finds the application by a
+> *static* read of the entrypoint: it recognises a statement in the module body
+> and nothing else, so an assignment inside `try:` / `except:` is invisible even
+> though it is the first thing Python executes. That is why `api/index.py` ends
+> with `app = _build_app()` and the error handling lives inside `_build_app()`.
+> The object must also *be* a FastAPI application — the runtime half of the check
+> imports the module and asks — which is why the degraded fallback is a real
+> `FastAPI()` instance and not a bare ASGI function.
 
 ### 2. Deploy via CLI
 
@@ -175,6 +185,34 @@ your-domain.com (Vercel Next.js) -> chat demo (Vercel Python)
 
 ## Troubleshooting Vercel
 
+### Build fails: `Found app.py, api/index.py but none define a top-level "app" FastAPI instance`
+
+The builder detected FastAPI (it is in `requirements.txt`) and then looked for the
+application. It scans its default entrypoint locations — `app.py`, `index.py`,
+`server.py`, `main.py`, `wsgi.py`, `asgi.py` at the project root or under `src/`,
+`app/`, `api/` — for a *module-level* assignment to `app`, and this repository has
+two of those files:
+
+* `app.py` is the Hugging Face Space launcher. It defines no ASGI app, and it
+  cannot: importing the UI at module scope closes an import cycle through
+  `src/evaluation` (see the comment in that file).
+* `api/index.py` is the Vercel entrypoint — the file that must define `app`.
+
+Fix, all three parts of which are now in the repository:
+
+1. `api/index.py` ends with a plain `app = _build_app()`. The `try` / `except`
+   around the real import lives inside `_build_app()`, not in the module body.
+2. `pyproject.toml` declares `[tool.vercel] entrypoint = "api.index:app"`, so the
+   builder is pointed at that file rather than left to choose between candidates
+   it cannot tell apart.
+3. `tests/unit/test_vercel_entrypoint.py` reproduces the check — a static AST
+   read plus an import that asserts `app` is a `FastAPI` instance — so a future
+   edit that re-nests the assignment fails CI instead of the deployment.
+
+If it still fails, confirm the value Vercel resolved: `vercel build` prints the
+entrypoint, and `python -c "import api.index; print(type(api.index.app))"` says
+what an import produces.
+
 ### Build fails on `brainos-cli @ git+...`
 
 Vercel's build log shows `Failed to build`. Fix:
@@ -218,7 +256,8 @@ Fix: Disable generation (`ALLOW_GENERATION=0`), limit to 5 tasks, or offload to 
 
 ## Checklist for Vercel Deploy
 
-- [ ] `api/index.py` exists and exports `app`
+- [ ] `api/index.py` exists and exports `app` **at module scope** (`app = _build_app()`)
+- [ ] `pyproject.toml` declares `[tool.vercel] entrypoint = "api.index:app"`
 - [ ] `vercel.json` rewrites to `/api/index`
 - [ ] `requirements.txt` includes `fastapi`, `uvicorn`
 - [ ] Env vars set: `BRAINOS_LAB_DB=:memory:`, `EVAL_ALLOW_GENERATION=0`
