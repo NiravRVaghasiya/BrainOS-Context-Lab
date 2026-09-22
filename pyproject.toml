@@ -43,6 +43,23 @@ brainos-context-lab = "app.ui:main"
 brainos-context-evaluate = "evaluation.run:main"
 brainos-context-pipeline = "evaluation.pipeline:main"
 
+# Vercel detects FastAPI from requirements.txt, then finds the application by
+# scanning its default entrypoint locations (app.py, index.py, server.py,
+# main.py, wsgi.py, asgi.py at the root or under src/, app/, api/) for a
+# *module-level* `app` assignment. This repository has two of those files and
+# only one is an ASGI app: the root app.py is the Hugging Face Space launcher,
+# which deliberately imports nothing at module scope (see its comment — a
+# module-scope UI import closes an import cycle through src/evaluation). The
+# scan cannot tell them apart, so the entrypoint is named instead of guessed:
+#
+#   Error: Found app.py, api/index.py but none define a top-level "app" FastAPI
+#   instance.
+#
+# api/index.py keeps `app = _build_app()` at column zero for the scan and still
+# answers /api/* on every path, including the degraded one.
+[tool.vercel]
+entrypoint = "api.index:app"
+
 [tool.setuptools]
 package-dir = {"" = "src"}
 
