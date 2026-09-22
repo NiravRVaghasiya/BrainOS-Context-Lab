@@ -277,6 +277,8 @@ Phases 1–19 are complete and validated against the pinned BrainOS runtime. Pha
 - [ ] Research-scale generated runs with a live model (§26 / Phase 20)
 - [ ] Published HF Space URL + tagged release
 
+Every MVP checklist item (§25, 14 steps from provider connect to export) is walkable and walked end-to-end by `tests/integration/test_mvp_walkthrough.py`; browser-run artifacts under `results/ui/` are kept for **7 days** by default and swept with `python -m app.retention` (see `BRAINOS_LAB_EVAL_RETENTION_DAYS` in Configuration).
+
 See [`CONTEXT.md`](./CONTEXT.md) for the living phase ledger and `docs/phase-*.md` for per-phase design notes. [`docs/limitations.md`](./docs/limitations.md) tracks known limitations.
 
 ## Contributing
