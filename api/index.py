@@ -67,10 +67,10 @@ if os.getenv("VERCEL") == "1":
 # ---------------------------------------------------------------------------
 try:
     from app.vercel_app import app  # noqa: F401 - Vercel expects `app`
-except Exception as exc:
+except Exception as _import_exc:  # noqa: BLE001 - fallback must catch all
     # Fallback: minimal FastAPI app that explains the failure
     # This ensures Vercel still returns 200 with diagnostic, not 500 crash
-    print(f"[api/index] Failed to import vercel_app: {exc}", file=sys.stderr)
+    print(f"[api/index] Failed to import vercel_app: {_import_exc}", file=sys.stderr)
     import traceback
 
     traceback.print_exc()
@@ -78,13 +78,17 @@ except Exception as exc:
     from fastapi import FastAPI
 
     app = FastAPI(title="BrainOS Context Lab - Fallback")
+    _fallback_detail = str(_import_exc)
 
     @app.get("/")
-    def fallback_root():
+    def fallback_root(detail: str = _fallback_detail):  # noqa: B008
         return {
             "error": "Failed to load BrainOS app",
-            "detail": str(exc),
-            "hint": "Check Vercel logs, ensure requirements.txt includes fastapi, gradio, openai, brainos-cli",
+            "detail": detail,
+            "hint": (
+                "Check Vercel logs, ensure requirements.txt includes "
+                "fastapi, gradio, openai, brainos-cli"
+            ),
             "env": {
                 "BRAINOS_LAB_DB": os.getenv("BRAINOS_LAB_DB"),
                 "VERCEL": os.getenv("VERCEL"),
@@ -93,8 +97,8 @@ except Exception as exc:
         }
 
     @app.get("/api/health")
-    def fallback_health():
-        return {"status": "degraded", "error": str(exc)}
+    def fallback_health(detail: str = _fallback_detail):  # noqa: B008
+        return {"status": "degraded", "error": detail}
 
 # Vercel expects `app` to be ASGI callable - we have it.
 __all__ = ["app"]
