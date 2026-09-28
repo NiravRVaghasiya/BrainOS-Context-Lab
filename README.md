@@ -1,3 +1,14 @@
+---
+title: BrainOS Context Lab
+emoji: 🧠
+colorFrom: blue
+colorTo: indigo
+sdk: gradio
+sdk_version: 6.28.0
+app_file: app.py
+short_description: Bring your model. Give it memory. Measure context cost.
+---
+
 # BrainOS Context Lab
 
 [![CI](https://github.com/NiravRVaghasiya/BrainOS-Context-Lab/actions/workflows/ci.yml/badge.svg)](https://github.com/NiravRVaghasiya/BrainOS-Context-Lab/actions/workflows/ci.yml)
